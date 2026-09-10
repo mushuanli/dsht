@@ -32,6 +32,18 @@ Main features:
 
 Use Node.js 22.19 or newer and an existing `dsh web` server. Copy the token from the URL printed by that server; the server is a separate prerequisite and is not launched by this client.
 
+Run the published package without cloning or building; `npx dsht` fetches it from the registry:
+
+```sh
+export DSH_URL=http://127.0.0.1:3080
+read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
+npx dsht
+```
+
+`npx dsht list workspaces --json` and `npx dsht list sessions --json` print workspace and session lists for scripts, and `npm install -g dsht` installs the `dsht` command. These registry commands require the package to be published.
+
+From a source checkout, install the dependencies and run the TypeScript entry:
+
 ```sh
 npm ci --ignore-scripts
 export DSH_URL=http://127.0.0.1:3080
@@ -39,15 +51,7 @@ read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
 npm start
 ```
 
-After this package is published to npm, run it without cloning or building:
-
-```sh
-npx dsht
-npx dsht list workspaces --json
-npx dsht list sessions --json
-```
-
-Use the same `DSH_URL` and first-login `DSH_TOKEN` environment variables. To install the command globally, use `npm install -g dsht`, then run `dsht`. Registry commands require a published package; the source commands above work from this checkout.
+Both paths read the same `DSH_URL` and first-login `DSH_TOKEN` variables.
 
 Select a workspace with ↑/↓ and Enter, then select a session or **New session**. **All sessions** also exposes sessions outside registered workspaces. **Add workspace** accepts an existing absolute directory on the host, which may differ from your local filesystem. Creating a session requires a selected workspace.
 
@@ -58,14 +62,16 @@ The host determines cookie expiration. An expired or rejected cookie requires `D
 ## List workspaces and sessions
 
 ```sh
-npm start -- list workspaces --json
-npm start -- list sessions --json
-npm start -- list sessions --workspace WORKSPACE_ID --json
+npx dsht list workspaces --json
+npx dsht list sessions --json
+npx dsht list sessions --workspace WORKSPACE_ID --json
 ```
 
-For scripts, invoke the source entry directly to avoid npm's script banners:
+From a source checkout, run the same commands through npm or through the source entry; the direct entry avoids npm's script banners:
 
 ```sh
+npm start -- list workspaces --json
+npm start -- list sessions --json
 node --import tsx src/cli.tsx list workspaces --json
 node --import tsx src/cli.tsx list sessions --json
 ```

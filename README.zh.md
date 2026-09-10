@@ -32,6 +32,18 @@
 
 需要 Node.js 22.19 或更新版本，以及已经运行的 `dsh web` 服务。从服务打印的 URL 中取得 token；服务是单独的前置条件，本客户端不会启动它。
 
+直接运行已发布的包，无需克隆或构建；`npx dsht` 会从 registry 获取它：
+
+```sh
+export DSH_URL=http://127.0.0.1:3080
+read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
+npx dsht
+```
+
+`npx dsht list workspaces --json` 和 `npx dsht list sessions --json` 供脚本获取工作区和会话列表，`npm install -g dsht` 会安装 `dsht` 命令。这些 registry 命令要求包已发布。
+
+若使用源码仓库，先安装依赖，再运行 TypeScript 入口：
+
 ```sh
 npm ci --ignore-scripts
 export DSH_URL=http://127.0.0.1:3080
@@ -39,15 +51,7 @@ read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
 npm start
 ```
 
-本包发布到 npm 后，无需克隆或构建即可运行：
-
-```sh
-npx dsht
-npx dsht list workspaces --json
-npx dsht list sessions --json
-```
-
-沿用相同的 `DSH_URL` 和首次登录的 `DSH_TOKEN` 环境变量。如需全局安装命令，执行 `npm install -g dsht`，然后运行 `dsht`。Registry 命令要求包已经发布；上面的源码命令可以直接在本地仓库中运行。
+两种方式读取相同的 `DSH_URL` 和首次登录的 `DSH_TOKEN` 变量。
 
 使用 ↑/↓ 和 Enter 选择工作区，然后选择已有会话或 **New session**。**All sessions** 同时显示未归属注册工作区的会话。**Add workspace** 接收服务端已有目录的绝对路径，该路径可能与本机文件系统不同。新建会话前必须选择工作区。
 
@@ -58,14 +62,16 @@ Cookie 有效期由服务端决定。过期或被拒绝后，需要再次提供 
 ## 列出工作区和会话
 
 ```sh
-npm start -- list workspaces --json
-npm start -- list sessions --json
-npm start -- list sessions --workspace WORKSPACE_ID --json
+npx dsht list workspaces --json
+npx dsht list sessions --json
+npx dsht list sessions --workspace WORKSPACE_ID --json
 ```
 
-脚本中直接调用源码入口，可以避免 npm 的脚本提示混入输出：
+在源码仓库中，可以通过 npm 或源码入口执行同样的命令；直接调用入口可以避免 npm 的脚本提示混入输出：
 
 ```sh
+npm start -- list workspaces --json
+npm start -- list sessions --json
 node --import tsx src/cli.tsx list workspaces --json
 node --import tsx src/cli.tsx list sessions --json
 ```
