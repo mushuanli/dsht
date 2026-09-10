@@ -1,0 +1,25 @@
+{
+  "wide": [
+    "❯ User",
+    "你好",
+    "",
+    "✦ Assistant · streaming",
+    "◇ Thinking",
+    "Detailed reasoning"
+  ],
+  "narrow": [
+    "❯ User",
+    "你好",
+    "",
+    "✦ Assistant · streaming",
+    "◇ /think live · Thinking Detailed reasoning"
+  ],
+  "expanded": [
+    "❯ User",
+    "你好",
+    "",
+    "✦ Assistant · streaming",
+    "◇ Thinking",
+    "Detailed reasoning"
+  ]
+}

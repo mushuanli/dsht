@@ -1,5 +1,6 @@
 /** UI state and connection generations for the standalone terminal client. */
 import { randomUUID } from 'node:crypto';
+import { saveSessionLog } from './export.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client, HttpError, RemoteError, type Subscription } from './client.ts';
 import { AuthenticationRequired } from './auth.ts';
@@ -523,12 +524,48 @@ export class Controller {
     return fileReferences(await this.host.call('fileReferences/list', { agentId: this.sessionId, query }, signal));
   }
 
-  /** Admit a prompt once; a failed response can have an uncertain delivery outcome. */
-  async prompt(text: string, mode: 'queue' | 'steer' = 'queue'): Promise<void> {
+  /** Execute a human command directly, outside the model prompt queue.
+   * @param line - Complete slash command, including arguments.
+   * @param signal - Cancels the request while the host performs compaction.
+   * @returns The host's successful command result text.
+   */
+  async command(line: string, signal: AbortSignal): Promise<string> {
+    if (!this.state.transcript.ready) throw new Error('Wait for the session snapshot before running commands');
+    const execution = await this.host.call('commands/execute', {
+      agentId: this.sessionId, line, submittedAttachments: [],
+    }, signal, null);
+    if (execution === undefined) throw new Error(`This host does not provide ${line.split(/\s/, 1)[0]}`);
+    const result = object(object(execution).result);
+    if ((result.kind !== 'success' && result.kind !== 'error') || (result.text !== undefined && typeof result.text !== 'string')) {
+      throw new Error('Invalid command result from host');
+    }
+    if (result.kind === 'error') throw new Error(string(result.text));
+    return result.text === undefined ? 'Command completed.' : string(result.text);
+  }
+
+  /** Remove one host-owned pending input; an already claimed item reports a host error.
+   * @param itemId - Queue occurrence identity from session/control.
+   */
+  async removeQueued(itemId: string): Promise<void> {
+    await this.host.call('session/updateQueue', { request: { sessionId: this.sessionId, itemId, action: { kind: 'remove' } } });
+  }
+
+  /** Export the selected host log to a new local ZIP file.
+   * @param path - Optional local destination; existing files are never overwritten.
+   * @param signal - Cancels the download and removes an incomplete file.
+   * @returns Absolute saved filename.
+   */
+  async exportLog(path: string | undefined, signal: AbortSignal): Promise<string> {
+    return saveSessionLog(this.host, this.sessionId, path, signal);
+  }
+
+  /** Admit text once as steering while running, or a new turn while idle; a lost response can leave delivery uncertain. */
+  async prompt(text: string): Promise<void> {
+    if (this.state.pending.length) throw new Error('Answer the pending question or approval first');
     this.stoppingSession = undefined;
     if (!this.state.transcript.ready) throw new Error('Wait for the session snapshot before sending');
     const admission = this.host.call('session/prompt', { request: {
-      sessionId: this.sessionId, requestId: randomUUID(), mode,
+      sessionId: this.sessionId, requestId: randomUUID(), mode: this.running ? 'steer' : 'queue',
       content: [{ type: 'text', text }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     } });
     this.admission = admission;

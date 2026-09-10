@@ -35,6 +35,12 @@ export async function host() {
   let onPage: (() => Promise<ObjectValue>) | undefined;
   let searchResult: ObjectValue = { items: [{ sessionId: 's1', snippet: '你好' }, { sessionId: 's2', snippet: '你好 too' }], hasMore: false };
   let followSnapshot: ObjectValue = snapshot;
+  let onCommand: ((line: string) => Promise<ObjectValue | undefined>) | undefined;
+  let queuePrompts = false;
+  let queue: ObjectValue[] = [];
+  let exportDelayMs = 0;
+  let exportRequests = 0;
+  let exportBody: Buffer = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]);
   let onPrompt: (() => Promise<void>) | undefined;
   let onCancel: (() => Promise<void>) | undefined;
   let wrongIdentity = false;
@@ -52,6 +58,18 @@ export async function host() {
         return;
       }
       if (request.headers.cookie !== `dsh-auth-fixture=${cookie}`) { response.writeHead(401).end(); return; }
+      if (url.pathname === '/api/session.export') {
+        assert.equal(request.method, 'GET');
+        assert.equal(url.searchParams.get('sessionId'), 's1');
+        exportRequests++;
+        response.writeHead(200, { 'content-type': 'application/zip' });
+        if (exportDelayMs) {
+          response.write(exportBody.subarray(0, 4));
+          const timer = setTimeout(() => response.end(exportBody.subarray(4)), exportDelayMs);
+          response.on('close', () => clearTimeout(timer));
+        } else response.end(exportBody);
+        return;
+      }
       assert.equal(request.method, 'POST');
       let raw = '';
       for await (const chunk of request) raw += chunk;
@@ -94,12 +112,35 @@ export async function host() {
           value = { archivedSessionIds }; break;
         }
         case 'workspace/create': assert.equal(typeof object(args.request).path, 'string'); value = { workspace, created: false }; break;
+        case 'commands/execute':
+          assert.deepEqual(args, { agentId: 's1', line: args.line, submittedAttachments: [] });
+          assert.equal(typeof args.line, 'string');
+          value = onCommand ? await onCommand(String(args.line)) : { commandId: 'compact-1', result: { kind: 'success', text: 'Compacted 8 history items (~1200 tokens).' } };
+          break;
         case 'session/prompt': {
           const prompt = object(args.request);
           await onPrompt?.();
           assert.equal(typeof prompt.requestId, 'string');
           assert.equal(typeof prompt.sessionId, 'string');
           assert.equal(array(prompt.content).length, 1);
+          if (queuePrompts) {
+            queue.push({ id: `m-${prompt.requestId}`, rpcId: String(prompt.requestId), placement: prompt.mode === 'steer' ? 'steering' : 'queued',
+              message: { id: `m-${prompt.requestId}`, content: array(prompt.content) } });
+            for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId, value: { type: 'queue', sessionId: 's1', items: queue } }));
+          }
+          value = { accepted: true }; break;
+        }
+        case 'session/updateQueue': {
+          const change = object(args.request);
+          assert.equal(change.sessionId, 's1');
+          assert.deepEqual(change.action, { kind: 'remove' });
+          if (!queue.some(item => item.id === change.itemId)) {
+            value = undefined;
+            response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId,
+              result: { ok: false, error: { code: 'session/queue-item-not-found', message: 'queued item is no longer pending' } } })); return;
+          }
+          queue = queue.filter(item => item.id !== change.itemId);
+          for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId, value: { type: 'queue', sessionId: 's1', items: queue } }));
           value = { accepted: true }; break;
         }
         case 'session/cancel': assert.equal(typeof object(args.request).sessionId, 'string'); await onCancel?.(); value = { accepted: true }; break;
@@ -160,6 +201,11 @@ export async function host() {
     set onPage(value: (() => Promise<ObjectValue>) | undefined) { onPage = value; },
     set searchResult(value: ObjectValue) { searchResult = value; },
     set followSnapshot(value: ObjectValue) { followSnapshot = value; },
+    set queuePrompts(value: boolean) { queuePrompts = value; },
+    get exportRequests() { return exportRequests; },
+    set exportDelayMs(value: number) { exportDelayMs = value; },
+    set exportBody(value: Buffer) { exportBody = value; },
+    set onCommand(value: ((line: string) => Promise<ObjectValue | undefined>) | undefined) { onCommand = value; },
     set onPrompt(value: (() => Promise<void>) | undefined) { onPrompt = value; },
     set onCancel(value: (() => Promise<void>) | undefined) { onCancel = value; },
     set controlAvailable(value: boolean) { controlAvailable = value; },

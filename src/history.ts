@@ -105,7 +105,7 @@ function partRows(parts: MessagePart[], width: number, reasoning: Reasoning, seq
   return parts.flatMap(part => {
     const cached = seq === undefined ? liveRows.get(part) : undefined;
     if (cached?.width === width && cached.reasoning === reasoning) return cached.rows;
-    const fold = part.kind === 'reasoning' && reasoning === 'row' && (seq !== undefined || part.closed);
+    const fold = part.kind === 'reasoning' && reasoning === 'row' && (seq !== undefined || part.closed || width < 60);
     const text = fold ? toolLine(`◇ /think${seq === undefined ? ' live' : ` ${seq}`} · ${part.text.slice(2)}`, width) : part.text;
     const rows = wrapAnsi(text, width, { hard: true, trim: !['tool', 'success', 'error'].includes(part.kind) }).split('\n').map(text => ({ text, kind: part.kind, seq }));
     if (seq === undefined) liveRows.set(part, { width, reasoning, rows });
@@ -138,7 +138,7 @@ export function releaseHistoryLayout(transcript: Transcript): void {
  * @param width - Available terminal columns.
  * @param reasoning - Global committed/completed reasoning fold mode.
  * @param overrides - Sequences whose fold mode differs from the global mode; replace the set on changes.
- * @param liveReasoning - Fold mode for completed blocks in the unfinished assistant attempt.
+ * @param liveReasoning - Fold mode for completed live blocks; below 60 content columns it also folds active reasoning.
  * @returns Row count, sequence offsets, and a viewport reader; `lines` materializes all rows for exports only.
  */
 export function historyLayout(transcript: Transcript, width: number, reasoning: Reasoning = 'row', overrides = noOverrides, liveReasoning: Reasoning = reasoning) {

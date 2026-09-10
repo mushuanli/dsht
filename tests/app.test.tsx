@@ -2,7 +2,9 @@
 import './no-color.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import React, { act, useEffect } from 'react';
 import { render } from 'ink-testing-library';
 import { App, COMMAND_HINTS, commonPrefix } from '../src/app.tsx';
@@ -185,7 +187,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
     sessionStats: { turns: 42 },
     contextPressure: { projectedTokens: 25, contextWindow: 100 },
     tokenUsage: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 300, cacheWriteTokens: 400 },
-  } } }, queues: { s1: [1, 2] }, jobs: { s1: [{ status: 'running' }] } };
+  } } }, queues: { s1: [1, 2].map(id => ({ id: String(id), placement: 'steering', message: { id: String(id), content: [{ type: 'text', text: `Pending ${id}` }] } })) }, jobs: { s1: [{ status: 'running' }] } };
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
@@ -530,6 +532,7 @@ test('a slash-command panel stays open for reading and closes on another command
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   const ui = render(<App controller={controller} panelLifetimeMs={150} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  Object.defineProperty(ui.stdout, 'rows', { value: 60, configurable: true });
   controller.start();
   await until(() => controller.state.transcript.ready);
   await pressKey(ui, '/help'); await pressKey(ui, '\r');
@@ -938,7 +941,7 @@ test('question options support numbers, arrows, multi-selection and numeric cust
 test('advancing questions preserves every option label beside descriptions in a long session', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 49, hasMore: false, header: { id: 's1' }, assistantStream: { revision: 0 },
-    records: Array.from({ length: 50 }, (_, seq) => ({ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: `Old prompt ${seq} ${'history '.repeat(30)}` }] } } })) };
+    records: Array.from({ length: 50 }, (_, seq) => ({ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: seq === 49 ? 'Recent decision context' : `Old prompt ${seq} ${'history '.repeat(30)}` }] } } })) };
   fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'two-decisions', agentId: 's1', request: { questions: [
     { id: 'first', question: 'Commit locally?', options: [{ label: 'Commit' }, { label: 'Wait' }] },
     { id: 'second', header: 'After commit', question: 'After committing, how far should I go? (currently local only, version 0.2.2)', options: [
@@ -956,7 +959,7 @@ test('advancing questions preserves every option label beside descriptions in a 
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('After committing, how far') === true);
   const frame = ui.lastFrame()!;
-  for (const text of ['Question 2/2 · After commit', '❯ 1. Push only', '2. Publish release', '3. Keep local', '4. Other answer', 'Irreversible.']) {
+  for (const text of ['Recent decision context', 'Question 2/2 · After commit', '❯ 1. Push only', '2. Publish release', '3. Keep local', '4. Other answer', 'Irreversible.']) {
     assert.ok(frame.includes(text), `${text}\n${frame}`);
   }
   await pressKey(ui, '\u001b[B');
@@ -965,6 +968,7 @@ test('advancing questions preserves every option label beside descriptions in a 
   ui.rerender(<App controller={controller} />);
   await pressKey(ui, '\u001b[B');
   assert.match(ui.lastFrame()!, /❯ 3\. Keep local/);
+  assert.match(ui.lastFrame()!, /Recent decision context/);
   assert.match(ui.lastFrame()!, /Enter confirm/);
   await pressKey(ui, '\u001b[B');
   assert.match(ui.lastFrame()!, /❯ 4\. Other answer/);
@@ -1043,4 +1047,231 @@ test('left click freezes the display for native selection until explicit resume'
   await until(() => ui.lastFrame()?.includes('Received while selecting') === true);
   assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+});
+
+test('/compact displays host progress and outcomes without sending a prompt', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  let complete!: (value: ObjectValue) => void;
+  fixture.onCommand = () => new Promise(resolve => { complete = resolve; });
+  await pressKey(ui, '/compact'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Compacting history…') === true && !!complete);
+  complete({ commandId: 'c1', result: { kind: 'success', text: 'Compacted 8 history items (~1200 tokens).' } });
+  await until(() => !controller.state.busy && ui.lastFrame()?.includes('Compacted 8 history items') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /❯ \/compact/);
+  fixture.onCommand = async () => ({ commandId: 'c2', result: { kind: 'error', text: 'Compaction is unavailable: agent is not idle.' } });
+  await pressKey(ui, '/compact'); await pressKey(ui, '\r');
+  await until(() => !controller.state.busy && controller.state.error.includes('not idle'));
+  assert.match(ui.lastFrame()!, /❯ \/compact/);
+  fixture.onCommand = async () => undefined;
+  await pressKey(ui, '\r');
+  await until(() => controller.state.error.includes('does not provide /compact'));
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('Esc cancels the compact request and retains the command draft', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  let complete!: (value: ObjectValue) => void;
+  fixture.onCommand = () => new Promise(resolve => { complete = resolve; });
+  t.after(async () => { complete?.({ commandId: 'c1', result: { kind: 'error', text: 'Compaction cancelled.' } }); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/compact'); await pressKey(ui, '\r');
+  await until(() => !!complete && controller.state.busy);
+  await pressKey(ui, '\u001b');
+  await until(() => !controller.state.busy);
+  assert.match(ui.lastFrame()!, /❯ \/compact/);
+  assert.doesNotMatch(ui.lastFrame()!, /Compacting history…/);
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+});
+
+test('narrow terminals fold streaming reasoning until /think live opens it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  Object.defineProperty(ui.stdout, 'columns', { value: 40, configurable: true });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  fixture.follow({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'narrow', revision: 1 } });
+  fixture.follow({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'narrow', revision: 2, index: 0,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'Thinking\nhidden reasoning detail' } } });
+  await until(() => ui.lastFrame()?.includes('/think live') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /hidden reasoning detail/);
+  await pressKey(ui, '/think live'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('hidden reasoning detail') === true);
+  await pressKey(ui, '/think live'); await pressKey(ui, '\r');
+  await until(() => !ui.lastFrame()?.includes('hidden reasoning detail'));
+});
+
+test('host slash commands execute directly and preserve error drafts', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.onCommand = async line => ({ commandId: 'command-1', result: { kind: 'success', text: `Completed ${line}` } });
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.running);
+  for (const line of ['/plan outline this change', '/plan off', '/goal finish the task', '/goal pause', '/goal resume', '/permission workspace-write', '/feedback useful result']) {
+    await pressKey(ui, line); await pressKey(ui, '\r');
+    await until(() => !controller.state.busy && ui.lastFrame()?.includes(`Completed ${line}`) === true);
+    assert.equal(object(object(fixture.calls.filter(call => call.method === 'commands/execute').at(-1)!.payload).args).line, line);
+  }
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+  fixture.onCommand = async () => ({ commandId: 'command-2', result: { kind: 'error', text: 'Unknown permission preset' } });
+  await pressKey(ui, '/permission nope'); await pressKey(ui, '\r');
+  await until(() => controller.state.error.includes('Unknown permission preset'));
+  assert.match(ui.lastFrame()!, /❯ \/permission nope/);
+  assert.ok(!COMMAND_HINTS.some(hint => hint.command === '/steer'));
+});
+
+test('working input automatically steers, stays inside the composer, and can be removed', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, 'start this task'); await pressKey(ui, '\r');
+  await until(() => !controller.state.busy);
+  fixture.queuePrompts = true;
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.running);
+  for (const text of ['also check tests', 'skip the build']) {
+    await pressKey(ui, text); await pressKey(ui, '\r');
+    await until(() => !controller.state.busy && controller.telemetry.pending('s1').some(item => item.text === text));
+  }
+  const modes = fixture.calls.filter(call => call.method === 'session/prompt').map(call => object(object(object(call.payload).args).request).mode);
+  assert.deepEqual(modes, ['queue', 'steer', 'steer']);
+  assertInsideComposer(ui.lastFrame()!, 'also check tests');
+  assertInsideComposer(ui.lastFrame()!, 'skip the build');
+  for (const line of (await readFile(new URL('./expected/pending-input.txt', import.meta.url), 'utf8')).trimEnd().split('\n')) assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
+  const pending = controller.telemetry.pending('s1');
+  await pressKey(ui, '/queue'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Pending input · Esc close') === true);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, 'd');
+  await until(() => !controller.state.busy && controller.telemetry.pending('s1').length === 1);
+  assert.equal(controller.telemetry.pending('s1')[0]!.id, pending[0]!.id);
+  const request = object(object(object(fixture.calls.find(call => call.method === 'session/updateQueue')!.payload).args).request);
+  assert.deepEqual(request, { sessionId: 's1', itemId: pending[1]!.id, action: { kind: 'remove' } });
+  await pressKey(ui, '\u001b');
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+  fixture.control({ type: 'queue', sessionId: 's1', items: [] });
+  await until(() => !ui.lastFrame()?.includes('Waiting:'));
+  assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 3);
+});
+
+test('questions and approvals take precedence over the pending-input picker', async t => {
+  const fixture = await host(); t.after(() => fixture.close()); fixture.queuePrompts = true;
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.running);
+  await pressKey(ui, 'pending instruction'); await pressKey(ui, '\r');
+  await until(() => !controller.state.busy && controller.telemetry.pending('s1').length === 1);
+  await pressKey(ui, '/queue'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Pending input · Esc close') === true);
+  fixture.emit({ type: 'waterfall', event: 'user-questions/request', eventId: 'question-with-queue', agentId: 's1', request: { questions: [
+    { id: 'q', question: 'Choose an action', options: [{ label: 'Keep' }, { label: 'Change' }] },
+  ] } });
+  await until(() => ui.lastFrame()?.includes('Choose an action') === true);
+  await assert.rejects(controller.prompt('stale composer submission'), /pending question or approval/);
+  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0 && !controller.state.busy);
+  const answer = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
+  assert.deepEqual(object(answer.outcome).value, { answers: [{ id: 'q', selected: ['Change'] }] });
+  fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'approval-with-queue', agentId: 's1', request: { description: 'Confirm operation' } });
+  await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  await pressKey(ui, '/allow'); await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0 && !controller.state.busy);
+  const approval = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
+  assert.equal(object(approval.outcome).value, 'allowed-once');
+  assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
+  assert.equal(fixture.calls.some(call => call.method === 'session/updateQueue'), false);
+  assert.equal(controller.telemetry.pending('s1').length, 1);
+});
+
+test('help pages keep later slash commands accessible in a short terminal', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  Object.defineProperty(ui.stdout, 'rows', { value: 20, configurable: true });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Help 1/') === true);
+  const count = Math.ceil(COMMAND_HINTS.length / 8);
+  for (let page = 1; page < count; page++) await pressKey(ui, '\u001b[6~');
+  assert.match(ui.lastFrame()!, /\/quit/);
+  assert.match(ui.lastFrame()!, new RegExp(`Help ${count}/${count}`));
+  await pressKey(ui, '\u001b[5~');
+  assert.match(ui.lastFrame()!, new RegExp(`Help ${count - 1}/${count}`));
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('/export saves the session ZIP to the requested local path', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const root = await mkdtemp(join(tmpdir(), 'dsht-export-ui-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 42]); fixture.exportBody = bytes;
+  const path = join(root, 'session log.zip');
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, `/export "${path}"`); await pressKey(ui, '\r');
+  await until(() => !controller.state.busy && ui.lastFrame()?.includes('Saved session log:') === true);
+  assert.deepEqual(await readFile(path), bytes);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('questions, approvals and model dialogs retain recent context above the composer', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 12, hasMore: false, header: { id: 's1' }, assistantStream: { revision: 0 }, records: [
+    ...Array.from({ length: 12 }, (_, seq) => ({ type: 'event', event: { type: 'user/message', seq, surfaceOp: 'append', data: { content: [{ type: 'text', text: `Earlier context ${seq}` }] } } })),
+    { type: 'event', event: { type: 'assistant/message', seq: 12, surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: 'Recent decision context' }] } } } },
+  ] };
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  Object.defineProperty(ui.stdout, 'columns', { value: 40, configurable: true });
+  Object.defineProperty(ui.stdout, 'rows', { value: 24, configurable: true });
+  controller.start(); await until(() => ui.lastFrame()?.includes('Recent decision context') === true);
+  fixture.emit({ type: 'waterfall', event: 'user-questions/request', eventId: 'context-question', agentId: 's1', request: { questions: [
+    { id: 'q', question: 'Continue with this approach?', options: [{ label: 'Continue' }, { label: 'Revise' }] },
+  ] } });
+  await until(() => ui.lastFrame()?.includes('Continue with this approach?') === true);
+  const questionFrame = ui.lastFrame()!;
+  assert.ok(questionFrame.indexOf('Recent decision context') >= 0, questionFrame);
+  assert.ok(questionFrame.indexOf('Recent decision context') < questionFrame.indexOf('╭'), questionFrame);
+  assert.match(questionFrame, /❯ 1\. Continue/);
+  assert.match(questionFrame, /2\. Revise/);
+  await pressKey(ui, '\u001b[<64;10;5M');
+  assert.doesNotMatch(ui.lastFrame()!, /Recent decision context/);
+  assert.match(ui.lastFrame()!, /❯ 1\. Continue/);
+  await pressKey(ui, '\u001b[<65;10;5M');
+  assert.match(ui.lastFrame()!, /Recent decision context/);
+  await pressKey(ui, '\u001b[<0;10;5M');
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+  await pressKey(ui, '\u001b[5~');
+  assert.doesNotMatch(ui.lastFrame()!, /Recent decision context/);
+  assert.match(ui.lastFrame()!, /Earlier context/);
+  assert.match(ui.lastFrame()!, /❯ 1\. Continue/);
+  await pressKey(ui, '\u001b[6~');
+  assert.match(ui.lastFrame()!, /Recent decision context/);
+  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0 && !controller.state.busy);
+  fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'context-approval', agentId: 's1', request: { description: 'Confirm operation' } });
+  await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  assert.match(ui.lastFrame()!, /Recent decision context/);
+  await pressKey(ui, '/deny'); await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0 && !controller.state.busy);
+  await pressKey(ui, '/model'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Choose model') === true);
+  assert.match(ui.lastFrame()!, /Recent decision context/);
 });

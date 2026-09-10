@@ -1,5 +1,6 @@
 /** History navigation operates on visible record sequences and SGR input packets. */
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { historyLayout } from '../src/history.ts';
 import { isMouseReport, wheelDirection } from '../src/mouse.ts';
@@ -124,4 +125,22 @@ test('assistant headings group by user across tools, context, streaming and olde
   layout = historyLayout(transcript, 80);
   assert.equal(layout.viewport(0, 1)[0]?.text, '✦ Assistant');
   assert.equal(labels().length, 2);
+});
+
+test('live reasoning folds below 60 content columns and expands on explicit request', () => {
+  const transcript = new Transcript(); transcript.accept(snapshot);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'Thinking\nDetailed reasoning' } } });
+  assert.ok(historyLayout(transcript, 60).lines.includes('Detailed reasoning'));
+  const narrow = historyLayout(transcript, 59).lines;
+  assert.ok(narrow.some(line => line.includes('/think live')));
+  assert.ok(!narrow.includes('Detailed reasoning'));
+  assert.ok(historyLayout(transcript, 59, 'row', new Set(), 'full').lines.includes('Detailed reasoning'));
+  assert.ok(historyLayout(transcript, 60).lines.includes('Detailed reasoning'));
+  assert.deepEqual({
+    wide: historyLayout(transcript, 60).lines,
+    narrow: historyLayout(transcript, 59).lines,
+    expanded: historyLayout(transcript, 59, 'row', new Set(), 'full').lines,
+  }, JSON.parse(readFileSync(new URL('./expected/narrow-reasoning.json', import.meta.url), 'utf8')));
 });

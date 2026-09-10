@@ -77,17 +77,35 @@ export class Client {
     return this.expiresAt === undefined ? undefined : { cookie: this.cookie, expiresAt: this.expiresAt };
   }
 
+  /** Download the authenticated host ZIP without using a mutation or ordinary RPC deadline.
+   * @param sessionId - Selected session identity.
+   * @param signal - Cancels the streaming response.
+   * @returns Response whose body the caller must consume or cancel.
+   */
+  async sessionLog(sessionId: string, signal: AbortSignal): Promise<Response> {
+    const url = new URL('/api/session.export', this.base);
+    url.searchParams.set('sessionId', sessionId);
+    const response = await fetch(url, { redirect: 'error', headers: { cookie: this.cookie },
+      signal: AbortSignal.any([this.lifetime.signal, signal]) });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new HttpError(response.status, 'Session log export');
+    }
+    return response;
+  }
+
   /** Invoke an exact endpoint once. Mutations are never automatically retried.
    * @param endpoint - Namespace/method endpoint.
    * @param args - Host parameter names and JSON values.
    * @param signal - Optional caller cancellation, combined with client close and timeout.
+   * @param timeoutMs - Per-call timeout; null waits for caller cancellation or client close.
    * @returns The decoded result value; HTTP, remote, and cancellation errors reject.
    */
-  async call(endpoint: string, args: ObjectValue = {}, signal?: AbortSignal): Promise<Json | undefined> {
+  async call(endpoint: string, args: ObjectValue = {}, signal?: AbortSignal, timeoutMs: number | null = this.timeoutMs): Promise<Json | undefined> {
     if (!/^[\w$-]+\/[\w$-]+$/.test(endpoint)) throw new Error('Invalid RPC endpoint');
     const rpcId = randomUUID();
     const response = await fetch(new URL(`/api/${endpoint}`, this.base), {
-      method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([this.signal(), signal]) : this.signal(),
+      method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([this.signal(timeoutMs), signal]) : this.signal(timeoutMs),
       headers: { 'content-type': 'application/json', cookie: this.cookie },
       body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } }),
     });
@@ -203,8 +221,8 @@ export class Client {
     }
   }
 
-  private signal(): AbortSignal {
-    return AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(this.timeoutMs)]);
+  private signal(timeoutMs: number | null = this.timeoutMs): AbortSignal {
+    return timeoutMs === null ? this.lifetime.signal : AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(timeoutMs)]);
   }
   private fail(error: Error): void {
     const listeners = [...this.listeners.values()];

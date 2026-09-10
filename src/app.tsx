@@ -38,8 +38,14 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/search', usage: 'text', description: 'Search history page by page and open a match' },
   { command: '/ssearch', usage: 'text', description: 'Search sessions in the current workspace' },
   { command: '/wsearch', usage: 'text', description: 'Search sessions across all workspaces' },
+  { command: '/compact', description: 'Compact older history while the session is idle' },
   { command: '/cancel', description: 'Cancel the active turn' },
-  { command: '/steer', usage: 'text', description: 'Send steering input to the active turn' },
+  { command: '/queue', description: 'View and remove pending input' },
+  { command: '/plan', usage: '[off|message]', description: 'Enter or leave host plan mode' },
+  { command: '/goal', usage: '[action|objective]', description: 'View or manage the host task goal' },
+  { command: '/permission', usage: '[preset]', description: 'View or switch the host permission preset' },
+  { command: '/feedback', usage: 'text', description: 'Record feedback about the session' },
+  { command: '/export', usage: '[local.zip]', description: 'Save the session log ZIP to a new local file' },
   { command: '/allow', description: 'Approve the pending request once' },
   { command: '/deny', description: 'Reject the pending request' },
   { command: '/status', description: 'Show full session status details' },
@@ -75,7 +81,7 @@ const Frozen = memo(function Frozen({ children }: { children: ReactNode; frozen:
 
 interface Choice { key: string; label: string; action(): void; remove?(): void }
 
-function Picker({ choices, enabled, canSelect, pageSize = 12 }: { choices: Choice[]; enabled: boolean; canSelect(): boolean; pageSize?: number }) {
+function Picker({ choices, enabled, canSelect, pageSize = 12, hint }: { choices: Choice[]; enabled: boolean; canSelect(): boolean; pageSize?: number; hint?: string }) {
   const theme = useTheme();
   const copyMode = useContext(CopyMode);
   const [selected, setSelected] = useState(0);
@@ -100,7 +106,7 @@ function Picker({ choices, enabled, canSelect, pageSize = 12 }: { choices: Choic
       color={start + index === current ? theme.accent : undefined}>
       {start + index === current ? '❯ ' : '  '}{safeText(choice.label)}
     </Text>)}
-    <Text dimColor>↑ ↓ select · Enter open{choices.some(choice => choice.remove) ? ' · d/Delete remove / archive' : ''} · Ctrl+C stop / exit</Text>
+    <Text dimColor>{hint ?? `↑ ↓ select · Enter open${choices.some(choice => choice.remove) ? ' · d/Delete remove / archive' : ''} · Ctrl+C stop / exit`}</Text>
   </Box>;
 }
 
@@ -131,7 +137,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     draft.current = value; updateInput(value); setCursor(value.length);
   };
   const [historyWindow, setHistoryWindow] = useState<Transcript>();
-  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState<string>();
   const [historyMatches, setHistoryMatches] = useState<HistorySearch>();
   const displayTranscript = historyWindow ?? state.transcript;
   const displayRef = useRef(displayTranscript); displayRef.current = displayTranscript;
@@ -149,6 +155,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [removal, setRemoval] = useState<RemovalTarget>();
   const [models, setModels] = useState<{ catalog: ObjectValue; provider?: string; model?: ObjectValue }>();
   const [thoughtList, setThoughtList] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
   const [historyQuery, setHistoryQuery] = useState<string>();
   const [contentSearch, setContentSearch] = useState(false);
   const [searchResults, setSearchResults] = useState<{ query: string; items: ObjectValue[]; hasMore: boolean }>();
@@ -162,6 +169,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   useEffect(() => { setLiveReasoning('row'); }, [state.transcript, state.transcript.liveAttemptKey]);
   const [notice, setNotice] = useState<string>();
   const [help, setHelp] = useState(false);
+  const [helpPage, setHelpPage] = useState(0);
+  const helpPageSize = Math.max(1, (stdout.rows ?? 30) - 12);
+  const helpPages = Math.ceil(COMMAND_HINTS.length / helpPageSize);
+  const currentHelpPage = Math.min(helpPage, helpPages - 1);
   const [answers, setAnswers] = useState<Record<string, ObjectValue[]>>({});
   const [optionState, setOptionState] = useState<{ key: string; cursor: number; selected: string[]; custom: boolean }>();
   const [referenceIndex, setReferenceIndex] = useState(0);
@@ -175,11 +186,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     return () => clearTimeout(timer);
   }, [notice, panelLifetimeMs, copyMode]);
   const pending = state.pending[0];
+  const queued = controller.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
+  useEffect(() => { setQueueOpen(false); }, [state.sessionId, pending?.eventId]);
   const token = state.screen === 'chat' && state.online && !state.busy && !pending
-    && (!input.startsWith('/') || input.startsWith('/steer ')) && dismissedReference !== input && cursor === input.length
+    && !input.startsWith('/') && dismissedReference !== input && cursor === input.length
     ? activeReference(input) : undefined;
   const referenceOpen = token !== undefined;
-  const dialogOpen = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || costExpanded || statusExpanded || help || pending || referenceOpen || state.screen !== 'chat');
+  const dialogOpen = !!(queueOpen || removal || models || thoughtList || historyQuery !== undefined || searchResults || costExpanded || statusExpanded || help || pending || referenceOpen || state.screen !== 'chat');
   const displayPaused = copyMode || dialogOpen;
   const matches = referenceOpen && lookup?.draft === input && lookup.sessionId === state.sessionId ? lookup : undefined;
   useEffect(() => {
@@ -276,6 +289,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         operate(() => answerQuestion(selected)); return;
       }
     }
+    if (help && (key.pageUp || key.pageDown)) {
+      setHelpPage(Math.max(0, Math.min(helpPages - 1, currentHelpPage + (key.pageUp ? -1 : 1)))); return;
+    }
+    if (key.pageUp || key.pageDown) { scrollHistory(key.pageUp ? 10 : -10); return; }
+    if (key.escape && queueOpen) { setQueueOpen(false); return; }
     if (key.escape && removal) { setRemoval(undefined); return; }
     if (key.escape && models) { setModels(undefined); return; }
     if (key.escape && thoughtList) { setThoughtList(false); if (controller.running) void controller.interrupt(true); return; }
@@ -297,7 +315,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
     const recallNext = key.downArrow || key.ctrl && _value === 'n';
     if ((recallPrevious || recallNext) && state.online && !controller.state.busy && !pending
-      && !removal && !models && !thoughtList && historyQuery === undefined && !searchResults && !help && !costExpanded && !statusExpanded
+      && !queueOpen && !removal && !models && !thoughtList && historyQuery === undefined && !searchResults && !help && !costExpanded && !statusExpanded
       && (state.screen === 'chat' || draft.current !== '' || key.ctrl)) {
       setInput(inputHistory.current.move(recallPrevious ? -1 : 1, draft.current), true); return;
     }
@@ -308,8 +326,6 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       return;
     }
     if (key.escape && state.screen === 'chat') { void controller.interrupt(true); }
-    if (key.pageUp) scrollHistory(10);
-    if (key.pageDown) scrollHistory(-10);
   });
 
   const submit = async (raw: string) => {
@@ -317,9 +333,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (copyMode) return;
     const value = raw.trim();
     if (!value) return;
-    if (!pending) inputHistory.current.record(value);
+    if (!pending && !/^\/feedback(?:\s|$)/.test(value)) inputHistory.current.record(value);
     if (value === '/copy') { setInput(''); setCopyMode(true); return; }
     setRemoval(undefined);
+    if (value !== '/queue') setQueueOpen(false);
     // Each panel belongs to the command that opened it, so any other command closes it.
     if (!/^\/model(?: |$)/.test(value)) setModels(undefined);
     if (value !== '/help') setHelp(false);
@@ -333,7 +350,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       return;
     }
     if (value === '/status') { setStatusExpanded(value => !value); setInput(''); return; }
-    if (value === '/help') { setHelp(value => !value); setInput(''); return; }
+    if (value === '/help') { setHelp(value => !value); setHelpPage(0); setInput(''); return; }
     const accepted = await controller.perform(async () => {
       const navigation = navigationCommand(value);
       if (navigation && /^--(?:delete|archive)(?:\s|$)/.test(navigation.query ?? '')) {
@@ -361,6 +378,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           if (args.length < 2 || args.length > 3) throw new Error('Use /model [provider model [effort]]');
           await controller.selectModel(args[0]!, args[1]!, args[2]); setModels(undefined);
         }
+      }
+      else if (value === '/queue') {
+        if (state.screen !== 'chat') throw new Error('Select a session first');
+        if (pending) throw new Error('Answer the pending question or approval first');
+        setQueueOpen(true);
       }
       else if (value === '/new') await controller.createSession();
       else if (value === '/history' || value.startsWith('/history ')) {
@@ -398,10 +420,26 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         }
       }
       else if (value === '/older') { await controller.older(undefined, displayTranscript); setScroll(value => value + 10); }
+      else if (/^\/compact(?: |$)/.test(value)) {
+        if (state.screen !== 'chat') throw new Error('Select a session first');
+        if (value !== '/compact') throw new Error('Use /compact (no arguments)');
+        setNotice(undefined);
+        await historyOperation(async signal => { setNotice(await controller.command('/compact', signal)); }, 'Compacting history…');
+      }
       else if (value === '/cancel') await controller.cancelTurn();
       else if (value === '/allow') await controller.approve(true);
       else if (value === '/deny') await controller.approve(false);
-      else if (value.startsWith('/steer ')) await controller.prompt(value.slice(7), 'steer');
+      else if (/^\/(?:plan|goal|permission|feedback)(?:\s|$)/.test(value)) {
+        if (state.screen !== 'chat') throw new Error('Select a session first');
+        if (pending) throw new Error('Answer the pending question or approval first');
+        setNotice(undefined);
+        await historyOperation(async signal => { setNotice(await controller.command(value, signal)); }, 'Running command…');
+      }
+      else if (/^\/export(?:\s|$)/.test(value)) {
+        if (state.screen !== 'chat') throw new Error('Select a session first');
+        const destination = value.slice(7).trim().replace(/^(["'])(.*)\1$/, '$2');
+        await historyOperation(async signal => { setNotice(`Saved session log: ${await controller.exportLog(destination || undefined, signal)}`); }, 'Exporting session log…');
+      }
       else if (question) await answerQuestion(question.multiSelect === true ? choiceState.selected : [], value); else if (pending) throw new Error('Answer the approval with /allow or /deny');
       else if (value.startsWith('/')) throw new Error('Unknown command. Use /help.');
       else if (state.screen !== 'chat') throw new Error('Choose a session or type /ws or /resume');
@@ -430,7 +468,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     [displayTranscript, displayTranscript.version, width, reasoning, reasoningOverrides, liveReasoning]);
   const { length, first } = layout;
   const statusNotice = !['Connected', 'Idle', 'Running…', 'Responding…'].includes(state.status);
-  const pageSize = Math.max(1, conversationRows - (displayTranscript.hasMore || historyWindow ? 1 : 0));
+  const showHistoryHint = dialogOpen || displayTranscript.hasMore || !!historyWindow;
+  const pageSize = Math.max(1, conversationRows - (showHistoryHint ? 1 : 0));
   const previousView = useRef({ transcript: displayTranscript, session: state.transcript, count: length, first, folds: reasoningOverrides, liveReasoning });
   const previous = previousView.current;
   const prepended = previous.first !== undefined && first !== undefined && first < previous.first;
@@ -459,7 +498,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   function scrollHistory(delta: number): void {
-    if (displayPaused || state.screen !== 'chat' || historyQuery !== undefined || searchResults !== undefined || thoughtList) return;
+    if (copyMode || state.screen !== 'chat') return;
     const intent = ++scrollIntent.current;
     const next = Math.max(0, Math.min(maxScroll, scrollPosition.current + delta));
     scrollPosition.current = next;
@@ -473,11 +512,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       }
     }).finally(() => { loadingPage.current = false; });
   }
-  async function historyOperation(operation: (signal: AbortSignal) => Promise<void>): Promise<void> {
+  async function historyOperation(operation: (signal: AbortSignal) => Promise<void>, label = 'Loading history…'): Promise<void> {
     const abort = new AbortController();
-    historyAbort.current = abort; setHistoryLoading(true);
+    historyAbort.current = abort; setHistoryLoading(label);
     try { await operation(abort.signal); }
-    finally { if (historyAbort.current === abort) { historyAbort.current = undefined; setHistoryLoading(false); } }
+    finally { if (historyAbort.current === abort) { historyAbort.current = undefined; setHistoryLoading(undefined); } }
   }
   async function openSearchSession(sessionId: string, query: string): Promise<void> {
     await historyOperation(async signal => {
@@ -505,9 +544,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setScroll(Math.max(0, current.length - pageSize - row));
     } finally { if (historyAbort.current === abort) historyAbort.current = undefined; }
   }
-  useMouseWheel(direction => scrollHistory(direction * 3), !displayPaused, () => setCopyMode(true));
-  const end = Math.max(pageSize, length - position);
-  const visible = useMemo(() => thoughtList ? [] : layout.viewport(Math.max(0, end - pageSize), end), [layout, end, pageSize, thoughtList]);
+  useMouseWheel(direction => scrollHistory(direction * 3), !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
+  const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
+  const end = Math.max(pageSize, length - position - trailingGap);
+  const visible = useMemo(() => layout.viewport(Math.max(0, end - pageSize), end), [layout, end, pageSize]);
   const liveThought = thoughtList && !historyWindow ? state.transcript.liveParts(width).find(part => part.kind === 'reasoning') : undefined;
   const thoughtEntries = thoughtList ? displayTranscript.thoughts : undefined;
   const thoughtChoices = useMemo(() => [...(thoughtEntries ?? [])].reverse().map(entry => ({
@@ -536,19 +576,30 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     <Text dimColor>{'─'.repeat(width)}</Text>
     </Box></Frozen>
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden">
-    {historyLoading && <Text dimColor>Loading history… · Esc / Ctrl+C cancel</Text>}
+    {historyLoading && <Text dimColor>{historyLoading} · Esc / Ctrl+C cancel</Text>}
     <Frozen frozen={displayPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
     {state.error && <Text color={theme.colors.error}>{state.error}</Text>}
-      {state.screen === 'chat' && !removal && !models && historyQuery === undefined && !searchResults && !thoughtList && !pending && <Box ref={conversationBox} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden" marginY={1}>
-        {visible.length ? <Frozen frozen={displayPaused} identity={`${width}:${state.sessionId}:${position}`}><HistoryViewport rows={visible} /></Frozen> : <Text color={theme.colors.muted}>Start a conversation with the host agent.</Text>}
-        {(displayTranscript.hasMore || historyWindow) && <Text dimColor>{historyWindow ? 'Earlier history · /latest returns to live conversation' : 'Scroll up or /older to load earlier history'}</Text>}
+      {state.screen === 'chat' && <Box ref={conversationBox} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden" marginY={dialogOpen ? 0 : 1}>
+        {visible.length ? <Frozen frozen={displayPaused} identity={`${width}:${state.sessionId}:${position}:${pageSize}`}><HistoryViewport rows={visible} /></Frozen> : <Text color={theme.colors.muted}>Start a conversation with the host agent.</Text>}
+        {showHistoryHint && <Text dimColor wrap="truncate-end">{dialogOpen ? 'Wheel/PgUp/PgDn · Scroll history' : historyWindow ? 'Earlier history · /latest returns to live conversation' : 'Scroll up or /older to load earlier history'}</Text>}
       </Box>}
     </Box>
     <Box flexDirection="column" flexShrink={0}>
-      {notice && <Text dimColor>{notice}</Text>}
+      {notice && <Text dimColor>{safeText(notice)}</Text>}
       <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
-    {removal ? <Box flexDirection="column" marginY={1}>
+    {queueOpen && !pending ? <Box flexDirection="column">
+      <Text bold>Pending input · Esc close</Text>
+      {!queued.length && <Text dimColor>{state.controlError ? 'Host queue unavailable' : 'No pending input'}</Text>}
+      <Picker choices={queued.map(item => ({
+        key: item.id, label: toolLine(item.text, width - 6),
+        action: () => operate(() => controller.removeQueued(item.id)),
+        remove: () => operate(() => controller.removeQueued(item.id)),
+      }))} pageSize={Math.max(1, Math.min(6, (stdout.rows ?? 30) - 12))}
+        hint="↑ ↓ select · Enter / d / Delete remove · Esc close"
+        enabled={!input && !state.busy && state.online}
+        canSelect={() => !draft.current && !controller.state.busy && controller.state.online && !controller.state.pending.length} />
+    </Box> : removal ? <Box flexDirection="column" marginY={1}>
       <Text bold color={theme.colors.context}>{removal.kind === 'workspace' ? 'Remove workspace registration?' : 'Archive session?'}</Text>
       <Text wrap="truncate-end">{safeText(removal.name)}</Text>
       <Text wrap="truncate-end">ID: {safeText(removal.id)}</Text>
@@ -630,10 +681,14 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       </Box>}
     </>}
         </Box>
+        {!queueOpen && !pending && state.screen === 'chat' && queued.length > 0 && <Box flexDirection="column" flexShrink={0}>
+          <Text dimColor>Waiting: {queued.length} · /queue to remove</Text>
+          {queued.slice(0, 2).map(item => <Text key={item.id} dimColor wrap="truncate-end">{item.placement === 'steering' ? '↳ ' : '· '}{safeText(toolLine(item.text, width - 6))}</Text>)}
+        </Box>}
         <Box flexShrink={0}>
         <Text color={theme.accent}>❯ </Text>
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(draft.current); }}
-          reservedKeys={questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
+          reservedKeys={queueOpen && !pending ? ['d'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
           focus={state.online && !state.busy && !copyMode} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
         </Box>
       {referenceOpen && <Box flexDirection="column">
@@ -648,9 +703,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       </Box>
       {input.startsWith('/') && !input.includes(' ') && <Text dimColor>{COMMANDS.filter(command => command.startsWith(input)).join('  ')}</Text>}
       {help && <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
-        {COMMAND_HINTS.map((hint, index) => <Text key={hint.command} dimColor wrap="truncate-end">
-          <Text color={theme.accent}>{COMMAND_LABELS[index]!.padEnd(COMMAND_LABEL_WIDTH)}</Text>{hint.description}
+        {COMMAND_HINTS.slice(currentHelpPage * helpPageSize, (currentHelpPage + 1) * helpPageSize).map((hint, index) => <Text key={hint.command} dimColor wrap="truncate-end">
+          <Text color={theme.accent}>{COMMAND_LABELS[currentHelpPage * helpPageSize + index]!.padEnd(COMMAND_LABEL_WIDTH)}</Text>{hint.description}
         </Text>)}
+        <Text dimColor>Help {currentHelpPage + 1}/{helpPages} · PgUp/PgDn pages · Esc close</Text>
         <Text dimColor>Enter send · Tab complete · Esc cancel · Wheel/PgUp/PgDn scroll · Ctrl+C clear / stop / exit</Text>
         <Text dimColor>History: ↑/↓ or Ctrl+P/N recall · Editing: Ctrl+A/E start/end · Ctrl+K/U kill right/left · Ctrl+W kill word · Ctrl+Y restore</Text>
       </Box>}

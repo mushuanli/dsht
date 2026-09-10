@@ -197,3 +197,31 @@ test('replayed questions survive startup, picker navigation and reconnect withou
   const reply = object(object(fixture.calls.find(call => call.method === '$events/result')!.payload).args);
   assert.equal(object(reply.outcome).kind, 'result');
 });
+
+test('long command calls can outlive the default timeout and remain cancellable', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const client = new Client(fixture.url); t.after(() => client.close());
+  await client.authenticate('fixture-token');
+  Object.defineProperty(client, 'timeoutMs', { value: 10 });
+  fixture.onCommand = async () => {
+    await new Promise(resolve => setTimeout(resolve, 40));
+    return { commandId: 'c1', result: { kind: 'success', text: 'No compactable history yet.' } };
+  };
+  const args = { agentId: 's1', line: '/compact', submittedAttachments: [] };
+  await assert.rejects(client.call('commands/execute', args), { name: 'TimeoutError' });
+  const result = await client.call('commands/execute', args, undefined, null);
+  assert.equal(object(object(result).result).text, 'No compactable history yet.');
+  const abort = new AbortController();
+  const request = client.call('commands/execute', args, abort.signal, null);
+  abort.abort();
+  await assert.rejects(request, { name: 'AbortError' });
+});
+
+test('a claimed queue item cannot be removed or resubmitted by a stale action', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1'); t.after(() => controller.stop());
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await assert.rejects(controller.removeQueued('already-claimed'), error => error instanceof RemoteError && error.code === 'session/queue-item-not-found');
+  assert.equal(fixture.calls.filter(call => call.method === 'session/updateQueue').length, 1);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
