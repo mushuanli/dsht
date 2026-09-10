@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文
 
+![dsh-tui 终端界面](dsh-tui.png)
+
 ## 摘要
 
 在终端中选择工作区和会话，与运行中的 DeepSeek Harness 服务对话，并查看会话历史。这是独立的 Node.js 仓库，拥有自己的 Git 历史、依赖和测试，不导入 Harness 内部包。
@@ -154,7 +156,21 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 ## 发布到 npm
 
-包名为 `dsh-http-tui`，可执行命令为 `dsh-tui`。发布前确认 npm 账户有权使用此包名，或将名称改为自己的 scope。分发代码前请选择适当的许可证。以下命令属于维护者操作；创建本地安装包不会自动发布。
+本仓库发布一个非 scope 的公开包 `dsh-http-tui`，可执行命令为 `dsh-tui`。下表中 `package.json` 是各字段的依据。
+
+| 字段 | 值 |
+| --- | --- |
+| 名称与版本 | `dsh-http-tui` `0.1.0` |
+| 可执行命令 | `dsh-tui`，也通过 `npx dsh-http-tui` 运行 |
+| 库入口 | `dsh-http-tui` 和 `dsh-http-tui/auth` |
+| 作者 | lizlok@gmail.com |
+| 许可证 | MIT，许可证正文位于 `LICENSE` |
+| 仓库与问题反馈 | [mushuanli/dsh-tui](https://github.com/mushuanli/dsh-tui) |
+| Node.js | 22.19 或更新版本 |
+| Registry 访问 | public，非 scope |
+| 发布内容 | `dist/`、两份 README、它们的配对记录、截图和许可证 |
+
+描述、关键词和依赖位于 `package.json`。以下命令属于维护者操作；创建本地安装包不会自动发布。
 
 ```sh
 npm run test:package
@@ -162,9 +178,9 @@ npm login
 npm publish --access public
 ```
 
-`test:package` 构建 tarball，然后使用安装依赖时填充的缓存，在隔离的离线 npm-exec 安装中运行 CLI。`prepublishOnly` 执行类型检查和测试；`prepack` 编译 JavaScript 与类型声明。包内包含 `dist/`、两份 README 及其配对记录，不包含源码测试、录制数据和本地认证文件。
+`test:package` 构建 tarball，然后使用安装依赖时填充的缓存，在隔离的离线 npm-exec 安装中运行 CLI，并拒绝上述发布集合之外的打包路径。`prepublishOnly` 执行类型检查和测试；`prepack` 编译 JavaScript 与类型声明。包内不包含源码测试、录制数据和本地认证文件。
 
-交互式发布需要 npm 账户认证及其发布验证。参见官方[发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。后续发布前需要递增包版本。Registry 发布不属于本仓库已执行的本地验证。
+`publishConfig.access` 为 `public`，因此非 scope 包名无需额外参数即可发布。交互式发布需要 npm 账户认证及其发布验证。参见官方[发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。后续发布前需要递增包版本。Registry 发布不属于本仓库已执行的本地验证。
 
 ## 开发与限制
 

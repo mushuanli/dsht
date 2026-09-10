@@ -2,6 +2,8 @@
 
 English | [中文](README.zh.md)
 
+![dsh-tui terminal interface](dsh-tui.png)
+
 ## Summary
 
 Choose a workspace and session, chat with a running DeepSeek Harness host, and inspect session history from your terminal. This is an independent Node.js repository: it has its own Git history, dependencies, and tests, and imports no Harness packages.
@@ -154,7 +156,21 @@ Session and workspace command methods use `{ request: { ... } }` inside `args`; 
 
 ## Publishing to npm
 
-The package name is `dsh-http-tui`; its executable is `dsh-tui`. Before publishing, ensure your npm account can publish this name, or change it to your own scope. Select an appropriate license before distributing the code. The following commands are maintainer actions; creating a local package does not publish it.
+This repository publishes one unscoped public package, `dsh-http-tui`, whose executable is `dsh-tui`. `package.json` is the authority for the fields below.
+
+| Field | Value |
+| --- | --- |
+| Name and version | `dsh-http-tui` `0.1.0` |
+| Executable | `dsh-tui`, also runnable as `npx dsh-http-tui` |
+| Library entries | `dsh-http-tui` and `dsh-http-tui/auth` |
+| Author | lizlok@gmail.com |
+| License | MIT, with the license text in `LICENSE` |
+| Repository and issues | [mushuanli/dsh-tui](https://github.com/mushuanli/dsh-tui) |
+| Node.js | 22.19 or newer |
+| Registry access | public, unscoped |
+| Published files | `dist/`, both READMEs, their pairing record, the screenshot, and the license |
+
+Descriptions, keywords, and dependencies live in `package.json`. The following commands are maintainer actions; creating a local package does not publish it.
 
 ```sh
 npm run test:package
@@ -162,9 +178,9 @@ npm login
 npm publish --access public
 ```
 
-`test:package` builds a tarball and runs its CLI through an isolated, offline npm-exec installation using the dependency cache populated by installation. `prepublishOnly` checks types and tests; `prepack` compiles JavaScript and declarations. The package includes `dist/`, the two READMEs, and their pairing record; source tests, recordings, and local authentication files are excluded.
+`test:package` builds a tarball and runs its CLI through an isolated, offline npm-exec installation using the dependency cache populated by installation, and rejects any packed path outside the published set above. `prepublishOnly` checks types and tests; `prepack` compiles JavaScript and declarations. Source tests, recordings, and local authentication files are excluded.
 
-Interactive publishing requires npm account authentication and its publishing verification. See the official [publishing guide](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). For later releases, increment the package version before publishing. Registry publication is not part of the local validation performed for this repository.
+`publishConfig.access` is `public`, so the unscoped name needs no extra flag. Interactive publishing requires npm account authentication and its publishing verification. See the official [publishing guide](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). For later releases, increment the package version before publishing. Registry publication is not part of the local validation performed for this repository.
 
 ## Development and limitations
 

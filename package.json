@@ -12,13 +12,17 @@
   "files": [
     "dist",
     "README.md",
-    "README.zh.md"
+    "README.zh.md",
+    "dsh-tui.png"
   ],
   "main": "dist/client.js",
   "types": "dist/client.d.ts",
   "exports": {
     ".": "./dist/client.js",
     "./auth": "./dist/auth.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "start": "tsx src/cli.tsx",
@@ -30,6 +34,28 @@
     "prepublishOnly": "npm run typecheck && npm test",
     "bench:input": "tsx scripts/benchmark-input.tsx"
   },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "tui",
+    "terminal",
+    "ink",
+    "cli",
+    "client",
+    "http",
+    "websocket",
+    "cost"
+  ],
+  "author": "lizlok@gmail.com",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mushuanli/dsh-tui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mushuanli/dsh-tui/issues"
+  },
+  "homepage": "https://github.com/mushuanli/dsh-tui#readme",
   "dependencies": {
     "ink": "^6.8.0",
     "react": "^19.2.0",
