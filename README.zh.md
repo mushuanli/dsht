@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-![dsh-tui 终端界面](dsh-tui.png)
+![dsh-cli 终端界面](dsh-tui.png)
 
 ## 摘要
 
@@ -42,16 +42,16 @@ npm start
 本包发布到 npm 后，无需克隆或构建即可运行：
 
 ```sh
-npx dsh-http-tui
-npx dsh-http-tui list workspaces --json
-npx dsh-http-tui list sessions --json
+npx dsh-cli
+npx dsh-cli list workspaces --json
+npx dsh-cli list sessions --json
 ```
 
-沿用相同的 `DSH_URL` 和首次登录的 `DSH_TOKEN` 环境变量。如需全局安装命令，执行 `npm install -g dsh-http-tui`，然后运行 `dsh-tui`。Registry 命令要求包已经发布；上面的源码命令可以直接在本地仓库中运行。
+沿用相同的 `DSH_URL` 和首次登录的 `DSH_TOKEN` 环境变量。如需全局安装命令，执行 `npm install -g dsh-cli`，然后运行 `dsh-cli`。Registry 命令要求包已经发布；上面的源码命令可以直接在本地仓库中运行。
 
 使用 ↑/↓ 和 Enter 选择工作区，然后选择已有会话或 **New session**。**All sessions** 同时显示未归属注册工作区的会话。**Add workspace** 接收服务端已有目录的绝对路径，该路径可能与本机文件系统不同。新建会话前必须选择工作区。
 
-首次登录通过 `GET /` 兑换 `DSH_TOKEN`，并按 HTTP origin 保存 cookie。后续启动和列表命令自动复用 cookie，无需再次提供 token。默认目录为 `$XDG_STATE_HOME/dsh-http-tui/auth`，未设置时使用 `~/.local/state/dsh-http-tui/auth`；可通过 `--auth-dir` 或 `DSH_TUI_AUTH_DIR` 覆盖。POSIX 下目录权限为 0700、cookie 文件为 0600；Windows 使用账户目录继承的访问控制。启动 token 永不保存。
+首次登录通过 `GET /` 兑换 `DSH_TOKEN`，并按 HTTP origin 保存 cookie。后续启动和列表命令自动复用 cookie，无需再次提供 token。默认目录为 `$XDG_STATE_HOME/dsh-cli/auth`，未设置时使用 `~/.local/state/dsh-cli/auth`；可通过 `--auth-dir` 或 `DSH_CLI_AUTH_DIR` 覆盖。POSIX 下目录权限为 0700、cookie 文件为 0600；Windows 使用账户目录继承的访问控制。启动 token 永不保存。
 
 Cookie 有效期由服务端决定。过期或被拒绝后，需要再次提供 `DSH_TOKEN`；已提供 token 时，HTTP 401 会自动触发重新认证。网络故障和 HTTP 403 不触发 token 兑换。损坏或权限不安全的 cookie 文件会明确报错。服务地址必须是不带路径或查询参数的 origin，且主机名须受服务端信任。
 
@@ -144,25 +144,25 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 默认价格有效期从核对日期的北京时间零点开始，这是本地估算规则，不代表官方价格生效日期。更早用量需要补充历史价格版本。程序按助手请求结算记录的时间选择单价；官方未说明跨时段请求的归属，因此边界附近的估算可能与账单不同。图片使用供应商报告的 token 数。已计价请求保留原价格版本，不随配置修改重新套价；未计价请求可以在后续扫描时补算。
 
-首次交互启动会创建 `~/.config/dsh-http-tui/prices.json`（或 `$XDG_CONFIG_HOME/dsh-http-tui/prices.json`），可用 `DSH_TUI_CONFIG_DIR` 覆盖目录。JSON 数组中的价格版本包含 `id`、`provider`、`model`、`currency: "CNY"`、`source`、包含起点的 `from`、可选且不含终点的 `until`、`timezone`、星期数字 `weekdays`（`0` 为周日）、日内分钟区间 `windows`，以及 `peak`／`offPeak` 下每百万 token 的 `input`、`cacheRead`、`cacheWrite`、`output` 单价。调价时用 `until` 结束旧区间，再添加唯一 ID 且 `from` 衔接的新版本；程序拒绝重叠区间。重启后读取配置修改；价格由用户维护，启动时不抓取网页价格。
+首次交互启动会创建 `~/.config/dsh-cli/prices.json`（或 `$XDG_CONFIG_HOME/dsh-cli/prices.json`），可用 `DSH_CLI_CONFIG_DIR` 覆盖目录。JSON 数组中的价格版本包含 `id`、`provider`、`model`、`currency: "CNY"`、`source`、包含起点的 `from`、可选且不含终点的 `until`、`timezone`、星期数字 `weekdays`（`0` 为周日）、日内分钟区间 `windows`，以及 `peak`／`offPeak` 下每百万 token 的 `input`、`cacheRead`、`cacheWrite`、`output` 单价。调价时用 `until` 结束旧区间，再添加唯一 ID 且 `from` 衔接的新版本；程序拒绝重叠区间。重启后读取配置修改；价格由用户维护，启动时不抓取网页价格。
 
-用量文件位于 `~/.local/state/dsh-http-tui/cost/<origin-hash>/`，遵循 `XDG_STATE_HOME`，也可通过 `DSH_TUI_STATE_DIR` 指定应用状态根目录。文件只含会话 ID、时间戳、模型身份、token 数、所选价格版本和估算值，不包含提示词、工具正文、凭据或 cookie。写入使用私有临时文件及原子替换，按历史截点命名的文件避免旧扫描覆盖更新的缓存截点。缓存跨重启保留，不需要访问服务端配置目录。
+用量文件位于 `~/.local/state/dsh-cli/cost/<origin-hash>/`，遵循 `XDG_STATE_HOME`，也可通过 `DSH_CLI_STATE_DIR` 指定应用状态根目录。文件只含会话 ID、时间戳、模型身份、token 数、所选价格版本和估算值，不包含提示词、工具正文、凭据或 cookie。写入使用私有临时文件及原子替换，按历史截点命名的文件避免旧扫描覆盖更新的缓存截点。缓存跨重启保留，不需要访问服务端配置目录。
 
 ## 客户端接口
 
-安装后的包通过 `dsh-http-tui` 导出 `Client`，通过 `dsh-http-tui/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/client.ts` 导入，或构建后从 `dist/client.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
+安装后的包通过 `dsh-cli` 导出 `Client`，通过 `dsh-cli/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/client.ts` 导入，或构建后从 `dist/client.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
 
 会话和工作区命令在 `args` 内使用 `{ request: { ... } }`；会话列表使用 `{ _request: {} }`。`$events/result` 直接使用具名参数。重连后的 follow 快照整体替换保留状态；持久消息与临时助手文本分别保存。读取器同时支持 `event` 记录和旧版 `chunks` 包装；后者包含 `chunkrow/text-chunks`、`chunkrow/reasoning-chunks` 或 `chunkrow/tool-call-chunks`。不提供 `assistantStream` 的服务端通过日志 chunk 传递实时文本；TUI 只重建尚未完成的尝试，并保留每条压缩记录的起始序号用于翻页。
 
 ## 发布到 npm
 
-本仓库发布一个非 scope 的公开包 `dsh-http-tui`，可执行命令为 `dsh-tui`。下表中 `package.json` 是各字段的依据。
+本仓库从 `mushuanli/dsh-tui` 仓库发布一个非 scope 的公开包 `dsh-cli`。下表中 `package.json` 是各字段的依据。
 
 | 字段 | 值 |
 | --- | --- |
-| 名称与版本 | `dsh-http-tui` `0.1.0` |
-| 可执行命令 | `dsh-tui`，也通过 `npx dsh-http-tui` 运行 |
-| 库入口 | `dsh-http-tui` 和 `dsh-http-tui/auth` |
+| 名称与版本 | `dsh-cli` `0.1.0` |
+| 可执行命令 | `dsh-cli`，不安装时用 `npx dsh-cli` |
+| 库入口 | `dsh-cli` 和 `dsh-cli/auth` |
 | 作者 | lizlok@gmail.com |
 | 许可证 | MIT，许可证正文位于 `LICENSE` |
 | 仓库与问题反馈 | [mushuanli/dsh-tui](https://github.com/mushuanli/dsh-tui) |
