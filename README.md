@@ -189,7 +189,11 @@ npm publish --access public
 
 `test:package` builds a tarball and runs its CLI through an isolated, offline npm-exec installation using the dependency cache populated by installation, and rejects any packed path outside the published set above. `prepublishOnly` checks types and tests; `prepack` compiles JavaScript and declarations. Source tests, recordings, and local authentication files are excluded.
 
-`publishConfig.access` is `public`, so the unscoped name needs no extra flag. Interactive publishing requires npm account authentication and its publishing verification. See the official [publishing guide](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). For later releases, increment the package version before publishing. Registry publication is not part of the local validation performed for this repository.
+`publishConfig.access` is `public`, so the unscoped name needs no extra flag. An account with two-factor authentication publishes with a live code, `npm publish --otp=<code>`; the code is checked at the final request, after the typecheck, suite, and build have already run.
+
+Later releases run in `.github/workflows/publish.yml`, which publishes from a version tag with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) and provenance, so no publish token is stored. Configure it once at `npmjs.com` → `dsht` → Settings → Trusted Publisher → GitHub Actions with organization or user `mushuanli`, repository `dsht`, workflow filename `publish.yml`, and allowed action `npm publish`. Trusted publishing cannot create a package, so version `0.1.0` is published by hand; after that, `npm version 0.1.1 && git push --follow-tags` releases.
+
+The workflow packs without publishing when started manually, and refuses a tag that disagrees with `package.json`. See the official [publishing guide](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). Registry publication is not part of the local validation performed for this repository.
 
 ## Development and limitations
 

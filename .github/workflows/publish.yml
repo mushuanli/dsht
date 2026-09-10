@@ -1,0 +1,73 @@
+# Publish to npm from a version tag with trusted publishing (OIDC); no long-lived token is stored.
+#
+# One-time setup, required once and only after the package exists on the registry:
+#   npmjs.com -> dsht -> Settings -> Trusted Publisher -> GitHub Actions
+#     Organization or user: mushuanli
+#     Repository:           dsht
+#     Workflow filename:    publish.yml
+#     Allowed actions:      npm publish
+# Trusted publishing cannot create a package, so the first release is published by hand with
+# `npm publish --otp=<code>`; every later release uses this workflow.
+#
+# Release: set the new version in package.json, then push the matching tag.
+#   npm version 0.1.1 && git push --follow-tags
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Pack the tarball without publishing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      # Trusted publishing requires npm 11.5.1 or newer: the bundled npm of an LTS runner is older.
+      - run: npm install -g npm@latest
+
+      # No dependency needs an install script, which is also how the suite is validated locally.
+      - run: npm ci --ignore-scripts
+
+      # A tag that disagrees with package.json would publish a version nobody asked for.
+      - name: Require the tag to match the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+
+      - name: Pack without publishing
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: npm pack
+
+      # prepublishOnly runs the typecheck and the terminal-condition suite; prepack compiles dist.
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+        run: npm publish --access public

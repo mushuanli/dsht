@@ -189,7 +189,11 @@ npm publish --access public
 
 `test:package` 构建 tarball，然后使用安装依赖时填充的缓存，在隔离的离线 npm-exec 安装中运行 CLI，并拒绝上述发布集合之外的打包路径。`prepublishOnly` 执行类型检查和测试；`prepack` 编译 JavaScript 与类型声明。包内不包含源码测试、录制数据和本地认证文件。
 
-`publishConfig.access` 为 `public`，因此非 scope 包名无需额外参数即可发布。交互式发布需要 npm 账户认证及其发布验证。参见官方[发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。后续发布前需要递增包版本。Registry 发布不属于本仓库已执行的本地验证。
+`publishConfig.access` 为 `public`，因此非 scope 包名无需额外参数即可发布。启用两步验证的账号需用即时验证码发布：`npm publish --otp=<验证码>`；验证码在最后一次请求时校验，此时类型检查、测试和构建均已执行完毕。
+
+后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此 `0.1.0` 需手工发布；之后执行 `npm version 0.1.1 && git push --follow-tags` 即可发布。
+
+手动触发时该工作流只打包不发布，并拒绝与 `package.json` 不一致的 tag。参见官方[发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。Registry 发布不属于本仓库已执行的本地验证。
 
 ## 开发与限制
 
