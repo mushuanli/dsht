@@ -13,15 +13,27 @@ export interface PriceVersion {
   currency: 'CNY'; source: string; timezone: string;
   peak: Rates; offPeak: Rates; weekdays: number[]; windows: [number, number][];
 }
-/** Published rates verified on 2026-09-10; preceding dates require historical configuration. */
-export const DEFAULT_PRICES: PriceVersion[] = ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'].map(model => {
-  const scale = model === 'deepseek-v4-pro' ? 3 : 1;
-  return { id: `deepseek-2026-09-10-${model}`, provider: 'deepseek-official', model,
-    from: '2026-09-10T00:00:00+08:00', currency: 'CNY', source: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/', timezone: 'Asia/Shanghai',
-    peak: { input: 3 * scale, cacheRead: 0.1 * scale, cacheWrite: 3 * scale, output: 9 * scale },
-    offPeak: { input: 1.5 * scale, cacheRead: 0.05 * scale, cacheWrite: 1.5 * scale, output: 4.5 * scale },
-    weekdays: [1, 2, 3, 4, 5], windows: [[540, 720], [840, 1080]] };
-});
+/** Published rates verified on 2026-09-10; preceding dates require historical configuration.
+ * Flash and Pro are priced independently, and a separate cache write uses the cache-miss input rate.
+ */
+const OFFICIAL_PRICING = 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/';
+const PEAK_SCHEDULE = { weekdays: [1, 2, 3, 4, 5], windows: [[540, 720], [840, 1080]] as [number, number][] };
+const FLASH_RATES = { peak: { input: 2, cacheRead: 0.04, cacheWrite: 2, output: 8 },
+  offPeak: { input: 1, cacheRead: 0.02, cacheWrite: 1, output: 4 } };
+const PRO_RATES = { peak: { input: 9, cacheRead: 0.3, cacheWrite: 9, output: 27 },
+  offPeak: { input: 4.5, cacheRead: 0.15, cacheWrite: 4.5, output: 13.5 } };
+export const DEFAULT_PRICES: PriceVersion[] = [
+  { id: 'deepseek-2026-09-10-flash', provider: 'deepseek-official', model: 'deepseek-flash',
+    from: '2026-09-10T00:00:00+08:00', currency: 'CNY', source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai',
+    ...PEAK_SCHEDULE, ...FLASH_RATES },
+  { id: 'deepseek-2026-09-10-pro', provider: 'deepseek-official', model: 'deepseek-v4-pro',
+    from: '2026-09-10T00:00:00+08:00', until: '2026-09-14T12:00:00+08:00', currency: 'CNY',
+    source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai', ...PEAK_SCHEDULE, ...PRO_RATES },
+  // The provider bills `deepseek-v4-pro` requests at Flash rates once V4 Pro is retired.
+  { id: 'deepseek-2026-09-14-pro-served-by-flash', provider: 'deepseek-official', model: 'deepseek-v4-pro',
+    from: '2026-09-14T12:00:00+08:00', currency: 'CNY', source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai',
+    ...PEAK_SCHEDULE, ...FLASH_RATES },
+];
 
 /** Validate user-maintained price versions, rejecting ambiguous overlapping intervals.
  * @param value - Parsed prices.json array.
@@ -59,10 +71,23 @@ export function pricesFrom(value: unknown): PriceVersion[] {
 export function costDay(time: number): string { return new Date(time + 8 * 3600_000).toISOString().slice(0, 10); }
 
 interface Usage { input: number; output: number; cacheRead: number; cacheWrite: number }
-interface Charge { key: string; time?: number; provider: string; model: string; usage?: Usage; price?: PriceVersion; amount?: number; reason?: string }
+interface Charge { key: string; time?: number; provider: string; model: string; usage?: Usage; price?: PriceVersion; amount?: number; estimated?: true; reason?: string }
 interface Saved { version: 1; sessionId: string; cut: number; charges: Charge[] }
-/** Summary always retains the number of unpriced records alongside the known subtotal. */
-export interface CostTotal { amount: number; unknown: number; records: number }
+/** Summary retains the known subtotal, the records it could not price, and the coarse estimates.
+ * `unknown` counts records with no amount at all; `estimated` counts records that only have a
+ * floor amount, including dated requests whose timestamp cannot place them inside the range.
+ */
+export interface CostTotal { amount: number; unknown: number; estimated: number; records: number }
+
+/** Price family used when a recorded model name has no exact entry. */
+function priceFamily(model: string): string { return model.toLowerCase().includes('pro') ? 'deepseek-v4-pro' : 'deepseek-flash'; }
+
+/** Candidate versions for one request: its exact model first, then the official model family. */
+function candidates(prices: PriceVersion[], provider: string, model: string): PriceVersion[] {
+  const exact = prices.filter(p => p.provider === provider && p.model === model);
+  if (exact.length) return exact;
+  return provider === 'deepseek-official' ? prices.filter(p => p.model === priceFamily(model)) : [];
+}
 
 /** Select a price by event time, applying half-open local peak windows.
  * @param prices - Validated versions.
@@ -72,10 +97,7 @@ export interface CostTotal { amount: number; unknown: number; records: number }
  * @returns Matching price version and per-million-token rates, if known.
  */
 export function priceAt(prices: PriceVersion[], provider: string, model: string, time: number): { price: PriceVersion; rates: Rates } | undefined {
-  const active = (p: PriceVersion) => p.provider === provider && Date.parse(p.from) <= time && (p.until === undefined || time < Date.parse(p.until));
-  const family = model.toLowerCase().includes('pro') ? 'deepseek-v4-pro' : 'deepseek-v4-flash';
-  const price = prices.find(p => active(p) && p.model === model)
-    ?? (provider === 'deepseek-official' ? prices.find(p => active(p) && p.model === family) : undefined);
+  const price = candidates(prices, provider, model).find(p => Date.parse(p.from) <= time && (p.until === undefined || time < Date.parse(p.until)));
   if (!price) return;
   let clock = clocks.get(price.timezone);
   if (!clock) { clock = new Intl.DateTimeFormat('en-US', { timeZone: price.timezone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); clocks.set(price.timezone, clock); }
@@ -84,6 +106,22 @@ export function priceAt(prices: PriceVersion[], provider: string, model: string,
   const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(part('weekday'));
   const minute = Number(part('hour')) * 60 + Number(part('minute'));
   return { price, rates: price.weekdays.includes(day) && price.windows.some(([a, b]) => minute >= a && minute < b) ? price.peak : price.offPeak };
+}
+
+/** Select a rate without a settlement time, so an unattributable request still enters the total.
+ * The cheapest candidate off-peak rate is a floor: it never overstates, and the charge stays
+ * marked as estimated.
+ * @param prices - Validated versions.
+ * @param provider - Provider identity from the recorded request.
+ * @param model - Recorded model name.
+ * @returns The candidate version with the lowest off-peak input rate and its rates, if any.
+ */
+export function lowestPrice(prices: PriceVersion[], provider: string, model: string): { price: PriceVersion; rates: Rates } | undefined {
+  let best: { price: PriceVersion; rates: Rates } | undefined;
+  for (const price of candidates(prices, provider, model)) {
+    if (best === undefined || price.offPeak.input < best.rates.input) best = { price, rates: price.offPeak };
+  }
+  return best;
 }
 
 /** Keep only billing-relevant fields; prompts, tool bodies, cookies and keys never enter the ledger.
@@ -124,6 +162,7 @@ export class CostLedger {
       if (v.version !== 1 || typeof v.sessionId !== 'string' || !Number.isSafeInteger(v.cut) || !Array.isArray(v.charges)
         || v.charges.some(c => !c || typeof c.key !== 'string' || typeof c.provider !== 'string' || typeof c.model !== 'string'
           || (c.amount !== undefined && (typeof c.amount !== 'number' || !Number.isFinite(c.amount) || c.amount < 0))
+          || (c.estimated !== undefined && c.estimated !== true)
           || (c.time !== undefined && (typeof c.time !== 'number' || !Number.isFinite(c.time) || c.time < 0 || c.time > 8.64e15))
           || (c.usage !== undefined && Object.values(c.usage).some(n => typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0)))) throw new Error('Invalid cost ledger');
       for (const c of v.charges) if (c.price) pricesFrom([c.price]);
@@ -165,11 +204,13 @@ export class CostLedger {
         && usage && previous.usage && Object.keys(usage).every(k => usage[k as keyof Usage] === previous.usage![k as keyof Usage])) {
         charges[index] = previous; last = { turn: d.turn, step: d.step, index }; continue;
       }
-      const selected = time === undefined ? undefined : priceAt(previous?.price && previous.provider === provider && previous.model === model ? [previous.price] : this.prices, provider, model, time);
+      const reusable = previous?.price && previous.provider === provider && previous.model === model ? [previous.price] : this.prices;
+      const selected = time === undefined ? lowestPrice(reusable, provider, model) : priceAt(reusable, provider, model, time);
       const estimate = usage && selected ? (usage.input * selected.rates.input + usage.output * selected.rates.output + usage.cacheRead * selected.rates.cacheRead + usage.cacheWrite * selected.rates.cacheWrite) / 1e6 : undefined;
       const amount = estimate !== undefined && Number.isFinite(estimate) ? estimate : undefined;
       charges[index] = { key, time, provider, model, usage, price: selected?.price, amount,
-        reason: !usage ? 'missing usage' : time === undefined ? 'missing timestamp' : !selected ? 'no price version' : amount === undefined ? 'invalid estimate' : undefined };
+        ...(time === undefined && amount !== undefined ? { estimated: true as const } : {}),
+        reason: !usage ? 'missing usage' : time === undefined ? 'missing timestamp, floor rate' : !selected ? 'no price version' : amount === undefined ? 'invalid estimate' : undefined };
       last = { turn: d.turn, step: d.step, index };
     }
     const saved: Saved = { version: 1, sessionId, cut, charges };
@@ -205,21 +246,24 @@ export class CostLedger {
    * @param sessionId - Optional session restriction.
    * @param days - Today or today plus the preceding two calendar days.
    * @param now - Clock used for date attribution.
-   * @returns Known subtotal and unpriced count; undated records are unpriced in every date range.
+   * @returns Known subtotal, unpriceable count, and estimated count; an estimated record always
+   *   names an amount, but a dated range only adds the records it can place inside that range.
    */
   total(sessionId?: string, days?: 1 | 3, now = Date.now()): CostTotal {
     const cacheKey = JSON.stringify([sessionId, days, days ? costDay(now) : '']);
     const cached = this.totals.get(cacheKey);
     if (cached) return cached;
-    const result = { amount: 0, unknown: 0, records: 0 };
+    const result: CostTotal = { amount: 0, unknown: 0, estimated: 0, records: 0 };
     const end = costDay(now); const start = costDay(now - ((days ?? 1) - 1) * 86400_000);
     for (const session of this.sessions.values()) {
       if (sessionId !== undefined && session.sessionId !== sessionId) continue;
       for (const charge of session.charges) {
         if (days && charge.time !== undefined && (costDay(charge.time) < start || costDay(charge.time) > end)) continue;
         result.records++;
-        if (charge.amount === undefined || days && charge.time === undefined) result.unknown++;
-        else result.amount += charge.amount;
+        if (charge.amount === undefined) { result.unknown++; continue; }
+        const dated = days === undefined || charge.time !== undefined;
+        if (charge.estimated === true || !dated) result.estimated++;
+        if (dated) result.amount += charge.amount;
       }
     }
     this.totals.set(cacheKey, result);
@@ -227,8 +271,8 @@ export class CostLedger {
   }
 }
 
-/** Compact estimates retain an asterisk whenever a subtotal contains unpriced records.
+/** Compact estimates retain an asterisk whenever a subtotal is not exact.
  * @param total - Summary from the ledger.
  * @returns Yuan amount and incompleteness marker.
  */
-export function costText(total: CostTotal): string { return `~¥${total.amount.toFixed(4)}${total.unknown ? '*' : ''}`; }
+export function costText(total: CostTotal): string { return `~¥${total.amount.toFixed(4)}${total.unknown || total.estimated ? '*' : ''}`; }

@@ -6,20 +6,52 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Choose a workspace and session, chat with a running DeepSeek Harness host, and inspect session history from your terminal. This is an independent Node.js repository: it has its own Git history, dependencies, and tests, and imports no Harness packages.
+**`dsht` — Control DeepSeek Harness from any terminal, anywhere.**
+
+`dsht` is a lightweight, remote-first TUI client for DeepSeek Harness. It is designed for developers who keep Harness running on a workstation or server and want to stay in control from any terminal — including a phone.
+
+It fits naturally into SSH-based workflows. Run `dsht` on the host that can reach `dsh web`, then connect to that host through normal SSH, nested SSH, a bastion/jump host, tmux, or a mobile SSH client. `dsht` does not implement SSH itself; it remains a terminal control surface for the Harness HTTP/WebSocket host.
+
+A typical remote workflow looks like this:
+
+```text
+Phone / Laptop
+      |
+      | SSH
+      v
+  Jump Host
+      |
+      | SSH
+      v
+Development Host
+      |
+      +-- dsht
+            |
+            v
+          dsh web
+            |
+            v
+     DeepSeek Harness
+```
+
+This makes it practical to leave long-running Harness tasks on a remote machine and reconnect later to inspect progress, send prompts, steer the current turn, answer questions, approve or deny actions, cancel work, search history, or switch sessions — without requiring a graphical desktop or browser on the remote host.
+
+`dsht` is also cost-aware. It tracks Harness-visible token usage and estimates CNY cost by session and calendar day using versioned DeepSeek peak/off-peak pricing. The `/cost` view and status bar make it easier to see not only what the agent is doing, but how much the work is costing.
 
 Main features:
 
+- Remote-first terminal workflow that works naturally through SSH, nested SSH, jump hosts, tmux, and mobile SSH clients.
 - Workspace and session pickers, direct switching with `/ws` and `/s`, and explicit session creation.
 - Streaming replies, reasoning, compact tool names and success/failure status, and paged conversation history.
 - Queued prompts, steering, turn cancellation, approvals, and free-text question answers.
 - Cookie persistence per host, automatic reconnect, and snapshot replacement.
 - JSON or tab-separated workspace/session lists for scripts, plus a reusable HTTP client.
-- Session and daily CNY cost estimates, versioned peak/off-peak prices, and `/cost` summaries.
+- Session, daily, and three-day CNY cost estimates with request-level usage tracking and versioned peak/off-peak prices.
 
 ## Contents
 
 - [Start](#start)
+- [Remote SSH workflows](#remote-ssh-workflows)
 - [List workspaces and sessions](#list-workspaces-and-sessions)
 - [Conversation controls](#conversation-controls)
 - [Live status](#live-status)
@@ -62,6 +94,37 @@ On first login, authentication exchanges the token at `GET /` and saves the cook
 
 The host determines cookie expiration. An expired or rejected cookie requires a token again; a supplied token refreshes authentication automatically after HTTP 401. Network failures and HTTP 403 do not trigger token exchange. Corrupt or insecure cookie files fail explicitly. The base URL must be an origin without a path or extra query parameters, and the host must allow its hostname.
 
+## Remote SSH workflows
+
+`dsht` is intentionally terminal-native, which makes it useful when the machine running DeepSeek Harness is not the machine in front of you.
+
+The simplest setup is to run `dsh web` and `dsht` on the same development host. In that case the default loopback URL stays private to the host, while SSH carries only the terminal session:
+
+```text
+Laptop or phone --SSH--> Development Host
+                              |
+                              +-- dsht --> http://127.0.0.1:3080 --> dsh web
+```
+
+For machines behind a bastion or jump host, the path can be nested without changing how `dsht` talks to Harness:
+
+```text
+Phone --SSH--> Jump Host --SSH--> Development Host --dsht--> dsh web
+```
+
+For example, OpenSSH users can enter the development host through a configured jump host and then launch `dsht` normally:
+
+```sh
+ssh -J user@jump.example.com user@dev.example.com
+dsht
+```
+
+A persistent terminal multiplexer such as `tmux` is useful for mobile access: reconnect over SSH, reattach the terminal session, and continue controlling the same remote environment. `dsht` itself reconnects to the Harness host when its HTTP/WebSocket connection is interrupted, while the Harness session state remains on the host.
+
+This architecture is especially useful from a phone. A mobile SSH client only needs a usable terminal connection to the remote machine; the phone does not need the project checkout, Node.js toolchain, Harness credentials for the model provider, or a graphical desktop. The project files and Harness processes remain on the development host.
+
+Security follows the same boundary: SSH is responsible for remote host access, while `dsht` authenticates separately to `dsh web`. Keeping `dsh web` bound to loopback and running `dsht` after SSH login avoids exposing the Harness web endpoint directly to the public network. If `dsht` is configured to reach a different host with `DSH_URL` or `--url`, secure that network path separately.
+
 ## List workspaces and sessions
 
 ```sh
@@ -101,7 +164,6 @@ The single-line composer supports Readline-style editing. Words are whitespace-d
 | Alt+D | Delete the following word |
 | Ctrl+Y | Restore the most recently killed text at the cursor |
 | Ctrl+H / Backspace, Ctrl+D / Delete | Delete the preceding / following character |
-
 | Command | Action |
 | --- | --- |
 | `/ws` | Show all workspaces; choosing one opens its session list |
@@ -145,17 +207,19 @@ Tool-only rows omit the separate role heading: `⚙` identifies a call, `✓` a 
 
 ## Cost estimates
 
-`/cost` shows the selected session, today, and today plus the preceding two calendar days. Dates use Asia/Shanghai; the three-day view is not a rolling 72-hour window. The status bar reserves `S:` for session cost and `D:` for today. `~` marks an estimate, and `*` marks unpriced requests or incomplete coverage. Each host origin has a separate ledger. Totals cover HTTP-visible sessions and previously cached sessions; they are not account-wide provider bills.
+Cost visibility is a first-class feature of `dsht`. Long-running coding sessions can accumulate large token usage while running unattended on a remote host, so the TUI keeps session and daily cost close to the controls used to steer or stop the work. These values are local estimates derived from Harness-visible usage; they are intended for monitoring and cost control, not as a replacement for the provider's account-wide invoice.
 
-The client reads complete histories in the background on connection, every 60 seconds, at turn completion, and when opening `/cost`. Idle sessions with unchanged host update timestamps are skipped. No model requests are made by billing. Esc or Ctrl+C cancels an explicit refresh. The ledger counts disjoint uncached input, cache read/write and output buckets; reasoning is already part of output. Retries count separately, replacement samples update their attempt, and fork-inherited history is excluded. Missing timestamps, inconsistent usage and unknown prices remain unpriced. Failed scans retain labelled partial cached totals.
+`/cost` shows the selected session, today, and today plus the preceding two calendar days. Dates use Asia/Shanghai; the three-day view is not a rolling 72-hour window. The status bar reserves `S:` for session cost and `D:` for today. `~` marks an estimate; `\*` marks a subtotal that is not exact, because a request carries no timestamp, no price covers it, a calendar range cannot place it, or the scan has not completed. Each host origin has a separate ledger. Totals cover HTTP-visible sessions and previously cached sessions; they are not account-wide provider bills.
 
-The bundled CNY rates were checked against the [official pricing page](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/) on 2026-09-10. Beijing weekday peak windows are 09:00–12:00 and 14:00–18:00; other times use half-price rates. Flash peak input/cache-hit/output rates are ¥3/¥0.10/¥9 per million tokens; Pro rates are ¥9/¥0.30/¥27. Separate cache writes use the uncached-input rate. An exact configured model price takes priority; otherwise `deepseek-official` names containing `pro` (case-insensitive) use Pro and all other names use Flash, including temporary model aliases. Other providers require explicit entries.
+The client reads complete histories in the background on connection, every 60 seconds, at turn completion, and when opening `/cost`. Idle sessions with unchanged host update timestamps are skipped. No model requests are made by billing. Esc or Ctrl+C cancels an explicit refresh. The ledger counts disjoint uncached input, cache read/write and output buckets; reasoning is already part of output. Retries count separately, replacement samples update their attempt, and fork-inherited history is excluded. A request without a settlement timestamp still contributes a floor amount, priced at the cheapest rate of its model family and reported as estimated. Inconsistent usage, and prices that no model or provider entry covers, remain unpriced; the model-name family decides Pro against Flash, while an unlisted provider is never billed from the official table. Failed scans retain labelled partial cached totals.
+
+The bundled CNY rates were checked against the [official pricing page](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/) on 2026-09-10. Beijing weekday peak windows are 09:00–12:00 and 14:00–18:00; other times use half-price rates. Flash peak cache-miss-input/cache-hit-input/output rates are ¥2/¥0.04/¥8 per million tokens and Pro rates are ¥9/¥0.30/¥27; the current model name is `deepseek-flash`, and older Flash names keep those same rates. The provider has announced that from 2026-09-14T12:00+08:00 it serves `deepseek-v4-pro` from Flash and bills it at Flash rates, which the bundled entry records so that date does not overstate Pro usage. Separate cache writes use the uncached-input rate. An exact configured model price takes priority; otherwise `deepseek-official` names containing `pro` (case-insensitive) use Pro and all other names use Flash, including temporary model aliases. Other providers require explicit entries.
 
 The default price validity starts at Beijing midnight on the verification date; this is a local estimate policy, not a claim about the official effective date. Earlier usage needs historical price entries. The recorded assistant settlement timestamp selects the rate; requests spanning a tariff boundary may differ from the invoice because the official page does not specify their attribution. Images use provider-reported tokens. Cached priced requests retain their price version when configuration changes; previously unpriced requests can be priced on a later scan.
 
 On first interactive launch, the client creates `~/.config/dsht/prices.json` (or `$XDG_CONFIG_HOME/dsht/prices.json`). `DSHT_CONFIG_DIR` overrides that directory. The JSON array contains price versions with `id`, `provider`, `model`, `currency: "CNY"`, `source`, inclusive `from`, optional exclusive `until`, `timezone`, weekday numbers (`0` Sunday), minute-of-day `windows`, and `peak`/`offPeak` rates named `input`, `cacheRead`, `cacheWrite`, `output`, per million tokens. To update prices, close the old interval with `until` and append a new version with a unique ID and matching `from`; overlapping intervals are rejected. Restart to load configuration changes. Price discovery is manual; the TUI does not scrape prices during startup.
 
-Usage files live under `~/.local/state/dsht/cost/<origin-hash>/` (respecting `XDG_STATE_HOME`, or `DSHT_STATE_DIR` for the application state root). They contain only session IDs, timestamps, model identities, token counts, selected price versions and estimates. They exclude prompts, tool bodies, credentials and cookies. Writes use private temporary files and atomic replacement; opening-cut filenames prevent older concurrent scans from displacing a newer cached cut. The cache survives restart and does not need access to the host configuration directory.
+Usage files live under `~/.local/state/dsht/cost/<origin-hash>/` (respecting `XDG_STATE_HOME`, or `DSHT_STATE_DIR` for the application state root). They contain only session IDs, timestamps, model identities, token counts, selected price versions and estimates. They exclude prompts, tool bodies, credentials and cookies. The price file is configuration and these usage files are state, so only the former belongs in a settings backup. Writes use private temporary files and atomic replacement; opening-cut filenames prevent older concurrent scans from displacing a newer cached cut. The cache survives restart and does not need access to the host configuration directory. It stores each request rather than a running total, and the skip bookkeeping lives in memory only, so the first scan after a restart re-reads every session and reprices whatever accrued while the client was closed using each request's own settlement time.
 
 ## Client API
 

@@ -2,7 +2,7 @@
   "name": "@itookit/dsht",
   "version": "0.1.0",
   "type": "module",
-  "description": "Standalone terminal client for the DeepSeek Harness HTTP gateway",
+  "description": "Remote-first TUI for DeepSeek Harness with SSH-friendly mobile access and request-level cost tracking",
   "engines": {
     "node": ">=22.19"
   },
@@ -40,12 +40,19 @@
     "deepseek-harness",
     "tui",
     "terminal",
-    "ink",
+    "terminal-ui",
+    "remote",
+    "ssh",
+    "mobile",
+    "jump-host",
+    "bastion",
+    "ai-agent",
+    "coding-agent",
+    "cost-tracking",
+    "cost-control",
+    "token-usage",
     "cli",
-    "client",
-    "http",
-    "websocket",
-    "cost"
+    "websocket"
   ],
   "author": "lizlok@gmail.com",
   "license": "MIT",

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, pricesFrom, priceAt, costRecords, costDay } from '../src/cost.ts';
+import { CostLedger, DEFAULT_PRICES, pricesFrom, priceAt, lowestPrice, costRecords, costDay, costText, type CostTotal } from '../src/cost.ts';
 import { Controller } from '../src/controller.ts';
 import { host, until } from './host.ts';
 import type { ObjectValue } from '../src/wire.ts';
@@ -15,18 +15,20 @@ function record(seq: number, time: number, step = seq, model = 'deepseek-v4-flas
   return { type: 'event', event: { seq, time, type: 'assistant/message', data: { turn: 1, step, usage,
     message: { source: { provider, model }, content: [{ type: 'text', text: 'PRIVATE PROMPT' }] } } } };
 }
+/** Compare money at the precision the terminal displays instead of raw float bits. */
+const summary = (total: CostTotal) => ({ ...total, amount: Number(total.amount.toFixed(4)) });
 
 test('tariffs use Beijing weekdays and half-open morning/afternoon windows', () => {
   const prices = pricesFrom(DEFAULT_PRICES);
   const rate = (time: string) => priceAt(prices, 'deepseek-official', 'deepseek-v4-flash', at(time))?.rates.input;
-  assert.equal(rate('2026-09-10T08:59:59'), 1.5);
-  assert.equal(rate('2026-09-10T09:00:00'), 3);
-  assert.equal(rate('2026-09-10T12:00:00'), 1.5);
-  assert.equal(rate('2026-09-10T14:00:00'), 3);
-  assert.equal(rate('2026-09-10T18:00:00'), 1.5);
-  assert.equal(rate('2026-09-12T10:00:00'), 1.5);
+  assert.equal(rate('2026-09-10T08:59:59'), 1);
+  assert.equal(rate('2026-09-10T09:00:00'), 2);
+  assert.equal(rate('2026-09-10T12:00:00'), 1);
+  assert.equal(rate('2026-09-10T14:00:00'), 2);
+  assert.equal(rate('2026-09-10T18:00:00'), 1);
+  assert.equal(rate('2026-09-12T10:00:00'), 1);
   assert.equal(rate('2026-09-09T10:00:00'), undefined);
-  assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-v4.1-flash-expires-on-0910', at('2026-09-10T10:00:00'))?.rates.input, 3);
+  assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-v4.1-flash-expires-on-0910', at('2026-09-10T10:00:00'))?.rates.input, 2);
   assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-v4.1-PRO-preview', at('2026-09-10T10:00:00'))?.rates.input, 9);
   const exact = { ...prices[0]!, id: 'custom', model: 'custom-model', peak: { ...prices[0]!.peak, input: 42 } };
   assert.equal(priceAt(pricesFrom([...prices, exact]), 'deepseek-official', 'custom-model', at('2026-09-10T10:00:00'))?.rates.input, 42);
@@ -34,6 +36,39 @@ test('tariffs use Beijing weekdays and half-open morning/afternoon windows', () 
   assert.throws(() => pricesFrom([...prices, { ...prices[0], id: 'overlap' }]), /Overlapping/);
   assert.throws(() => pricesFrom([{ ...prices[0], peak: { input: -1 } }]), /rate/);
   assert.throws(() => pricesFrom([{ ...prices[0], windows: [[720, 540]] }]), /schedule/);
+});
+
+test('bundled rates match the published tables, including the V4 Pro handover to Flash billing', () => {
+  const prices = pricesFrom(DEFAULT_PRICES);
+  const rates = (model: string, date: string) => priceAt(prices, 'deepseek-official', model, at(date))?.rates;
+  assert.deepEqual(rates('deepseek-flash', '2026-09-10T10:00:00'), { input: 2, cacheRead: 0.04, cacheWrite: 2, output: 8 });
+  assert.deepEqual(rates('deepseek-flash', '2026-09-10T20:00:00'), { input: 1, cacheRead: 0.02, cacheWrite: 1, output: 4 });
+  assert.deepEqual(rates('deepseek-v4-pro', '2026-09-10T10:00:00'), { input: 9, cacheRead: 0.3, cacheWrite: 9, output: 27 });
+  assert.deepEqual(rates('deepseek-v4-pro', '2026-09-10T20:00:00'), { input: 4.5, cacheRead: 0.15, cacheWrite: 4.5, output: 13.5 });
+  // 2026-09-14T12:00+08:00 is the announced handover: the same model name is then billed as Flash.
+  assert.deepEqual(rates('deepseek-v4-pro', '2026-09-14T11:59:59'), { input: 9, cacheRead: 0.3, cacheWrite: 9, output: 27 });
+  assert.deepEqual(rates('deepseek-v4-pro', '2026-09-15T10:00:00'), { input: 2, cacheRead: 0.04, cacheWrite: 2, output: 8 });
+});
+
+test('an unlisted model uses its name family, and an unlisted provider stays unpriced', () => {
+  const prices = pricesFrom(DEFAULT_PRICES);
+  assert.equal(priceAt(prices, 'deepseek-official', 'some-FLASH-preview', at('2026-09-10T10:00:00'))?.rates.input, 2);
+  assert.equal(priceAt(prices, 'deepseek-official', 'some-Pro-preview', at('2026-09-10T10:00:00'))?.rates.input, 9);
+  assert.equal(priceAt(prices, 'other', 'deepseek-flash', at('2026-09-10T10:00:00')), undefined);
+  assert.deepEqual(lowestPrice(prices, 'deepseek-official', 'deepseek-v4-pro')?.rates, { input: 1, cacheRead: 0.02, cacheWrite: 1, output: 4 });
+  assert.equal(lowestPrice(prices, 'other', 'deepseek-flash'), undefined);
+});
+
+test('a request without a settlement time keeps a floor amount and stays estimated', async () => {
+  const ledger = new CostLedger();
+  const undated = record(0, at('2026-09-10T10:00:00')); delete (undated.event as ObjectValue).time;
+  await ledger.replace('s1', 0, costRecords([undated]));
+  const total = ledger.total('s1');
+  assert.equal(summary(total).amount, 5.02);
+  assert.deepEqual({ unknown: total.unknown, estimated: total.estimated, records: total.records }, { unknown: 0, estimated: 1, records: 1 });
+  assert.equal(costText(total), '~¥5.0200*');
+  // A calendar range cannot place an undated request, so it is counted but not added.
+  assert.deepEqual(summary(ledger.total(undefined, 1, at('2026-09-10T12:00:00'))), { amount: 0, unknown: 0, estimated: 1, records: 1 });
 });
 
 test('session, today and three-calendar-day costs retain unknowns and avoid replacement/retry duplication', async () => {
@@ -44,9 +79,9 @@ test('session, today and three-calendar-day costs retain unknowns and avoid repl
     record(5, at('2026-09-12T10:00:00'), 5, 'unknown', 'other'), record(6, at('2026-09-13T10:00:00'))];
   await ledger.replace('s1', 6, costRecords(records));
   const now = at('2026-09-13T12:00:00');
-  assert.deepEqual(ledger.total('s1'), { amount: 36.3, unknown: 1, records: 5 });
-  assert.deepEqual(ledger.total(undefined, 1, now), { amount: 6.05, unknown: 0, records: 1 });
-  assert.deepEqual(ledger.total(undefined, 3, now), { amount: 12.1, unknown: 1, records: 3 });
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 30.12, unknown: 1, estimated: 0, records: 5 });
+  assert.deepEqual(summary(ledger.total(undefined, 1, now)), { amount: 5.02, unknown: 0, estimated: 0, records: 1 });
+  assert.deepEqual(summary(ledger.total(undefined, 3, now)), { amount: 10.04, unknown: 1, estimated: 0, records: 3 });
   await ledger.replace('s1', 6, costRecords(records));
   assert.equal(ledger.total('s1').records, 5);
   await ledger.replace('s1', 0, []);
@@ -59,7 +94,7 @@ test('fork seed records are excluded while inherited request routes remain usabl
     { type: 'event', event: { seq: 1, type: 'session/end-seed', data: { inherited: true } } },
     record(2, at('2026-09-10T20:00:00'))];
   await ledger.replace('fork', 2, costRecords(records));
-  assert.deepEqual(ledger.total('fork'), { amount: 6.05, unknown: 0, records: 1 });
+  assert.deepEqual(summary(ledger.total('fork')), { amount: 5.02, unknown: 0, estimated: 0, records: 1 });
 });
 
 test('ledger restart retains rates and stores no conversation text', async t => {
@@ -70,7 +105,7 @@ test('ledger restart retains rates and stores no conversation text', async t => 
   const changed = DEFAULT_PRICES.map(p => ({ ...p, peak: { ...p.peak, input: 999 } }));
   const restarted = new CostLedger(changed, directory); await restarted.load();
   await restarted.replace('s1', 1, events);
-  assert.equal(restarted.total('s1').amount, 12.1);
+  assert.equal(summary(restarted.total('s1')).amount, 10.04);
   const files = await readdir(directory); assert.equal(files.length, 1);
   assert.doesNotMatch(await readFile(join(directory, files[0]!), 'utf8'), /PRIVATE PROMPT|content/);
 });
@@ -83,12 +118,12 @@ test('billing scans all HTTP sessions without changing the selected session', as
   t.after(() => controller.stop()); controller.start();
   await until(() => ledger.scannedAt !== undefined);
   assert.equal(controller.state.sessionId, 's1');
-  assert.equal(ledger.total('s1').amount, 12.1);
-  assert.equal(ledger.total().amount, 24.2);
+  assert.equal(summary(ledger.total('s1')).amount, 10.04);
+  assert.equal(summary(ledger.total()).amount, 20.08);
   assert.equal(fixture.calls.some(c => c.method === 'session/prompt'), false);
 });
 
-test('price updates select new intervals and missing timestamp or inconsistent usage stays unpriced', async () => {
+test('price updates select new intervals and inconsistent usage stays unpriced', async () => {
   const original = DEFAULT_PRICES[0]!;
   const prices = pricesFrom([{ ...original, until: '2026-09-11T00:00:00+08:00' },
     { ...original, id: 'new', from: '2026-09-11T00:00:00+08:00', peak: { ...original.peak, input: 6 } }]);
@@ -97,8 +132,8 @@ test('price updates select new intervals and missing timestamp or inconsistent u
   const invalid = record(3, at('2026-09-11T10:00:00'));
   ((invalid.event as ObjectValue).data as ObjectValue).usage = { ...usage, totalTokens: 1 };
   await ledger.replace('s1', 3, costRecords([record(0, at('2026-09-10T10:00:00')), record(1, at('2026-09-11T10:00:00')), unknownTime, invalid]));
-  assert.deepEqual(ledger.total('s1'), { amount: 27.2, unknown: 2, records: 4 });
-  assert.equal(ledger.total(undefined, 1, at('2026-09-11T12:00:00')).unknown, 2);
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 29.1, unknown: 1, estimated: 1, records: 4 });
+  assert.deepEqual(summary(ledger.total(undefined, 1, at('2026-09-11T12:00:00'))), { amount: 14.04, unknown: 1, estimated: 1, records: 3 });
 });
 
 test('cancelling a shared billing refresh aborts paging without cancelling the agent', async t => {
@@ -126,5 +161,5 @@ test('failed attempt stream usage uses its request route and last sample', async
     { type: 'event', event: { seq: 1, time: at('2026-09-10T10:00:00'), type: 'assistant/attempt', data: { turn: 1, step: 1,
       stream: [{ type: 'chunk', chunk: { type: 'usage', usage: { ...usage, inputTokens: 1 } } }, { type: 'chunk', chunk: { type: 'usage', usage } }] } } },
   ]));
-  assert.equal(ledger.total('s1').amount, 36.3);
+  assert.equal(summary(ledger.total('s1')).amount, 36.3);
 });
