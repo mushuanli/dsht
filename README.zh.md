@@ -377,7 +377,7 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 | 字段 | 值 |
 | --- | --- |
-| 名称与版本 | `@itookit/dsht` `0.2.0` |
+| 名称与版本 | `@itookit/dsht` `0.2.1` |
 | 可执行命令 | `dsht`，不安装时用 `npx @itookit/dsht` |
 | 库入口 | `@itookit/dsht` 和 `@itookit/dsht/auth` |
 | 作者 | lizlok\@gmail.com |
@@ -399,7 +399,7 @@ npm publish --access public
 
 `publishConfig.access` 为 `public`；scoped 包需要它才能被公开安装，因此该设置放在包里而不是每次发布命令上。启用两步验证的账号需用即时验证码发布：`npm publish --otp=<验证码>`；验证码在最后一次请求时校验，此时类型检查、测试和构建均已执行完毕。
 
-后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此首个版本需手工发布；之后执行 `npm version 0.2.1 && git push --follow-tags` 即可发布。
+后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此最早的版本需手工发布；之后的版本推送对应 tag 即可发布，例如 `npm version 0.2.2 && git push --follow-tags`。
 
 手动触发时该工作流只打包不发布，并拒绝与 `package.json` 不一致的 tag。参见官方 [scoped 发布指南](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。Registry 发布不属于本仓库已执行的本地验证。
 

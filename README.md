@@ -377,7 +377,7 @@ This repository publishes one public package, `@itookit/dsht`, from the `mushuan
 
 | Field | Value |
 | --- | --- |
-| Name and version | `@itookit/dsht` `0.2.0` |
+| Name and version | `@itookit/dsht` `0.2.1` |
 | Executable | `dsht`, or `npx @itookit/dsht` without installing |
 | Library entries | `@itookit/dsht` and `@itookit/dsht/auth` |
 | Author | lizlok@gmail.com |
@@ -399,7 +399,7 @@ npm publish --access public
 
 `publishConfig.access` is `public`, which a scoped package needs to be installable without a paid plan; the flag is therefore part of the package rather than of the publish command. An account with two-factor authentication publishes with a live code, `npm publish --otp=<code>`; the code is checked at the final request, after the typecheck, suite, and build have already run.
 
-Later releases run in `.github/workflows/publish.yml`, which publishes from a version tag with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) and provenance, so no publish token is stored. Configure it once at `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions with organization or user `mushuanli`, repository `dsht`, workflow filename `publish.yml`, and allowed action `npm publish`. Trusted publishing cannot create a package, so the first version is published by hand; after that, `npm version 0.2.1 && git push --follow-tags` releases.
+Later releases run in `.github/workflows/publish.yml`, which publishes from a version tag with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) and provenance, so no publish token is stored. Configure it once at `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions with organization or user `mushuanli`, repository `dsht`, workflow filename `publish.yml`, and allowed action `npm publish`. Trusted publishing cannot create a package, so the earliest versions were published by hand; a later release pushes the matching tag, for example `npm version 0.2.2 && git push --follow-tags`.
 
 The workflow packs without publishing when started manually, and refuses a tag that disagrees with `package.json`. See the official [scoped publishing guide](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). Registry publication is not part of the local validation performed for this repository.
 
