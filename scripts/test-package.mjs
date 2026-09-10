@@ -16,10 +16,9 @@ try {
   const [pack] = JSON.parse(stdout);
   assert(pack.files.some(file => file.path === 'dist/cli.js'));
   assert(pack.files.some(file => file.path === 'dist/client.d.ts'));
-  assert(pack.files.some(file => file.path === 'dsht.png'));
   assert(pack.files.some(file => file.path === 'dsht-m.png'));
   assert(pack.files.some(file => file.path === 'LICENSE'));
-  assert(pack.files.every(file => file.path.startsWith('dist/') || ['package.json', 'README.md', 'README.zh.md', 'README.i18n.yaml', 'dsht.png', 'dsht-m.png', 'LICENSE'].includes(file.path)));
+  assert(pack.files.every(file => file.path.startsWith('dist/') || ['package.json', 'README.md', 'README.zh.md', 'README.i18n.yaml', 'dsht-m.png', 'LICENSE'].includes(file.path)));
   const result = await run(['exec', '--yes', '--offline', '--', `file:${join(root, pack.filename)}`, '--help'], root);
   assert.match(result.stdout, /Usage: dsht/);
   assert.match(result.stdout, /list workspaces/);
