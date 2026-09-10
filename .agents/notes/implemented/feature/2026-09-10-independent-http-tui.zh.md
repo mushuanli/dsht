@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-本仓库提供 Node.js/Ink 可执行入口和可复用 HTTP 客户端。服务端仍单独启动。工作区列表读取 mux 首个 baseline；会话列表使用一元端点。每个请求显式保留服务端形参名称。重连替换 baseline 状态，不重放用户的修改请求。
+本仓库提供 Node.js/Ink 可执行入口和可复用 HTTP 客户端。服务端仍单独启动。工作区列表读取 mux 首个 baseline；会话列表使用一元端点。每个请求显式保留服务端形参名称。重连替换 baseline 状态，不重放用户的修改请求。旧版服务端以 `chunks` 包装 `chunkrow/*` 事件，并省略进程内助手 baseline。读取器保留压缩记录的起始序号用于翻页，并汇总日志中未完成的尝试以显示实时输出；已提交的助手消息仍是对话依据。假设所有包装都是 `event` 会拒绝这些服务端，而丢弃压缩记录会丢失实时文本和翻页位置。
 
 ## Alternatives considered
 

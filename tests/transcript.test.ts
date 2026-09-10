@@ -39,3 +39,35 @@ test('excludes model-only replacement copies and neutralizes terminal controls',
   assert.equal(transcript.messages.length, 2);
   assert(!transcript.messages[1]!.text.includes('\u001b'));
 });
+
+test('reads legacy packed history and reconciles its live tail without duplicating messages', () => {
+  const transcript = new Transcript();
+  const text = { type: 'chunks', event: { type: 'chunkrow/text-chunks', seq: 6, time: 1000,
+    data: { turn: 1, step: 1, index: 0, dt: [1], texts: ['Hel', 'lo'] } } };
+  transcript.accept({ ...snapshot, header: { version: 0 }, cursor: 7, assistantStream: undefined,
+    records: [{ ...snapshot.records[0], event: { ...snapshot.records[0]!.event, seq: 5 } }, text] });
+  assert.equal(transcript.ready, true);
+  assert.equal(transcript.liveText, 'Hello');
+  transcript.accept(text);
+  assert.equal(transcript.liveText, 'Hello');
+  transcript.addPage({ records: [{ type: 'event', event: { type: 'step/start', seq: 1, data: { turn: 1, step: 1 } } }], hasMore: false });
+  assert.equal(transcript.liveText, 'Hello');
+  assert.equal(transcript.beforeSeq, 1);
+  transcript.accept({ type: 'event', event: { type: 'assistant/chunk', seq: 8,
+    data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '!' } } } });
+  assert.equal(transcript.liveText, 'Hello!');
+  transcript.accept({ type: 'event', event: { type: 'assistant/message', seq: 9, surfaceOp: 'append',
+    data: { message: { content: [{ type: 'text', text: 'Hello!' }] } } } });
+  assert.equal(transcript.liveText, '');
+  assert.equal(transcript.messages.at(-1)?.text, 'Hello!');
+  assert.throws(() => transcript.addPage({ records: [{ type: 'unexpected', event: {} }] }), /history record.*unexpected/i);
+});
+
+test('rejects unrecognized packed events and inconsistent packed member counts', () => {
+  const transcript = new Transcript();
+  assert.throws(() => transcript.accept({ ...snapshot, assistantStream: undefined,
+    records: [{ type: 'chunks', event: { type: 'unknown/chunks', seq: 0, data: {} } }] }), /Unsupported packed history event/);
+  assert.throws(() => transcript.accept({ ...snapshot, assistantStream: undefined,
+    records: [{ type: 'chunks', event: { type: 'chunkrow/text-chunks', seq: 0,
+      data: { turn: 1, step: 1, index: 0, dt: [], texts: ['a', 'b'] } } }] }), /Invalid packed history member count/);
+});

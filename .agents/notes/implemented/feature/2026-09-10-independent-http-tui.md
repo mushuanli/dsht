@@ -8,7 +8,7 @@ Terminal users need to select existing host workspaces and sessions without laun
 
 ## Decision
 
-This repository owns a Node.js/Ink executable and a reusable HTTP client. The host remains a separately launched service. Workspace listing consumes the first mux baseline; session listing uses the unary endpoint. Host parameter names remain explicit in every request. A reconnect replaces baseline state and never replays a user mutation.
+This repository owns a Node.js/Ink executable and a reusable HTTP client. The host remains a separately launched service. Workspace listing consumes the first mux baseline; session listing uses the unary endpoint. Host parameter names remain explicit in every request. A reconnect replaces baseline state and never replays a user mutation. Older hosts send `chunks` wrappers around `chunkrow/*` events and omit the process-local assistant baseline. The reader retains packed starting sequences for paging and folds the unfinished logged attempt for live display; committed assistant messages remain the transcript authority. Treating every wrapper as `event` rejects these hosts, while dropping packed rows loses live text and pagination positions.
 
 ## Alternatives considered
 

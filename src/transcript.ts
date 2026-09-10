@@ -25,6 +25,7 @@ export class Transcript {
   private attempt: string | undefined;
   private nextIndex = 0;
   private revision = 0;
+  private legacyStream = false;
   cursor = -1;
   hasMore = false;
   ready = false;
@@ -34,8 +35,10 @@ export class Transcript {
     const frame = object(value);
     switch (frame.type) {
       case 'snapshot': {
+        this.ready = false;
         this.events.clear();
         this.blocks.clear();
+        this.legacyStream = frame.assistantStream === undefined;
         this.cursor = number(frame.cursor);
         this.hasMore = frame.hasMore === true;
         this.addRecords(array(frame.records));
@@ -62,7 +65,8 @@ export class Transcript {
         this.ready = true;
         break;
       }
-      case 'event': this.addRecords([frame]); break;
+      case 'event':
+      case 'chunks': this.addRecords([frame]); break;
       case 'assistant-stream': {
         const live = object(frame.frame);
         if (number(live.revision) !== this.revision + 1) throw new Error('Assistant stream revision gap');
@@ -120,10 +124,55 @@ export class Transcript {
   private addRecords(records: Json[]): void {
     for (const record of records) {
       const entry = object(record);
-      if (entry.type !== 'event') throw new Error('Unknown history record');
+      if (entry.type !== 'event' && entry.type !== 'chunks') {
+        throw new Error(`Unsupported history record type: ${typeof entry.type === 'string' ? entry.type.slice(0, 100) : typeof entry.type}`);
+      }
       const event = object(entry.event);
+      if (entry.type === 'chunks' && !['chunkrow/text-chunks', 'chunkrow/reasoning-chunks', 'chunkrow/tool-call-chunks'].includes(string(event.type))) {
+        throw new Error(`Unsupported packed history event: ${string(event.type).slice(0, 100)}`);
+      }
       this.events.set(number(event.seq), event);
     }
+    if (this.legacyStream) this.rebuildLegacyStream();
+  }
+
+  /** Older hosts log chunks directly; replay only the unfinished attempt for live display. */
+  private rebuildLegacyStream(): void {
+    this.blocks.clear();
+    let position = '';
+    for (const [, event] of [...this.events].sort(([a], [b]) => a - b)) {
+      if (['step/start', 'step/end', 'turn/end', 'assistant/message', 'assistant/attempt'].includes(string(event.type))) {
+        this.blocks.clear();
+        position = '';
+      } else if (event.type === 'assistant/chunk' || string(event.type).startsWith('chunkrow/')) {
+        const data = object(event.data);
+        const nextPosition = `${number(data.turn)}:${number(data.step)}`;
+        if (position !== nextPosition) this.blocks.clear();
+        position = nextPosition;
+        switch (event.type) {
+          case 'assistant/chunk': this.chunk(object(data.chunk)); break;
+          case 'chunkrow/text-chunks':
+          case 'chunkrow/reasoning-chunks': {
+            const texts = array(data.texts).map(string);
+            this.validatePackedTiming(data, texts.length);
+            this.chunk({ type: event.type === 'chunkrow/text-chunks' ? 'text-delta' : 'reasoning-delta',
+              index: number(data.index), text: texts.join('') });
+            break;
+          }
+          case 'chunkrow/tool-call-chunks': {
+            const args = array(data.args).map(string);
+            this.validatePackedTiming(data, args.length);
+            this.chunk({ type: 'tool-call-delta', index: number(data.index), id: string(data.id),
+              ...(data.name === undefined ? {} : { name: string(data.name) }), argumentsDelta: args.join('') });
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  private validatePackedTiming(data: ObjectValue, count: number): void {
+    if (count === 0 || array(data.dt).length !== count - 1) throw new Error('Invalid packed history member count');
   }
   private chunk(chunk: ObjectValue): void {
     if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
