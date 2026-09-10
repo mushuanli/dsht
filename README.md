@@ -195,12 +195,15 @@ npm publish --access public
 
 ```sh
 npm test
+npm run test:terminal
 npm run build
 npm run bench:input
 node dist/cli.js --help
 ```
 
 Tests use isolated HTTP/WebSocket hosts, drive the real Ink picker and composer, run the CLI in subprocesses, and project copied Harness v2 workspace-edit and v0 packed-chunk recordings. The repository needs no model credentials for these checks. The recording and expected transcript live under `tests/`; they do not depend on a parent checkout. Live model-provider behavior is not covered by these tests.
+
+`npm test` renders frames without styling, because the assertions and the recorded expectations in `tests/expected/` describe text. A test runner started from a terminal exports `FORCE_COLOR=1` to each test file, which makes Ink interleave SGR escapes between a prompt and its text; `npm run test:terminal` reproduces that environment on any host, and `prepublishOnly` runs it so a publish from a terminal validates what a terminal actually renders.
 
 Typing reuses history projection and wrapping until the transcript revision or terminal width changes; host updates and older pages invalidate that reuse. `bench:input` measures local input-to-render work with 20 and 500 synthetic messages, 30 measured keystrokes after warmup, and history projection read counts. It excludes network/model time and is a diagnostic, not a machine-independent latency threshold.
 

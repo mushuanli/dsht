@@ -195,12 +195,15 @@ npm publish --access public
 
 ```sh
 npm test
+npm run test:terminal
 npm run build
 npm run bench:input
 node dist/cli.js --help
 ```
 
 测试使用隔离的 HTTP/WebSocket 服务，驱动实际 Ink 选择器和输入框，在子进程中运行 CLI，并投影复制的 Harness v2 工作区编辑记录和 v0 压缩 chunk 记录。这些检查不需要模型凭据。记录和预期对话输出位于 `tests/`，不依赖父仓库。测试不覆盖真实模型供应商行为。
+
+`npm test` 渲染不带样式的帧，因为断言和 `tests/expected/` 中的预期输出描述的是文本。从终端启动的测试运行器会向每个测试文件导出 `FORCE_COLOR=1`，使 Ink 在提示符与文本之间插入 SGR 转义序列；`npm run test:terminal` 在任何主机上复现该环境，`prepublishOnly` 也会运行它，因此从终端发布时验证的就是终端实际渲染的结果。
 
 输入期间复用历史投影和换行结果，直到对话版本或终端宽度变化；服务端更新和历史翻页会使缓存失效。`bench:input` 使用 20 条和 500 条合成消息，在预热后测量 30 次按键的本地输入至渲染耗时及历史投影读取次数。它排除网络／模型耗时，仅供诊断，不作为跨机器的延迟阈值。
 

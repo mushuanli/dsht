@@ -1,4 +1,5 @@
 /** Drive the actual terminal components against the isolated HTTP host. */
+import './no-color.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

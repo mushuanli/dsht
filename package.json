@@ -29,9 +29,10 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "test": "tsx --test tests/*.test.ts tests/*.test.tsx",
+    "test:terminal": "node scripts/test-terminal.mjs",
     "test:package": "node scripts/test-package.mjs",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run typecheck && npm run test:terminal",
     "bench:input": "tsx scripts/benchmark-input.tsx"
   },
   "keywords": [
