@@ -4,52 +4,130 @@ English | [中文](README.zh.md)
 
 ![DeepSeek Harness Terminal (dsht)](dsht.png)
 
+> **dsht — Control DeepSeek Harness from any terminal, anywhere.**
+
 ## Summary
 
-**`dsht` — Control DeepSeek Harness from any terminal, anywhere.**
+`dsht` is a lightweight DeepSeek Harness TUI client designed for remote use.
 
-`dsht` is a lightweight, remote-first TUI client for DeepSeek Harness. It is designed for developers who keep Harness running on a workstation or server and want to stay in control from any terminal — including a phone.
+Its goal is to fit DeepSeek Harness naturally into the terminal and SSH workflows a developer already has: Harness keeps running on a remote workstation or server while you reconnect from a laptop, tablet, or phone to check status, send a message, steer a task, answer an approval, answer a question, cancel a turn, or switch sessions.
 
-It fits naturally into SSH-based workflows. Run `dsht` on the host that can reach `dsh web`, then connect to that host through normal SSH, nested SSH, a bastion/jump host, tmux, or a mobile SSH client. `dsht` does not implement SSH itself; it remains a terminal control surface for the Harness HTTP/WebSocket host.
-
-A typical remote workflow looks like this:
+A typical setup:
 
 ```text
-Phone / Laptop
-      |
-      | SSH
-      v
-  Jump Host
-      |
-      | SSH
-      v
-Development Host
-      |
-      +-- dsht
-            |
-            v
-          dsh web
-            |
-            v
-     DeepSeek Harness
+phone / tablet / laptop
+        │
+        │ SSH
+        ▼
+   jump host / bastion
+        │
+        │ SSH
+        ▼
+   development host
+        │
+        ├── dsht
+        │     │
+        │     ▼
+        │   dsh web
+        │     │
+        │     ▼
+        └── DeepSeek Harness
 ```
 
-This makes it practical to leave long-running Harness tasks on a remote machine and reconnect later to inspect progress, send prompts, steer the current turn, answer questions, approve or deny actions, cancel work, search history, or switch sessions — without requiring a graphical desktop or browser on the remote host.
+`dsht` **is not an SSH client**. It runs in an ordinary terminal, so it works directly inside SSH, nested SSH, ProxyJump/bastion, tmux, and similar remote terminal environments. Whenever your terminal can reach the host running `dsht`, you keep controlling the same DeepSeek Harness sessions.
 
-`dsht` is also cost-aware. It tracks Harness-visible token usage and estimates CNY cost by session and calendar day using versioned DeepSeek peak/off-peak pricing. The `/cost` view and status bar make it easier to see not only what the agent is doing, but how much the work is costing.
+Besides remote control, `dsht` tracks usage for cost control: it records token usage per request, separates uncached input, cache read, cache write, and output, and combines the model, the settlement time, peak/off-peak rates, and versioned price tables into a CNY estimate for the current session, today, and the last three calendar days.
 
 Main features:
 
-- Remote-first terminal workflow that works naturally through SSH, nested SSH, jump hosts, tmux, and mobile SSH clients.
+- **Remote-first**: built for SSH, nested SSH, bastion hosts, ProxyJump, and tmux.
+- **Phone-friendly**: one working mobile SSH client is enough to keep controlling a remote Harness away from your desk.
 - Workspace and session pickers, direct switching with `/ws` and `/s`, and explicit session creation.
-- Streaming replies, reasoning, compact tool names and success/failure status, and paged conversation history.
+- Streaming replies, reasoning, compact tool names, success/failure status, and paged conversation history.
 - Queued prompts, steering, turn cancellation, approvals, and free-text question answers.
-- Cookie persistence per host, automatic reconnect, and snapshot replacement.
+- Cookie persistence per host, automatic reconnect, and snapshot replacement, so control survives a dropped connection.
 - JSON or tab-separated workspace/session lists for scripts, plus a reusable HTTP client.
-- Session, daily, and three-day CNY cost estimates with request-level usage tracking and versioned peak/off-peak prices.
+- **Cost-aware**: session, today, and three-day CNY estimates with versioned peak/off-peak prices and `/cost` summaries.
+
+## Why use dsht?
+
+### Built for remote control
+
+DeepSeek Harness usually runs on a development workstation or server with more performance and a more complete environment, while the person is not always sitting at that machine.
+
+`dsht` keeps the control interface in a plain terminal, so the remote server needs no desktop environment and a phone needs no full development setup. Leave Harness working on the development host and, when you need to look or intervene, enter that host over the SSH path you already have and run `dsht`.
+
+The simplest form:
+
+```text
+laptop ───────── SSH ────────> development host ──> dsht
+```
+
+Through a jump host:
+
+```text
+phone ── SSH ──> jump host ── SSH ──> development host ──> dsht
+```
+
+This makes "control Harness from the phone in your hand" a practical workflow: no remote desktop, and no need to expose the Harness web service on the public internet.
+
+> SSH tunnels, ProxyJump, bastion hosts, and access control stay the responsibility of your existing SSH environment; `dsht` focuses on terminal interaction with DeepSeek Harness.
+
+### Keep controlling tasks from a phone
+
+Mobile sessions are poor for long editing work but well suited to control and decisions.
+
+After SSHing from a phone into the remote terminal running `dsht`, you can:
+
+- watch running tasks and live output;
+- read assistant replies, reasoning, and tool status;
+- send a new prompt or a `/steer` instruction;
+- approve with `/allow` or reject with `/deny`;
+- answer questions Harness asks;
+- stop the current turn with `/cancel`;
+- switch workspaces and sessions;
+- search history;
+- check the current task and recent cost with `/cost`.
+
+Leaving your desk therefore does not mean losing control of a long-running Harness task.
+
+### More than a log viewer
+
+`dsht` is an interactive control surface for a running DeepSeek Harness, not a read-only log tool.
+
+It can send input, handle approvals and questions, steer a running task, cancel a turn, switch sessions, and reconnect after the network returns. Execution state stays on the host; the client only presents and controls it through the terminal.
+
+### Cost awareness
+
+Long AI coding tasks keep consuming tokens, and a token total alone says little about what they cost.
+
+`dsht` stores usage per request and combines it with the request settlement time, the model identity, and the matching price version. Its totals separate:
+
+```text
+uncached input
+cache read
+cache write
+output
+```
+
+`/cost` shows:
+
+```text
+current session
+today
+today + the previous two calendar days
+```
+
+The status bar also keeps showing session cost `S:` and today's cost `D:`, so cost changes surface while a task runs instead of only after the invoice arrives.
+
+That gives `dsht` two roles at once:
+
+1. **a remote terminal control surface for DeepSeek Harness**
+2. **a cost monitor for the work as it happens**
 
 ## Contents
 
+- [Why use dsht?](#why-use-dsht)
 - [Start](#start)
 - [Remote SSH workflows](#remote-ssh-workflows)
 - [List workspaces and sessions](#list-workspaces-and-sessions)
@@ -90,40 +168,103 @@ Both paths read the same `DSH_URL` and `DSH_TOKEN` variables.
 
 Select a workspace with ↑/↓ and Enter, then select a session or **New session**. **All sessions** also exposes sessions outside registered workspaces. **Add workspace** accepts an existing absolute directory on the host, which may differ from your local filesystem. Creating a session requires a selected workspace.
 
-On first login, authentication exchanges the token at `GET /` and saves the cookie per HTTP origin. Later starts, including list commands, reuse that cookie without a token. The store uses `$XDG_STATE_HOME/dsht/auth`, or `~/.local/state/dsht/auth` when unset; `--auth-dir` or `DSHT_AUTH_DIR` overrides it. POSIX directories use 0700 and cookie files use 0600; Windows uses the account directory’s inherited access controls. Launch tokens are never saved.
+On first login, authentication exchanges the token at `GET /` and saves the cookie per HTTP origin. Later starts, including list commands, reuse that cookie without a token. The store uses `$XDG_STATE_HOME/dsht/auth`, or `~/.local/state/dsht/auth` when unset; `--auth-dir` or `DSHT_AUTH_DIR` overrides it. POSIX directories use 0700 and cookie files use 0600; Windows uses the account directory's inherited access controls. Launch tokens are never saved.
 
 The host determines cookie expiration. An expired or rejected cookie requires a token again; a supplied token refreshes authentication automatically after HTTP 401. Network failures and HTTP 403 do not trigger token exchange. Corrupt or insecure cookie files fail explicitly. The base URL must be an origin without a path or extra query parameters, and the host must allow its hostname.
 
 ## Remote SSH workflows
 
-`dsht` is intentionally terminal-native, which makes it useful when the machine running DeepSeek Harness is not the machine in front of you.
+`dsht` is at its best combined with existing SSH infrastructure. It requires neither a DeepSeek Harness exposed to the public internet nor a client device that can reach `dsh web` directly.
 
-The simplest setup is to run `dsh web` and `dsht` on the same development host. In that case the default loopback URL stays private to the host, while SSH carries only the terminal session:
+### SSH straight to the development host
 
-```text
-Laptop or phone --SSH--> Development Host
-                              |
-                              +-- dsht --> http://127.0.0.1:3080 --> dsh web
-```
-
-For machines behind a bastion or jump host, the path can be nested without changing how `dsht` talks to Harness:
+When the development host accepts SSH directly:
 
 ```text
-Phone --SSH--> Jump Host --SSH--> Development Host --dsht--> dsh web
+Laptop / Phone
+      │
+      │ SSH
+      ▼
+Development Host
+      │
+      ├── dsht
+      └── dsh web
 ```
 
-For example, OpenSSH users can enter the development host through a configured jump host and then launch `dsht` normally:
+Log in to the remote host and run:
 
 ```sh
-ssh -J user@jump.example.com user@dev.example.com
 dsht
 ```
 
-A persistent terminal multiplexer such as `tmux` is useful for mobile access: reconnect over SSH, reattach the terminal session, and continue controlling the same remote environment. `dsht` itself reconnects to the Harness host when its HTTP/WebSocket connection is interrupted, while the Harness session state remains on the host.
+Or without a global install:
 
-This architecture is especially useful from a phone. A mobile SSH client only needs a usable terminal connection to the remote machine; the phone does not need the project checkout, Node.js toolchain, Harness credentials for the model provider, or a graphical desktop. The project files and Harness processes remain on the development host.
+```sh
+npx @itookit/dsht
+```
 
-Security follows the same boundary: SSH is responsible for remote host access, while `dsht` authenticates separately to `dsh web`. Keeping `dsh web` bound to loopback and running `dsht` after SSH login avoids exposing the Harness web endpoint directly to the public network. If `dsht` is configured to reach a different host with `DSH_URL` or `--url`, secure that network path separately.
+### Through a jump host
+
+When the development host is reachable only through a jump host:
+
+```text
+Phone
+  │
+  │ SSH
+  ▼
+Jump Host
+  │
+  │ SSH / ProxyJump
+  ▼
+Development Host
+  │
+  ├── dsht
+  └── dsh web
+```
+
+With an existing OpenSSH `ProxyJump` configuration, SSH to the target development host as usual and run:
+
+```sh
+dsht
+```
+
+`dsht` does not need to understand that SSH path; from its point of view it simply runs in a terminal that can reach `dsh web`.
+
+### With tmux
+
+On a remote host, `dsht` can live in a tmux session so that a dropped network still leaves the same terminal environment behind:
+
+```sh
+tmux new -s dsht
+dsht
+```
+
+Then, after logging in again:
+
+```sh
+tmux attach -t dsht
+```
+
+Even without tmux the Harness session state stays on the server, and a restarted `dsht` can select the same workspace and session again. The value of tmux is keeping the local terminal layout and the running TUI process.
+
+### Phone access
+
+Any mobile terminal that can use SSH is a usable entry point:
+
+```text
+Mobile SSH Client
+       │
+       ▼
+   Jump Host
+       │
+       ▼
+Development Host
+       │
+       ▼
+      dsht
+```
+
+The experience depends on how well the mobile terminal supports ANSI, Unicode, arrow keys, and SGR mouse reports. Even with limited touch mouse support, the core operations remain available through the keyboard and slash commands.
 
 ## List workspaces and sessions
 
@@ -146,7 +287,7 @@ JSON output is `{ "items": [...] }`; omit `--json` for tab-separated output. Wor
 
 ## Conversation controls
 
-Enter submits a prompt. Ctrl+C requests cancellation while the selected session is running and exits only when it is idle; repeated keys share an in-flight cancellation. Cancellation waits for a pending prompt admission, and failures keep the client open. Esc sends an explicit cancellation from the conversation even when the cached running flag is idle; open menus also cancel a known running agent while closing. Active local history/search/cost loads are cancelled first. Page Up/Down scroll the retained transcript; `/older` loads an earlier page. Every exit path, including `/quit` and SIGTERM, stops the selected turn before the socket closes, so quitting does not leave the agent running; an idle session is left untouched. Cancellation leaves pending queue items intact.
+Enter submits a prompt. Ctrl+C requests cancellation while the selected session is running and exits only when it is idle; repeated keys share an in-flight cancellation. Cancellation waits for a pending prompt admission, and failures keep the client open. Esc sends an explicit cancellation from the conversation even when the cached running flag is idle; open menus also cancel a known running agent while closing. Active local history/search/cost loads are cancelled first. Page Up/Down scroll the retained transcript; `/older` loads an earlier page. Every exit path, including `/quit` and SIGTERM, stops the selected turn before the connection closes, so quitting does not leave the agent running; an idle session is left untouched. Cancellation leaves pending queue items intact.
 
 The mouse wheel and Page Up/Down scroll conversation history; scrolling to the top automatically requests an older page. New output preserves a scrolled reading position. `/jump last` resumes following the newest output. Mouse reporting is enabled while the TUI is mounted and disabled on exit; the terminal must support SGR mouse reports. Esc or Ctrl+C cancels a history load or search before interrupting the remote agent.
 
@@ -164,6 +305,7 @@ The single-line composer supports Readline-style editing. Words are whitespace-d
 | Alt+D | Delete the following word |
 | Ctrl+Y | Restore the most recently killed text at the cursor |
 | Ctrl+H / Backspace, Ctrl+D / Delete | Delete the preceding / following character |
+
 | Command | Action |
 | --- | --- |
 | `/ws` | Show all workspaces; choosing one opens its session list |
@@ -187,7 +329,7 @@ The single-line composer supports Readline-style editing. Words are whitespace-d
 
 Slash commands work in both pickers and the conversation composer. Typing `/` displays matching commands. The `/help`, `/cost`, and `/status` panels are temporary: the next command, or ten seconds, closes whichever one is open. The long forms `/workspace`, `/workspaces`, `/session`, and `/sessions` remain aliases. Names may contain spaces; quotes around the complete target are optional. The unquoted target `all` is reserved for `/s all`; use `/s "all"` or an ID to open a session titled `all`. Ambiguous targets require a full ID. Switching a workspace opens its sessions and detaches the old transcript; switching sessions updates the workspace label. Neither operation cancels a remote agent.
 
-Type `@` at the end of the draft to search files and directories in the selected session’s working directory **on the host**. Use ↑/↓ to select and Tab or Enter to insert; selecting a directory continues completion inside it. Paths with spaces use `@"path with spaces"`. Escape closes the menu and requests cancellation when the agent is running; after closing it, Enter sends the literal draft, including an unmatched path. Lookup failures remain visible and do not submit the draft. Completion operates on the trailing reference, not the cursor position inside existing text.
+Type `@` at the end of the draft to search files and directories in the selected session's working directory **on the host**. Use ↑/↓ to select and Tab or Enter to insert; selecting a directory continues completion inside it. Paths with spaces use `@"path with spaces"`. Escape closes the menu and requests cancellation when the agent is running; after closing it, Enter sends the literal draft, including an unmatched path. Lookup failures remain visible and do not submit the draft. Completion operates on the trailing reference, not the cursor position inside existing text.
 
 A file reference sends only `@path` in a text block. Harness instructs the model to read the referenced file or list the directory when needed; the TUI does not read local files, upload bytes, or expand contents into the prompt. Referencing an image path does not attach image data. Local attachments, image uploads/previews, and `@` session references are not implemented.
 
@@ -201,13 +343,15 @@ The footer defaults to one borderless line showing activity, model, workspace, c
 
 Working time uses the retained `turn/start` timestamp. If that timestamp is unavailable, `(observed)` means time since this client observed the run; reconnecting can reset this fallback. The clock stops when the host reports idle. The status includes model generation, tool execution, and approval waits, not just streamed text. Offline status is explicitly marked as last known.
 
-Context occupancy is marked `~`: Harness combines provider usage with estimated surface changes and the latest route capacity. Token totals come from the complete session’s `tokenUsage` projection, with separate uncached input, output, cache-read, and cache-write buckets; reasoning is already included in output. Totals update when the host publishes usage, not on every streamed character. Missing measurements display `unknown` or `?`. Control-stream baselines replace state on reconnect, and per-key watermarks prevent an older follow snapshot from overwriting newer metrics.
+Context occupancy is marked `~`: Harness combines provider usage with estimated surface changes and the latest route capacity. Token totals come from the complete session's `tokenUsage` projection, with separate uncached input, output, cache-read, and cache-write buckets; reasoning is already included in output. Totals update when the host publishes usage, not on every streamed character. Missing measurements display `unknown` or `?`. Control-stream baselines replace state on reconnect, and per-key watermarks prevent an older follow snapshot from overwriting newer metrics.
 
 Tool-only rows omit the separate role heading: `⚙` identifies a call, `✓` a successful result, and `✗` a failed result. Once complete arguments are available, each row shows the tool name and operation description, falling back to its command, path, or query. Results reuse the matching call summary when retained history contains it. Each operation occupies at most one terminal row, with whitespace flattened and long text ellipsized by display width. Other arguments, nested results, and tool output remain hidden. Assistant prose and explicit approval requests remain visible so the user can understand the response and decide whether to approve an action.
 
 ## Cost estimates
 
-Cost visibility is a first-class feature of `dsht`. Long-running coding sessions can accumulate large token usage while running unattended on a remote host, so the TUI keeps session and daily cost close to the controls used to steer or stop the work. These values are local estimates derived from Harness-visible usage; they are intended for monitoring and cost control, not as a replacement for the provider's account-wide invoice.
+`dsht` does not just show token counts: it turns Harness-visible per-request usage into a traceable CNY estimate. It separates uncached input, cache read, cache write, and output, and combines the model, the request settlement time, the price version, and the peak/off-peak window, so the cost of the current session and of the recent past stays visible while work is running.
+
+> These figures are a high-precision estimate from Harness-visible usage and local price configuration, for cost monitoring and control. They are not a provider account bill, and the provider invoice remains authoritative.
 
 `/cost` shows the selected session, today, and today plus the preceding two calendar days. Dates use Asia/Shanghai; the three-day view is not a rolling 72-hour window. The status bar reserves `S:` for session cost and `D:` for today. `~` marks an estimate; `*` marks a subtotal that is not exact, because a request carries no timestamp, no price covers it, or a calendar range cannot place it. Incomplete coverage is reported separately: charges cached by an earlier run count as complete, while an empty or failed scan raises the bar's `!` prefix and a reason in `/status`. Each host origin has a separate ledger. Totals cover HTTP-visible sessions and previously cached sessions; they are not account-wide provider bills.
 
@@ -225,7 +369,7 @@ Usage files live under `~/.local/state/dsht/cost/<origin-hash>/` (respecting `XD
 
 Installed packages export `Client` from `@itookit/dsht` and `login`/`CookieStore` from `@itookit/dsht/auth`, with TypeScript declarations. Source consumers can import from `src/client.ts` with a TypeScript loader, or from `dist/client.js` after building. `authenticate(token)` exchanges credentials; `connect()` opens one multiplexed socket; `listWorkspaces()` and `listSessions(workspaceId?)` return promises of server rows. `call(endpoint, args, signal?)` preserves host errors as `RemoteError` with `code` and `details`. Always await `close()` in `finally`. Library consumers opt into persistence with `login(client, token, new CookieStore())` from `src/auth.ts`; `Client.authenticate()` itself only retains credentials in memory.
 
-Session and workspace command methods use `{ request: { ... } }` inside `args`; session listing uses `{ _request: {} }`. `$events/result` uses its named arguments directly. Follow snapshots replace retained state after reconnect; durable messages and transient assistant text remain separate. The reader accepts both `event` records and older `chunks` wrappers containing `chunkrow/text-chunks`, `chunkrow/reasoning-chunks`, or `chunkrow/tool-call-chunks`. Hosts without `assistantStream` expose live text through logged chunks; the TUI reconstructs only the unfinished attempt and preserves each packed record’s starting sequence for pagination.
+Session and workspace command methods use `{ request: { ... } }` inside `args`; session listing uses `{ _request: {} }`. `$events/result` uses its named arguments directly. Follow snapshots replace retained state after reconnect; durable messages and transient assistant text remain separate. The reader accepts both `event` records and older `chunks` wrappers containing `chunkrow/text-chunks`, `chunkrow/reasoning-chunks`, or `chunkrow/tool-call-chunks`. Hosts without `assistantStream` expose live text through logged chunks; the TUI reconstructs only the unfinished attempt and preserves each packed record's starting sequence for pagination.
 
 ## Publishing to npm
 
@@ -233,7 +377,7 @@ This repository publishes one public package, `@itookit/dsht`, from the `mushuan
 
 | Field | Value |
 | --- | --- |
-| Name and version | `@itookit/dsht` `0.1.0` |
+| Name and version | `@itookit/dsht` `0.2.0` |
 | Executable | `dsht`, or `npx @itookit/dsht` without installing |
 | Library entries | `@itookit/dsht` and `@itookit/dsht/auth` |
 | Author | lizlok@gmail.com |
@@ -255,7 +399,7 @@ npm publish --access public
 
 `publishConfig.access` is `public`, which a scoped package needs to be installable without a paid plan; the flag is therefore part of the package rather than of the publish command. An account with two-factor authentication publishes with a live code, `npm publish --otp=<code>`; the code is checked at the final request, after the typecheck, suite, and build have already run.
 
-Later releases run in `.github/workflows/publish.yml`, which publishes from a version tag with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) and provenance, so no publish token is stored. Configure it once at `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions with organization or user `mushuanli`, repository `dsht`, workflow filename `publish.yml`, and allowed action `npm publish`. Trusted publishing cannot create a package, so version `0.1.0` is published by hand; after that, `npm version 0.1.1 && git push --follow-tags` releases.
+Later releases run in `.github/workflows/publish.yml`, which publishes from a version tag with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) and provenance, so no publish token is stored. Configure it once at `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions with organization or user `mushuanli`, repository `dsht`, workflow filename `publish.yml`, and allowed action `npm publish`. Trusted publishing cannot create a package, so the first version is published by hand; after that, `npm version 0.2.1 && git push --follow-tags` releases.
 
 The workflow packs without publishing when started manually, and refuses a tag that disagrees with `package.json`. See the official [scoped publishing guide](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). Registry publication is not part of the local validation performed for this repository.
 

@@ -139,6 +139,7 @@ DeepSeek Harness 往往运行在性能更强、环境更完整的开发工作站
 - [开发与限制](#开发与限制)
 
 ## 启动
+
 需要 Node.js 22.19 或更新版本，以及已经运行的 `dsh web` 服务；服务是单独的前置条件，本客户端不会启动它。默认连接本机 `http://127.0.0.1:3080`：
 
 ```sh
@@ -266,6 +267,7 @@ Development Host
 实际体验取决于移动终端对 ANSI、Unicode、方向键、SGR mouse reports 等终端能力的支持。即使触摸鼠标能力有限，核心操作仍可以通过键盘和 slash 命令完成。
 
 ## 列出工作区和会话
+
 ```sh
 npx @itookit/dsht list workspaces --json
 npx @itookit/dsht list sessions --json
@@ -284,6 +286,7 @@ node --import tsx src/cli.tsx list sessions --json
 JSON 输出格式为 `{ "items": [...] }`；省略 `--json` 则输出制表符分隔的列表。工作区筛选使用服务端 `sessionIds` 成员关系。工作区列表读取 `workspace/follow` 的首个 baseline 后取消订阅，不会调用不存在的 `workspace/list` 端点。
 
 ## 对话操作
+
 Enter 提交消息。所选会话运行中时，Ctrl+C 请求取消；只有空闲时才退出，连续按键会复用尚未完成的取消请求。取消会等待正在提交的消息完成接收，失败时保留客户端。聊天界面中 Esc 会发送取消请求，不受本地空闲状态判断限制。任务运行中时，Esc 关闭文件或历史／搜索菜单的同时请求取消；空闲菜单仅关闭。正在执行的本地历史／搜索／费用加载优先被取消。Page Up/Down 滚动当前对话；`/older` 加载更早记录。所有退出路径（包括 `/quit` 和 SIGTERM）都会在关闭连接前停止所选任务，因此退出不会留下仍在运行的代理；会话空闲时不发送取消。取消当前任务会保留排队消息。
 
 鼠标滚轮和 Page Up/Down 滚动对话；滚到顶部自动加载更早的一页。查看旧记录时，新输出保留阅读位置；`/jump last` 恢复跟随最新输出。TUI 挂载时启用鼠标报告，退出时关闭，需要终端支持 SGR 鼠标报告。加载历史或搜索期间，Esc 或 Ctrl+C 优先取消本地操作，不中断远程任务。
@@ -293,63 +296,35 @@ Enter 提交消息。所选会话运行中时，Ctrl+C 请求取消；只有空�
 单行输入框支持 Readline 风格编辑。单词以空白分隔；光标移动和逐字符删除保持完整的 Unicode 组合字符。粘贴的多行文本会以空格连接成一行。空输入时 Ctrl+D 不退出；Ctrl+C 保持停止／退出行为。未处理的修饰键快捷键不会将控制字符插入消息。终端退格键的 BS 和 DEL 编码均向后删除；独立 Delete 键（CSI 3~）向前删除。
 
 | 按键 | 编辑操作 |
-
 | --- | --- |
-
 | Ctrl+A / Ctrl+E、Home / End | 移到开头／末尾 |
-
 | Ctrl+B / Ctrl+F、← / → | 移动一个字符 |
-
 | Alt+B / Alt+F、Ctrl+← / Ctrl+→ | 移动一个词 |
-
 | Ctrl+K / Ctrl+U | 删除光标至末尾／开头至光标 |
-
 | Ctrl+W、Alt+Backspace | 删除前一个词 |
-
 | Alt+D | 删除后一个词 |
-
 | Ctrl+Y | 在光标处恢复最近剪除的文本 |
-
 | Ctrl+H / Backspace、Ctrl+D / Delete | 删除前一个／后一个字符 |
 
 | 命令 | 操作 |
-
 | --- | --- |
-
 | `/ws` | 显示所有工作区，选中后打开其会话列表 |
-
 | `/ws TARGET` | 按 ID、完整名称／路径或唯一 ID 前缀选择工作区 |
-
 | `/s` | 显示当前工作区的会话；未选择工作区时先引导选择 |
-
 | `/s TARGET` | 按 ID、完整标题或唯一 ID 前缀跨工作区打开会话 |
-
 | `/s all` | 显示所有工作区的会话 |
-
 | `/new` | 在所选工作区创建会话 |
-
 | `/cancel` | 取消当前轮次，保留待处理队列 |
-
 | `/steer TEXT` | 提交转向输入 |
-
 | `/older` | 加载更早的历史 |
-
 | `/history [text]` | 列出并可选筛选已加载记录；Enter 跳到所选记录 |
-
 | `/jump <seq\|first\|last>` | 跳到可见记录序号、最早历史或最新输出 |
-
 | `/search <text>` | 补齐并搜索当前会话历史，选择匹配消息后跳转 |
-
 | `/ssearch <text>` | 在服务端搜索结果中筛选当前工作区的会话 |
-
 | `/wsearch <text>` | 搜索服务端可见的所有工作区会话 |
-
 | `/allow`, `/deny` | 回复当前审批；批准仅限一次 |
-
 | `/status` | 展开或收起底部完整状态信息 |
-
 | `/cost` | 展开／收起会话、今日、三日费用，并刷新用量 |
-
 | `/help`, `/quit` | 显示命令提示或退出 |
 
 Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示匹配命令。`/help`、`/cost`、`/status` 三个面板是临时的：执行下一条命令、或十秒后，当前打开的面板会自动关闭。长命令 `/workspace`、`/workspaces`、`/session`、`/sessions` 保留为别名。名称可以包含空格，完整目标两侧的引号可选。不带引号的目标 `all` 保留给 `/s all`；打开标题为 `all` 的会话时，使用 `/s "all"` 或其 ID。目标有歧义时必须提供完整 ID。切换工作区会打开其会话列表并解除旧对话订阅；切换会话会同步工作区标签。两种操作均不会取消远程代理。
@@ -363,6 +338,7 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 对话顶部显示最新会话标题，无标题时回退到 ID；`/status` 保留完整会话 ID。取消回执在后续历史消息到达时保持可见，直到服务端报告空闲；接受取消不表示工具进程已经退出。
 
 ## 实时状态
+
 底栏默认无边框单行显示运行状态、模型、工作区、上下文占用和 token 总量；宽度足够时补充输入／输出、缓存、队列和后台任务数。长名称按终端显示宽度缩短，窄终端优先省略次要信息。`/status` 切换完整多行详情，显示完整路径、供应商／模型、思考强度及各项用量。`!` 表示有指标或模型目录错误，或计费覆盖不完整；详情中显示原因。运行中时区分最近实际使用的模型和不同的下次请求模型；新会话使用服务端模型目录的默认值。服务端设置、凭据和适配器变更通知会刷新模型目录。
 
 工作计时使用已加载日志的 `turn/start` 时间戳。缺少该时间戳时，`(observed)` 表示从客户端观察到运行开始计时；重连可能重置此备用计时。服务端报告空闲后停止计时。运行状态涵盖模型生成、工具执行及审批等待，不仅是文本输出。断线时明确标注为最后已知状态。
@@ -390,33 +366,25 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 用量文件位于 `~/.local/state/dsht/cost/<origin-hash>/`，遵循 `XDG_STATE_HOME`，也可通过 `DSHT_STATE_DIR` 指定应用状态根目录。文件只含会话 ID、时间戳、模型身份、token 数、所选价格版本和估算值，不包含提示词、工具正文、凭据或 cookie。价格文件属于配置，这些用量文件属于状态，因此只有前者需要纳入设置备份。写入使用私有临时文件及原子替换，按历史截点命名的文件避免旧扫描覆盖更新的缓存截点。缓存跨重启保留，不需要访问服务端配置目录。账本保存的是逐条请求而非累计总额，且跳过已扫描会话的记录只存在内存中，因此重启后的首次扫描会重新读取每个会话，并按各请求自身的结算时间重新计算停机期间新增的用量。
 
 ## 客户端接口
+
 安装后的包通过 `@itookit/dsht` 导出 `Client`，通过 `@itookit/dsht/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/client.ts` 导入，或构建后从 `dist/client.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
 
 会话和工作区命令在 `args` 内使用 `{ request: { ... } }`；会话列表使用 `{ _request: {} }`。`$events/result` 直接使用具名参数。重连后的 follow 快照整体替换保留状态；持久消息与临时助手文本分别保存。读取器同时支持 `event` 记录和旧版 `chunks` 包装；后者包含 `chunkrow/text-chunks`、`chunkrow/reasoning-chunks` 或 `chunkrow/tool-call-chunks`。不提供 `assistantStream` 的服务端通过日志 chunk 传递实时文本；TUI 只重建尚未完成的尝试，并保留每条压缩记录的起始序号用于翻页。
 
 ## 发布到 npm
+
 本仓库从 `mushuanli/dsht` 仓库发布一个公开包 `@itookit/dsht`。必须使用 scope，因为 npm 会以「与 `dot`、`st` 等现有短名过于相似」为由拒绝非 scope 的 `dsht`。下表中 `package.json` 是各字段的依据。
 
 | 字段 | 值 |
-
 | --- | --- |
-
-| 名称与版本 | `@itookit/dsht` `0.1.0` |
-
+| 名称与版本 | `@itookit/dsht` `0.2.0` |
 | 可执行命令 | `dsht`，不安装时用 `npx @itookit/dsht` |
-
 | 库入口 | `@itookit/dsht` 和 `@itookit/dsht/auth` |
-
 | 作者 | lizlok\@gmail.com |
-
 | 许可证 | MIT，许可证正文位于 `LICENSE` |
-
 | 仓库与问题反馈 | [mushuanli/dsht](https://github.com/mushuanli/dsht) |
-
 | Node.js | 22.19 或更新版本 |
-
 | Registry 访问 | public，使用 `@itookit` scope |
-
 | 发布内容 | `dist/`、两份 README、它们的配对记录、截图和许可证 |
 
 描述、关键词和依赖位于 `package.json`。以下命令属于维护者操作；创建本地安装包不会自动发布。
@@ -431,11 +399,12 @@ npm publish --access public
 
 `publishConfig.access` 为 `public`；scoped 包需要它才能被公开安装，因此该设置放在包里而不是每次发布命令上。启用两步验证的账号需用即时验证码发布：`npm publish --otp=<验证码>`；验证码在最后一次请求时校验，此时类型检查、测试和构建均已执行完毕。
 
-后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此 `0.1.0` 需手工发布；之后执行 `npm version 0.1.1 && git push --follow-tags` 即可发布。
+后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此首个版本需手工发布；之后执行 `npm version 0.2.1 && git push --follow-tags` 即可发布。
 
 手动触发时该工作流只打包不发布，并拒绝与 `package.json` 不一致的 tag。参见官方 [scoped 发布指南](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。Registry 发布不属于本仓库已执行的本地验证。
 
 ## 开发与限制
+
 ```sh
 npm test
 npm run test:terminal

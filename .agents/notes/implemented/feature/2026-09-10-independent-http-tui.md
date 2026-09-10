@@ -32,6 +32,8 @@ Slash-command panels are temporary: the next command closes the panel the previo
 
 Startup configuration accepts the URL that `dsh web` prints, which carries the launch token as a `?token=` query parameter. Splitting that parameter before validation lets users paste the printed line as `DSH_URL` unchanged, while any other path or query still fails so the origin stays unambiguous for cookie and cost scoping. `DSH_TOKEN` keeps precedence over the URL parameter, blank values never authenticate, and the token stays memory-only: only the exchanged cookie reaches disk.
 
+The two READMEs stay a line-for-line pair: every heading, paragraph, list item, table row, and fenced block occupies the same physical line in both files, and `README.i18n.yaml` records the reviewed hashes. A translated edit therefore changes both files in the same place, and a table never carries blank lines between its rows, which would stop GitHub and npm from rendering it as a table.
+
 ## Alternatives considered
 
 Reusing Cordis client services couples installation and startup to Harness composition. Rust improves native distribution but duplicates more protocol and terminal integration work. Python adds a runtime ecosystem that the requested Node.js implementation does not need. A separate Git repository keeps dependency installation and release history independent.
