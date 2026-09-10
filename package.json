@@ -1,6 +1,6 @@
 {
   "name": "@itookit/dsht",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "type": "module",
   "description": "Remote-first TUI for DeepSeek Harness with SSH-friendly mobile access and request-level cost tracking",
   "engines": {
