@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React, { act, useEffect } from 'react';
 import { render } from 'ink-testing-library';
-import { App } from '../src/app.tsx';
+import { App, commonPrefix } from '../src/app.tsx';
 import { Controller } from '../src/controller.ts';
 import { array, object } from '../src/wire.ts';
 import { host, until } from './host.ts';
@@ -509,4 +509,20 @@ test('cost coverage warns through the status prefix instead of rewriting a subto
   ledger.error = 'scan failed';
   assert.match(bar(), /! Idle/);
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);
+});
+
+test('Tab completes a slash command and stops at an ambiguous shared prefix', async t => {
+  assert.equal(commonPrefix(['/ws', '/wsearch']), '/ws');
+  assert.equal(commonPrefix(['/help']), '/help');
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/w'); await pressKey(ui, '\t');
+  await until(() => ui.lastFrame()?.includes('❯ /ws') === true);
+  await pressKey(ui, '\u0015');
+  await pressKey(ui, '/he'); await pressKey(ui, '\t');
+  await until(() => ui.lastFrame()?.includes('❯ /help') === true);
 });

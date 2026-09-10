@@ -70,6 +70,9 @@ export function compactStatus(fields: string[], width: number): string {
   return fit(joins([...core, ...extras]), width);
 }
 
+/** Compact token counts; one formatter is reused because construction dominates the format cost. */
+const compactNumber = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+
 /** Render a live clock and selected-session metadata; the timer belongs to this mounted bar. */
 export const StatusBar = memo(function StatusBar({ controller, expanded = false }: { controller: Controller; expanded?: boolean; revision?: number }) {
   const { stdout } = useStdout();
@@ -101,7 +104,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false 
     const usage = record(view.values.tokenUsage);
     const buckets = [usage.uncachedInputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].map(numeric);
     const total = buckets.every(value => value !== undefined) ? (buckets as number[]).reduce((a, b) => a + b, 0) : undefined;
-    const compactCount = (value: number | undefined) => value === undefined ? '?' : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+    const compactCount = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
     const activity = running ? `Working ${since === undefined ? '?' : elapsedTime(now - since)}${state.transcript.activeTurnStartedAt === undefined ? '~' : ''}` : 'Idle';
     const fields = [
       `${!state.online ? 'Offline · ' : ''}${state.controlError || state.modelError || coverage === 'partial' ? '! ' : ''}${activity}`,

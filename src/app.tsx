@@ -14,6 +14,17 @@ import { array, errorText, object, safeText, string, type ObjectValue } from './
 
 const COMMANDS = ['/ws', '/s', '/new', '/older', '/history', '/jump', '/search', '/ssearch', '/wsearch', '/cancel', '/steer', '/allow', '/deny', '/status', '/cost', '/help', '/quit'];
 const HELP = '/ws [name or ID] · /s [title or ID] · /s all · /new · /older · /history [text] · /jump <seq|first|last> · /search text · /ssearch text · /wsearch text · /cancel · /steer text · /allow · /deny · /status · /cost · /quit';
+/** Longest common prefix of the candidate commands, so Tab can extend an ambiguous draft. */
+export function commonPrefix(values: string[]): string {
+  let prefix = values[0] ?? '';
+  for (const value of values) {
+    let index = 0;
+    while (index < prefix.length && index < value.length && prefix[index] === value[index]) index++;
+    prefix = prefix.slice(0, index);
+  }
+  return prefix;
+}
+
 /** A slash-command panel closes on the next command or after this long, whichever comes first. */
 const PANEL_LIFETIME_MS = 10_000;
 
@@ -91,6 +102,15 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
     const mention = fileMention(candidate, token.quoted)!;
     setInput(input.slice(0, -token.prefix.length) + mention + (candidate.kind === 'file' ? ' ' : ''));
   };
+  /** Complete the leading slash command; an ambiguous draft extends to the shared prefix. */
+  const completeCommand = () => {
+    if (!input.startsWith('/') || input.includes(' ')) return;
+    const matches = COMMANDS.filter(command => command.startsWith(input));
+    const only = matches.length === 1 ? matches[0] : undefined;
+    if (only !== undefined) { setInput(`${only} `); return; }
+    const prefix = commonPrefix(matches);
+    if (prefix.length > input.length) setInput(prefix);
+  };
   const questions = pending?.event === 'user-questions/request' ? array(object(pending.request).questions).map(object) : [];
   const eventId = pending ? string(pending.eventId) : '';
   const answered = answers[eventId] ?? [];
@@ -111,6 +131,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
       else if (key.downArrow) setReferenceIndex(value => Math.max(0, Math.min((matches?.items.length ?? 1) - 1, value + 1)));
       return;
     }
+    if (key.tab) { completeCommand(); return; }
     if (key.escape && state.screen === 'chat') { void controller.interrupt(true); }
     if (key.pageUp) scrollHistory(10);
     if (key.pageDown) scrollHistory(-10);
@@ -292,7 +313,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
       {state.screen === 'chat' && historyQuery !== undefined && <Box flexDirection="column" marginY={1}>
         <Text bold>{contentSearch ? 'Search · session history' : 'History · loaded records'} · Esc close</Text>
         <Picker key={`history:${historyQuery}`} choices={[
-          ...layout.messages.filter(message => (contentSearch ? message.text : `${message.seq} ${message.role} ${message.text}`).toLowerCase().includes(historyQuery.toLowerCase())).map(message => ({
+          ...layout.messages.filter(message => (contentSearch
+            ? message.role !== 'Tool' && message.text.toLowerCase().includes(historyQuery.toLowerCase())
+            : message.role === 'You' && `${message.seq} ${message.text}`.toLowerCase().includes(historyQuery.toLowerCase()))).map(message => ({
             key: String(message.seq), label: toolLine(`#${message.seq} ${message.role} · ${message.text}`, width - 2),
             action: () => operate(() => jumpHistory(message.seq)),
           })),
@@ -321,7 +344,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
               {index + Math.max(0, referenceIndex - 5) === referenceIndex ? '❯ ' : '  '}{item.path}{item.kind === 'directory' ? '/' : ''}
             </Text>)}
       </Box>}
-      <Text dimColor>Enter send · Esc cancel · Wheel/PgUp/PgDn scroll · Ctrl+C stop / exit</Text>
+      <Text dimColor>Enter send · Tab complete · Esc cancel · Wheel/PgUp/PgDn scroll · Ctrl+C stop / exit</Text>
       {input.startsWith('/') && !input.includes(' ') && <Text dimColor>{COMMANDS.filter(command => command.startsWith(input)).join('  ')}</Text>}
       {help && <><Text dimColor>{HELP}</Text><Text dimColor>Editing: Ctrl+A/E start/end · Ctrl+K/U kill right/left · Ctrl+W kill word · Ctrl+Y restore</Text></>}
       {costExpanded && <CostPanel controller={controller} />}

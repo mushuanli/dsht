@@ -291,9 +291,9 @@ Enter submits a prompt. Ctrl+C requests cancellation while the selected session 
 
 The mouse wheel and Page Up/Down scroll conversation history; scrolling to the top automatically requests an older page. New output preserves a scrolled reading position. `/jump last` resumes following the newest output. Mouse reporting is enabled while the TUI is mounted and disabled on exit; the terminal must support SGR mouse reports. Esc or Ctrl+C cancels a history load or search before interrupting the remote agent.
 
-`/search` matches literal text case-insensitively in displayed messages, including older pages; hidden tool bodies are excluded. `/history` only lists loaded records. Record sequences are the numbers shown by these pickers. `/ssearch` and `/wsearch` call `session/search`, which searches current user/assistant message content and returns at most 20 sessions, snippets, and a truncation flag; it exposes neither a result cursor nor matching record sequences. Workspace filtering happens after that global limit, so a truncated workspace result can omit matches. The UI warns when results are incomplete; refine the query. Selecting a session loads its history and offers matching messages for the jump. These operations use HTTP and never scan the host configuration directory.
+`/search` matches literal text case-insensitively in conversation messages, including older pages; tool-only rows are excluded. `/history` lists your own prompts from the loaded pages. Record sequences are the numbers shown by these pickers. `/ssearch` and `/wsearch` call `session/search`, which searches current user/assistant message content and returns at most 20 sessions, snippets, and a truncation flag; it exposes neither a result cursor nor matching record sequences. Workspace filtering happens after that global limit, so a truncated workspace result can omit matches. The UI warns when results are incomplete; refine the query. Selecting a session loads its history and offers matching messages for the jump. These operations use HTTP and never scan the host configuration directory.
 
-The single-line composer supports Readline-style editing. Words are whitespace-delimited; cursor movement and character deletion preserve composed Unicode characters. Multiline pasted text becomes one line with spaces. Ctrl+D on empty input does not exit; Ctrl+C keeps its stop/exit behavior. Other unhandled modifier shortcuts do not insert their control characters. Both BS and DEL terminal backspace encodings delete backward; the dedicated Delete key (CSI 3~) deletes forward.
+Tab completes the leading slash command, extending an ambiguous draft to the shared prefix. The single-line composer supports Readline-style editing. Words are whitespace-delimited; cursor movement and character deletion preserve composed Unicode characters. Multiline pasted text becomes one line with spaces. Ctrl+D on empty input does not exit; Ctrl+C keeps its stop/exit behavior. Other unhandled modifier shortcuts do not insert their control characters. Both BS and DEL terminal backspace encodings delete backward; the dedicated Delete key (CSI 3~) deletes forward.
 
 | Key | Edit |
 | --- | --- |
@@ -317,7 +317,7 @@ The single-line composer supports Readline-style editing. Words are whitespace-d
 | `/cancel` | Cancel the active turn; leave pending queue items intact |
 | `/steer TEXT` | Submit steering input |
 | `/older` | Load older history |
-| `/history [text]` | List loaded records, optionally filtered; Enter jumps to the selected record |
+| `/history [text]` | List your own prompts, optionally filtered; Enter jumps to the selected record |
 | `/jump <seq\|first\|last>` | Jump to a visible record sequence, oldest history, or latest output |
 | `/search <text>` | Load and search the current session history; choose a matching message to jump |
 | `/ssearch <text>` | Search host results within the selected workspace |
