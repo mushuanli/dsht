@@ -1,8 +1,8 @@
-# DeepSeek Harness HTTP TUI
+# DeepSeek Harness Terminal
 
 English | [中文](README.zh.md)
 
-![dsh-cli terminal interface](dsh-tui.png)
+![DeepSeek Harness Terminal (dsht)](dsht.png)
 
 ## Summary
 
@@ -42,16 +42,16 @@ npm start
 After this package is published to npm, run it without cloning or building:
 
 ```sh
-npx dsh-cli
-npx dsh-cli list workspaces --json
-npx dsh-cli list sessions --json
+npx dsht
+npx dsht list workspaces --json
+npx dsht list sessions --json
 ```
 
-Use the same `DSH_URL` and first-login `DSH_TOKEN` environment variables. To install the command globally, use `npm install -g dsh-cli`, then run `dsh-cli`. Registry commands require a published package; the source commands above work from this checkout.
+Use the same `DSH_URL` and first-login `DSH_TOKEN` environment variables. To install the command globally, use `npm install -g dsht`, then run `dsht`. Registry commands require a published package; the source commands above work from this checkout.
 
 Select a workspace with ↑/↓ and Enter, then select a session or **New session**. **All sessions** also exposes sessions outside registered workspaces. **Add workspace** accepts an existing absolute directory on the host, which may differ from your local filesystem. Creating a session requires a selected workspace.
 
-On first login, authentication exchanges `DSH_TOKEN` at `GET /` and saves the cookie per HTTP origin. Later starts, including list commands, reuse that cookie without a token. The store uses `$XDG_STATE_HOME/dsh-cli/auth`, or `~/.local/state/dsh-cli/auth` when unset; `--auth-dir` or `DSH_CLI_AUTH_DIR` overrides it. POSIX directories use 0700 and cookie files use 0600; Windows uses the account directory’s inherited access controls. Launch tokens are never saved.
+On first login, authentication exchanges `DSH_TOKEN` at `GET /` and saves the cookie per HTTP origin. Later starts, including list commands, reuse that cookie without a token. The store uses `$XDG_STATE_HOME/dsht/auth`, or `~/.local/state/dsht/auth` when unset; `--auth-dir` or `DSHT_AUTH_DIR` overrides it. POSIX directories use 0700 and cookie files use 0600; Windows uses the account directory’s inherited access controls. Launch tokens are never saved.
 
 The host determines cookie expiration. An expired or rejected cookie requires `DSH_TOKEN` again; a supplied token refreshes authentication automatically after HTTP 401. Network failures and HTTP 403 do not trigger token exchange. Corrupt or insecure cookie files fail explicitly. The base URL must be an origin without a path or query, and the host must allow its hostname.
 
@@ -144,28 +144,28 @@ The bundled CNY rates were checked against the [official pricing page](https://a
 
 The default price validity starts at Beijing midnight on the verification date; this is a local estimate policy, not a claim about the official effective date. Earlier usage needs historical price entries. The recorded assistant settlement timestamp selects the rate; requests spanning a tariff boundary may differ from the invoice because the official page does not specify their attribution. Images use provider-reported tokens. Cached priced requests retain their price version when configuration changes; previously unpriced requests can be priced on a later scan.
 
-On first interactive launch, the client creates `~/.config/dsh-cli/prices.json` (or `$XDG_CONFIG_HOME/dsh-cli/prices.json`). `DSH_CLI_CONFIG_DIR` overrides that directory. The JSON array contains price versions with `id`, `provider`, `model`, `currency: "CNY"`, `source`, inclusive `from`, optional exclusive `until`, `timezone`, weekday numbers (`0` Sunday), minute-of-day `windows`, and `peak`/`offPeak` rates named `input`, `cacheRead`, `cacheWrite`, `output`, per million tokens. To update prices, close the old interval with `until` and append a new version with a unique ID and matching `from`; overlapping intervals are rejected. Restart to load configuration changes. Price discovery is manual; the TUI does not scrape prices during startup.
+On first interactive launch, the client creates `~/.config/dsht/prices.json` (or `$XDG_CONFIG_HOME/dsht/prices.json`). `DSHT_CONFIG_DIR` overrides that directory. The JSON array contains price versions with `id`, `provider`, `model`, `currency: "CNY"`, `source`, inclusive `from`, optional exclusive `until`, `timezone`, weekday numbers (`0` Sunday), minute-of-day `windows`, and `peak`/`offPeak` rates named `input`, `cacheRead`, `cacheWrite`, `output`, per million tokens. To update prices, close the old interval with `until` and append a new version with a unique ID and matching `from`; overlapping intervals are rejected. Restart to load configuration changes. Price discovery is manual; the TUI does not scrape prices during startup.
 
-Usage files live under `~/.local/state/dsh-cli/cost/<origin-hash>/` (respecting `XDG_STATE_HOME`, or `DSH_CLI_STATE_DIR` for the application state root). They contain only session IDs, timestamps, model identities, token counts, selected price versions and estimates. They exclude prompts, tool bodies, credentials and cookies. Writes use private temporary files and atomic replacement; opening-cut filenames prevent older concurrent scans from displacing a newer cached cut. The cache survives restart and does not need access to the host configuration directory.
+Usage files live under `~/.local/state/dsht/cost/<origin-hash>/` (respecting `XDG_STATE_HOME`, or `DSHT_STATE_DIR` for the application state root). They contain only session IDs, timestamps, model identities, token counts, selected price versions and estimates. They exclude prompts, tool bodies, credentials and cookies. Writes use private temporary files and atomic replacement; opening-cut filenames prevent older concurrent scans from displacing a newer cached cut. The cache survives restart and does not need access to the host configuration directory.
 
 ## Client API
 
-Installed packages export `Client` from `dsh-cli` and `login`/`CookieStore` from `dsh-cli/auth`, with TypeScript declarations. Source consumers can import from `src/client.ts` with a TypeScript loader, or from `dist/client.js` after building. `authenticate(token)` exchanges credentials; `connect()` opens one multiplexed socket; `listWorkspaces()` and `listSessions(workspaceId?)` return promises of server rows. `call(endpoint, args, signal?)` preserves host errors as `RemoteError` with `code` and `details`. Always await `close()` in `finally`. Library consumers opt into persistence with `login(client, token, new CookieStore())` from `src/auth.ts`; `Client.authenticate()` itself only retains credentials in memory.
+Installed packages export `Client` from `dsht` and `login`/`CookieStore` from `dsht/auth`, with TypeScript declarations. Source consumers can import from `src/client.ts` with a TypeScript loader, or from `dist/client.js` after building. `authenticate(token)` exchanges credentials; `connect()` opens one multiplexed socket; `listWorkspaces()` and `listSessions(workspaceId?)` return promises of server rows. `call(endpoint, args, signal?)` preserves host errors as `RemoteError` with `code` and `details`. Always await `close()` in `finally`. Library consumers opt into persistence with `login(client, token, new CookieStore())` from `src/auth.ts`; `Client.authenticate()` itself only retains credentials in memory.
 
 Session and workspace command methods use `{ request: { ... } }` inside `args`; session listing uses `{ _request: {} }`. `$events/result` uses its named arguments directly. Follow snapshots replace retained state after reconnect; durable messages and transient assistant text remain separate. The reader accepts both `event` records and older `chunks` wrappers containing `chunkrow/text-chunks`, `chunkrow/reasoning-chunks`, or `chunkrow/tool-call-chunks`. Hosts without `assistantStream` expose live text through logged chunks; the TUI reconstructs only the unfinished attempt and preserves each packed record’s starting sequence for pagination.
 
 ## Publishing to npm
 
-This repository publishes one unscoped public package, `dsh-cli`, from the `mushuanli/dsh-tui` repository. `package.json` is the authority for the fields below.
+This repository publishes one unscoped public package, `dsht`, from the `mushuanli/dsht` repository. `package.json` is the authority for the fields below.
 
 | Field | Value |
 | --- | --- |
-| Name and version | `dsh-cli` `0.1.0` |
-| Executable | `dsh-cli`, or `npx dsh-cli` without installing |
-| Library entries | `dsh-cli` and `dsh-cli/auth` |
+| Name and version | `dsht` `0.1.0` |
+| Executable | `dsht`, or `npx dsht` without installing |
+| Library entries | `dsht` and `dsht/auth` |
 | Author | lizlok@gmail.com |
 | License | MIT, with the license text in `LICENSE` |
-| Repository and issues | [mushuanli/dsh-tui](https://github.com/mushuanli/dsh-tui) |
+| Repository and issues | [mushuanli/dsht](https://github.com/mushuanli/dsht) |
 | Node.js | 22.19 or newer |
 | Registry access | public, unscoped |
 | Published files | `dist/`, both READMEs, their pairing record, the screenshot, and the license |

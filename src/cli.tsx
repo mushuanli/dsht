@@ -14,25 +14,25 @@ import { Client } from './client.ts';
 import { Controller } from './controller.ts';
 import { errorText, safeText, string } from './wire.ts';
 
-const HELP = `Usage: dsh-cli [options] [list workspaces|list sessions]
+const HELP = `Usage: dsht [options] [list workspaces|list sessions]
 
 With no command, choose a workspace and session interactively.
 
   --url <origin>        Host origin (DSH_URL or http://127.0.0.1:3080)
   --workspace <id>      Filter list sessions by workspace
   --session <id>        Open a session directly
-  --auth-dir <path>     Private cookie directory (or DSH_CLI_AUTH_DIR)
+  --auth-dir <path>     Private cookie directory (or DSHT_AUTH_DIR)
   --json               Print machine-readable list output
   --help               Show this help
 
 First login: set DSH_TOKEN to the token printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 /cost shows session, today and three-day CNY estimates.
-DSH_CLI_CONFIG_DIR overrides the prices.json directory; DSH_CLI_STATE_DIR overrides usage storage.
+DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
 Examples:
-  npx dsh-cli
-  dsh-cli list workspaces --json
-  dsh-cli list sessions --workspace <id> --json
+  npx dsht
+  dsht list workspaces --json
+  dsht list sessions --workspace <id> --json
 `;
 
 async function main(): Promise<void> {
@@ -64,13 +64,13 @@ async function main(): Promise<void> {
     return;
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
-  const config = process.env.DSH_CLI_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'dsh-cli');
+  const config = process.env.DSHT_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'dsht');
   await mkdir(config, { recursive: true, mode: 0o700 });
   const pricePath = join(config, 'prices.json');
   try { await writeFile(pricePath, JSON.stringify(DEFAULT_PRICES, null, 2) + '\n', { flag: 'wx', mode: 0o600 }); }
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
   const prices = pricesFrom(JSON.parse(await readFile(pricePath, 'utf8')));
-  const costDirectory = join(process.env.DSH_CLI_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsh-cli'), 'cost', createHash('sha256').update(new URL(values.url).origin).digest('hex'));
+  const costDirectory = join(process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht'), 'cost', createHash('sha256').update(new URL(values.url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory);
   await costs.load();
   const controller = new Controller(values.url, token, values.session, undefined, client => login(client, token, store), costs);

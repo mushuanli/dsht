@@ -1,5 +1,5 @@
 {
-  "name": "dsh-cli",
+  "name": "dsht",
   "version": "0.1.0",
   "type": "module",
   "description": "Standalone terminal client for the DeepSeek Harness HTTP gateway",
@@ -7,13 +7,13 @@
     "node": ">=22.19"
   },
   "bin": {
-    "dsh-cli": "dist/cli.js"
+    "dsht": "dist/cli.js"
   },
   "files": [
     "dist",
     "README.md",
     "README.zh.md",
-    "dsh-tui.png"
+    "dsht.png"
   ],
   "main": "dist/client.js",
   "types": "dist/client.d.ts",
@@ -50,12 +50,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mushuanli/dsh-tui.git"
+    "url": "git+https://github.com/mushuanli/dsht.git"
   },
   "bugs": {
-    "url": "https://github.com/mushuanli/dsh-tui/issues"
+    "url": "https://github.com/mushuanli/dsht/issues"
   },
-  "homepage": "https://github.com/mushuanli/dsh-tui#readme",
+  "homepage": "https://github.com/mushuanli/dsht#readme",
   "dependencies": {
     "ink": "^6.8.0",
     "react": "^19.2.0",

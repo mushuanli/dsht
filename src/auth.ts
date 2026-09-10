@@ -11,8 +11,8 @@ export class AuthenticationRequired extends Error {}
 
 /** Private, atomic cookie files, separated by the complete HTTP origin. */
 export class CookieStore {
-  constructor(readonly directory = process.env.DSH_CLI_AUTH_DIR
-    ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsh-cli', 'auth')) {}
+  constructor(readonly directory = process.env.DSHT_AUTH_DIR
+    ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht', 'auth')) {}
 
   /** Read an unexpired cookie, rejecting unsafe permissions or malformed storage. */
   async load(origin: string): Promise<string | undefined> {
