@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import wrapAnsi from 'wrap-ansi';
 import { contentText, Transcript } from '../src/transcript.ts';
+import { historyLayout } from '../src/history.ts';
 import { snapshot } from './host.ts';
 
 test('reconciles live text with the committed message and replaces on reconnect', () => {
@@ -44,6 +45,32 @@ test('reuses the projected conversation across streamed frames and re-folds a sp
   // The retained window can split the live attempt: an older page supplies its beginning.
   legacy.addPage({ records: [chunk(2, ['start '])], hasMore: false });
   assert.equal(legacy.liveText, 'start live tail');
+});
+
+test('streams reasoning in full, folds the committed row by layout, and keeps the full text', () => {
+  const transcript = new Transcript();
+  transcript.accept(snapshot);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'First thought. Second thought with detail.' } } });
+  assert.equal(transcript.liveTextForWidth(20), '◇ First thought. Second thought with detail.');
+  transcript.accept({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append',
+    data: { message: { content: [{ type: 'reasoning', text: 'First thought. Second thought with detail.' },
+      { type: 'text', text: 'Answer' }] } } } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'end', attemptId: 'a', revision: 3, index: 1 } });
+  assert.equal(transcript.liveText, '');
+  // The committed message keeps every character for search and pickers; folding is a layout choice.
+  const message = transcript.messagesForWidth(20)[1]!;
+  assert.equal(message.text, '◇ First thought. Second thought with detail.\nAnswer');
+  const [foldedReasoning, foldedAnswer] = message.folded!.split('\n');
+  assert.match(foldedReasoning!, /^◇ First thought\..*…$/);
+  assert.ok(foldedReasoning!.length <= 20, foldedReasoning);
+  assert.equal(foldedAnswer, 'Answer');
+  const folded = historyLayout(transcript, 20, 'row');
+  const expanded = historyLayout(transcript, 20, 'full');
+  assert.ok(folded.lines.length < expanded.lines.length);
+  assert.equal(folded.lines.some(line => line.includes('detail.')), false);
+  assert.equal(expanded.lines.some(line => line.includes('detail.')), true);
 });
 
 test('restores compact active streams and detects missed revisions', () => {

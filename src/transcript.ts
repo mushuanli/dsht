@@ -30,13 +30,20 @@ export function toolLine(text: string, width: number): string {
     ? wrapAnsi(clean, width - 1, options).split('\n')[0] + '…' : clean;
 }
 
-/** Render known content blocks and preserve unknown plugin blocks as JSON. */
-export function contentText(content: Json | undefined, tools?: ReadonlyMap<string, ToolSummary>, width = 100): string {
+/** Render known content blocks and preserve unknown plugin blocks as JSON.
+ * @param content - Message content blocks.
+ * @param tools - Tool summaries by call ID, when retained history provides them.
+ * @param width - Available terminal columns.
+ * @param reasoning - `full` keeps streamed reasoning at length; `row` folds a committed block into one row.
+ * @returns Blocks joined by newlines.
+ */
+export function contentText(content: Json | undefined, tools?: ReadonlyMap<string, ToolSummary>, width = 100,
+  reasoning: 'row' | 'full' = 'full'): string {
   return array(content).map(value => {
     const block = object(value);
     switch (block.type) {
       case 'text': return string(block.text);
-      case 'reasoning': return `◇ ${string(block.text)}`;
+      case 'reasoning': return reasoning === 'full' ? `◇ ${string(block.text)}` : toolLine(`◇ ${string(block.text)}`, width);
       case 'tool-call': {
         const tool = toolSummary(block);
         return toolLine(`⚙ ${tool.name}${tool.operation ? ` · ${tool.operation}` : ''}`, width);
@@ -54,7 +61,14 @@ export function contentText(content: Json | undefined, tools?: ReadonlyMap<strin
 const DISPLAY_EVENTS = new Set(['user/message', 'assistant/message', 'tool/result']);
 
 /** A displayed message retains the durable sequence for stable reconciliation. */
-export interface Message { seq: number; role: string; text: string; compact?: boolean }
+export interface Message {
+  seq: number;
+  role: string;
+  text: string;
+  compact?: boolean;
+  /** One-row rendering of committed reasoning, used only while the conversation folds reasoning. */
+  folded?: string;
+}
 
 /** Opening snapshots replace all state; durable events are deduplicated by sequence. */
 export class Transcript {
@@ -221,7 +235,9 @@ export class Transcript {
         : event.type === 'tool/result'
           ? contentText(blocks.filter(block => block.type === 'tool-result'), tools, width) || toolLine('✓ tool · completed', width)
           : contentText(blocks, tools, width);
-      const message = text ? { seq, role, text,
+      const folded = !isUser && blocks.some(block => block.type === 'reasoning')
+        ? contentText(blocks, tools, width, 'row') : undefined;
+      const message = text ? { seq, role, text, ...(folded === undefined ? {} : { folded }),
         ...(isUser ? {} : { compact: event.type === 'tool/result' || blocks.every(block => block.type === 'tool-call') }) } : undefined;
       this.displayedMessages.set(event, { width, prefix: tools.size, message });
       if (message) result.push(message);
@@ -240,7 +256,7 @@ export class Transcript {
    * @returns Transient assistant text with clipped tool rows.
    */
   liveTextForWidth(width: number): string {
-    return contentText([...this.blocks].sort(([a], [b]) => a - b).map(([, b]) => b), undefined, width);
+    return contentText([...this.blocks].sort(([a], [b]) => a - b).map(([, b]) => b), undefined, width, 'full');
   }
 
   private addRecords(records: Json[]): void {

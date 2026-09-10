@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { useMouseWheel } from './mouse.ts';
 import { TextInput } from './input.tsx';
-import { historyLayout } from './history.ts';
+import { historyLayout, type Reasoning } from './history.ts';
 import { toolLine } from './transcript.ts';
 import { activeReference, fileMention, type FileReference } from './references.ts';
 import { CostPanel } from './cost-view.tsx';
@@ -12,8 +12,8 @@ import { Controller } from './controller.ts';
 import { navigationCommand, sessionLabel } from './navigation.ts';
 import { array, errorText, object, safeText, string, type ObjectValue } from './wire.ts';
 
-const COMMANDS = ['/ws', '/s', '/new', '/older', '/history', '/search', '/ssearch', '/wsearch', '/cancel', '/steer', '/allow', '/deny', '/status', '/cost', '/help', '/quit'];
-const HELP = '/ws [name or ID] · /s [title or ID] · /s all · /new · /older · /history [text] · /search text · /ssearch text · /wsearch text · /cancel · /steer text · /allow · /deny · /status · /cost · /quit';
+const COMMANDS = ['/ws', '/s', '/new', '/older', '/history', '/search', '/ssearch', '/wsearch', '/cancel', '/steer', '/allow', '/deny', '/status', '/cost', '/think', '/help', '/quit'];
+const HELP = '/ws [name or ID] · /s [title or ID] · /s all · /new · /older · /history [text] · /search text · /ssearch text · /wsearch text · /cancel · /steer text · /allow · /deny · /status · /cost · /think · /quit';
 /** Longest common prefix of the candidate commands, so Tab can extend an ambiguous draft. */
 export function commonPrefix(values: string[]): string {
   let prefix = values[0] ?? '';
@@ -67,17 +67,19 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
   useEffect(() => () => historyAbort.current?.abort(), []);
   const [costExpanded, setCostExpanded] = useState(false);
   const [statusExpanded, setStatusExpanded] = useState(false);
+  const [reasoning, setReasoning] = useState<Reasoning>('row');
+  const [notice, setNotice] = useState<string>();
   const [help, setHelp] = useState(false);
   const [answers, setAnswers] = useState<Record<string, ObjectValue[]>>({});
   const [referenceIndex, setReferenceIndex] = useState(0);
   const [dismissedReference, dismissReference] = useState<string>();
   const [lookup, setLookup] = useState<{ draft: string; sessionId: string; items: FileReference[]; error?: string }>();
-  // A slash-command panel is temporary: the next command or its lifetime closes it.
+  // A slash-command panel or notice is temporary: the next command or its lifetime closes it.
   useEffect(() => {
-    if (!help && !costExpanded && !statusExpanded) return;
-    const timer = setTimeout(() => { setHelp(false); setCostExpanded(false); setStatusExpanded(false); }, panelLifetimeMs);
+    if (!help && !costExpanded && !statusExpanded && notice === undefined) return;
+    const timer = setTimeout(() => { setHelp(false); setCostExpanded(false); setStatusExpanded(false); setNotice(undefined); }, panelLifetimeMs);
     return () => clearTimeout(timer);
-  }, [help, costExpanded, statusExpanded, panelLifetimeMs]);
+  }, [help, costExpanded, statusExpanded, notice, panelLifetimeMs]);
   const pending = state.pending[0];
   const token = state.screen === 'chat' && state.online && !state.busy && !pending
     && (!input.startsWith('/') || input.startsWith('/steer ')) && dismissedReference !== input && cursor === input.length
@@ -134,8 +136,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
       return;
     }
     if (key.tab) { completeCommand(); return; }
-    if (key.escape && (help || costExpanded || statusExpanded)) {
-      setHelp(false); setCostExpanded(false); setStatusExpanded(false);
+    if (key.escape && (help || costExpanded || statusExpanded || notice !== undefined)) {
+      setHelp(false); setCostExpanded(false); setStatusExpanded(false); setNotice(undefined);
       if (controller.running) void controller.interrupt(true);
       return;
     }
@@ -189,6 +191,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
           }
         });
       }
+      else if (value === '/think') {
+        const next = reasoning === 'row' ? 'full' : 'row';
+        setReasoning(next);
+        setNotice(next === 'full' ? 'Reasoning: expanded' : 'Reasoning: folded');
+      }
       else if (value === '/older') { await controller.older(); setScroll(value => value + 10); }
       else if (value === '/cancel') await controller.cancelTurn();
       else if (value === '/allow') await controller.approve(true);
@@ -221,9 +228,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
     { key: '@back', label: '← Workspaces', action: () => operate(() => controller.showPicker('workspaces')) },
   ];
   const width = Math.max(10, (stdout.columns ?? 80) - 2);
-  const layout = useMemo(() => historyLayout(state.transcript, width), [state.transcript, state.transcript.version, width]);
+  const layout = useMemo(() => historyLayout(state.transcript, width, reasoning),
+    [state.transcript, state.transcript.version, width, reasoning]);
   const { lines, first } = layout;
-  const pageSize = Math.max(5, (stdout.rows ?? 30) - (pending ? 17 : 12) - (statusExpanded ? 9 : 0));
+  const pageSize = Math.max(5, (stdout.rows ?? 30) - (pending ? 17 : 12) - (statusExpanded ? 9 : 0) - (notice ? 1 : 0));
   const previousView = useRef({ transcript: state.transcript, count: lines.length, first });
   const previous = previousView.current;
   const prepended = previous.first !== undefined && first !== undefined && first < previous.first;
@@ -278,7 +286,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
     try {
       await controller.historyThrough(target, abort.signal);
       abort.signal.throwIfAborted();
-      const current = historyLayout(controller.state.transcript, width);
+      const current = historyLayout(controller.state.transcript, width, reasoning);
       const row = current.offsets.get(target);
       if (row === undefined) throw new Error('No visible message at this sequence; use /history to choose a record');
       setHistoryQuery(undefined);
@@ -334,6 +342,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
         <Text dimColor>{question ? 'Type your answer below' : '/allow approves once · /deny rejects'}</Text>
       </Box>}
     </>}
+      {notice && <Text dimColor>{notice}</Text>}
       <Box borderStyle="round" borderColor={state.online ? 'cyan' : 'gray'} paddingX={1}>
         <Text color="cyan">❯ </Text>
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(draft.current); }}

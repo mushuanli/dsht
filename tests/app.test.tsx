@@ -476,6 +476,27 @@ test('closing an idle client sends no cancellation', async t => {
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
+test('/think folds committed reasoning and expands it again', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  const thinking = `Considering the request ${'in detail '.repeat(12)}closing detail`;
+  fixture.follow({ type: 'event', event: { type: 'assistant/message', seq: 1, surfaceOp: 'append',
+    data: { message: { content: [{ type: 'reasoning', text: thinking }, { type: 'text', text: 'Answer' }] } } } });
+  await until(() => ui.lastFrame()?.includes('Answer') === true);
+  assert.equal(ui.lastFrame()?.includes('closing detail'), false);
+  await pressKey(ui, '/think'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Reasoning: expanded') === true);
+  assert.equal(ui.lastFrame()?.includes('closing detail'), true);
+  await pressKey(ui, '/think'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Reasoning: folded') === true);
+  assert.equal(ui.lastFrame()?.includes('closing detail'), false);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
 test('a slash-command panel closes on the next command or after its lifetime', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
