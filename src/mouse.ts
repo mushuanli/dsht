@@ -23,15 +23,22 @@ export function wheelDirection(raw: string): number {
 /** Enable cell-based mouse reports for this mount and restore normal terminal behavior on exit.
  * @param scroll - Current transcript scrolling callback.
  * @param enabled - False restores native terminal selection while display updates are paused.
+ * @param select - Left press callback that can freeze the display and release mouse capture.
  */
-export function useMouseWheel(scroll: (direction: number) => void, enabled = true): void {
+export function useMouseWheel(scroll: (direction: number) => void, enabled = true, select?: () => void): void {
   const { internal_eventEmitter } = useStdin();
   const { stdout } = useStdout();
   const callback = useRef(scroll);
   callback.current = scroll;
+  const selection = useRef(select);
+  selection.current = select;
   useEffect(() => {
     if (!enabled) return;
-    const onInput = (raw: string) => { const direction = wheelDirection(raw); if (direction) callback.current(direction); };
+    const onInput = (raw: string) => {
+      const direction = wheelDirection(raw);
+      if (direction) callback.current(direction);
+      else if (/^\x1b\[<0;\d+;\d+M$/.test(raw)) selection.current?.();
+    };
     internal_eventEmitter.on('input', onInput);
     if (stdout.isTTY) stdout.write('\x1b[?1006h\x1b[?1000h');
     return () => {

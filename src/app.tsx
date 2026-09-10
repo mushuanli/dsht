@@ -505,7 +505,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setScroll(Math.max(0, current.length - pageSize - row));
     } finally { if (historyAbort.current === abort) historyAbort.current = undefined; }
   }
-  useMouseWheel(direction => scrollHistory(direction * 3), !displayPaused);
+  useMouseWheel(direction => scrollHistory(direction * 3), !displayPaused, () => setCopyMode(true));
   const end = Math.max(pageSize, length - position);
   const visible = useMemo(() => thoughtList ? [] : layout.viewport(Math.max(0, end - pageSize), end), [layout, end, pageSize, thoughtList]);
   const liveThought = thoughtList && !historyWindow ? state.transcript.liveParts(width).find(part => part.kind === 'reasoning') : undefined;

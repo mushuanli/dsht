@@ -343,6 +343,8 @@ test('mouse scrolling loads history and slash search selects a matching record',
   const page = fixture.calls.find(call => call.method === 'session/page')!;
   assert.equal(object(object(object(page.payload).args).request).beforeSeq, 20);
   await press('\x1b[<0;3;4M');
+  assert.match(ui.lastFrame()!, /Copy mode/);
+  await press('\x13');
   await press('/search history-record-5'); await press('\r');
   await until(() => ui.lastFrame()?.includes('#5 You · history-record-5') === true);
   await until(() => !controller.state.busy);
@@ -998,4 +1000,31 @@ test('restored session prompts are available before any new submission', async t
   await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B');
   assert.match(ui.lastFrame()!, /❯ unsent draft/);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+
+test('left click freezes the display for native selection until explicit resume', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => ui.lastFrame()?.includes('Working') === true);
+  for (const report of ['\x1b[<2;3;4M', '\x1b[<0;3;4m', '\x1b[<32;3;4M']) {
+    await pressKey(ui, report); assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  }
+  await pressKey(ui, '\x1b[<0;3;4M');
+  assert.match(ui.lastFrame()!, /Copy mode/);
+  const frozen = ui.lastFrame();
+  fixture.follow({ type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: 'Received while selecting' }] } } });
+  await until(() => controller.state.transcript.messages.some(message => message.text.includes('Received while selecting')));
+  await pressKey(ui, '\x1b[<0;3;4m');
+  await new Promise(resolve => setTimeout(resolve, 1150));
+  assert.equal(ui.lastFrame(), frozen);
+  await pressKey(ui, '\x03');
+  await until(() => ui.lastFrame()?.includes('Received while selecting') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
