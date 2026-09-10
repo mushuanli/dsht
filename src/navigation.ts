@@ -1,6 +1,13 @@
 /** Shared display names and unambiguous slash-command target resolution. */
 import { safeText, string, type ObjectValue } from './wire.ts';
 
+/** Parse the short navigation commands and their equivalent long aliases. */
+export function navigationCommand(value: string): { kind: 'workspace' | 'session'; query?: string } | undefined {
+  const match = /^\/(ws|workspace|workspaces|s|session|sessions)(?:\s+(.+))?$/.exec(value);
+  if (!match) return undefined;
+  return { kind: match[1] === 'ws' || match[1]!.startsWith('workspace') ? 'workspace' : 'session', query: match[2] };
+}
+
 /** Resolve the host's title projection, falling back to the session ID. */
 export function sessionLabel(session: ObjectValue): string {
   const projections = session.projections;

@@ -17,6 +17,7 @@ export interface State {
   error: string;
   workspaces: ObjectValue[];
   sessions: ObjectValue[];
+  showAllSessions: boolean;
   workspaceId?: string;
   sessionId?: string;
   pending: ObjectValue[];
@@ -26,7 +27,7 @@ export interface State {
 /** Owns reconnects and subscriptions. User commands remain single-attempt operations. */
 export class Controller {
   state: State = { version: 0, online: false, busy: false, screen: 'workspaces', status: 'Connecting…',
-    error: '', workspaces: [], sessions: [], pending: [], transcript: new Transcript() };
+    error: '', workspaces: [], sessions: [], showAllSessions: false, pending: [], transcript: new Transcript() };
   private observers = new Set<() => void>();
   private abort = new AbortController();
   private client: Client | undefined;
@@ -78,7 +79,7 @@ export class Controller {
   pickWorkspace(workspaceId?: string): void {
     this.follow?.cancel();
     this.selection++;
-    this.update({ workspaceId, sessionId: undefined, transcript: new Transcript(), screen: 'sessions' });
+    this.update({ workspaceId, sessionId: undefined, showAllSessions: false, transcript: new Transcript(), screen: 'sessions' });
   }
 
   /** Open a workspace picker, or resolve a workspace by ID, exact title/path, or unique ID prefix. */
@@ -92,9 +93,13 @@ export class Controller {
     this.pickWorkspace(string(workspace.workspaceId));
   }
 
-  /** Open the session picker, or switch across workspaces using a session ID or exact title. */
+  /** Guide workspace selection, list all sessions with `all`, or resolve an exact session target. */
   async switchSession(query?: string): Promise<void> {
-    if (!query) { await this.showPicker('sessions'); return; }
+    if (!query || query === 'all') {
+      await this.showPicker(query === 'all' || this.state.workspaceId ? 'sessions' : 'workspaces');
+      this.update({ showAllSessions: query === 'all' });
+      return;
+    }
     const [workspaces, sessions] = await Promise.all([this.host.listWorkspaces(), this.host.listSessions()]);
     const session = resolveTarget(sessions, query, 'sessionId', item => [sessionLabel(item)]);
     this.update({ workspaces, sessions });
@@ -128,7 +133,7 @@ export class Controller {
     const workspace = this.state.workspaces.find(item => array(item.sessionIds).includes(sessionId));
     const workspaceId = workspace ? string(workspace.workspaceId)
       : this.state.sessions.some(item => item.sessionId === sessionId) ? undefined : this.state.workspaceId;
-    this.update({ sessionId, workspaceId, transcript, screen: 'chat', status: 'Loading session…' });
+    this.update({ sessionId, workspaceId, showAllSessions: false, transcript, screen: 'chat', status: 'Loading session…' });
     this.follow = this.host.subscribe('session/follow', {
       request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true },
     }, {
@@ -192,7 +197,7 @@ export class Controller {
 
   /** Present only sessions explicitly accounted to the selected workspace. */
   get visibleSessions(): ObjectValue[] {
-    if (!this.state.workspaceId) return this.state.sessions;
+    if (this.state.showAllSessions || !this.state.workspaceId) return this.state.sessions;
     const workspace = this.state.workspaces.find(item => item.workspaceId === this.state.workspaceId);
     const ids = new Set(array(workspace?.sessionIds ?? []).map(string));
     return this.state.sessions.filter(item => ids.has(string(item.sessionId)));

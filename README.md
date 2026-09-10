@@ -6,12 +6,21 @@ English | [中文](README.zh.md)
 
 Choose a workspace and session, chat with a running DeepSeek Harness host, and inspect session history from your terminal. This is an independent Node.js repository: it has its own Git history, dependencies, and tests, and imports no Harness packages.
 
+Main features:
+
+- Workspace and session pickers, direct switching with `/ws` and `/s`, and explicit session creation.
+- Streaming replies, reasoning, tool calls/results, and paged conversation history.
+- Queued prompts, steering, turn cancellation, approvals, and free-text question answers.
+- Cookie persistence per host, automatic reconnect, and snapshot replacement.
+- JSON or tab-separated workspace/session lists for scripts, plus a reusable HTTP client.
+
 ## Contents
 
 - [Start](#start)
 - [List workspaces and sessions](#list-workspaces-and-sessions)
 - [Conversation controls](#conversation-controls)
 - [Client API](#client-api)
+- [Publishing to npm](#publishing-to-npm)
 - [Development and limitations](#development-and-limitations)
 
 ## Start
@@ -24,6 +33,16 @@ export DSH_URL=http://127.0.0.1:3080
 read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
 npm start
 ```
+
+After this package is published to npm, run it without cloning or building:
+
+```sh
+npx dsh-http-tui
+npx dsh-http-tui list workspaces --json
+npx dsh-http-tui list sessions --json
+```
+
+Use the same `DSH_URL` and first-login `DSH_TOKEN` environment variables. To install the command globally, use `npm install -g dsh-http-tui`, then run `dsh-tui`. Registry commands require a published package; the source commands above work from this checkout.
 
 Select a workspace with ↑/↓ and Enter, then select a session or **New session**. **All sessions** also exposes sessions outside registered workspaces. **Add workspace** accepts an existing absolute directory on the host, which may differ from your local filesystem. Creating a session requires a selected workspace.
 
@@ -54,10 +73,11 @@ Enter submits a prompt. Escape requests cancellation of the active turn. Page Up
 
 | Command | Action |
 | --- | --- |
-| `/session`, `/sessions` | Refresh lists and open the session picker |
-| `/workspace`, `/workspaces` | Refresh lists and open the workspace picker |
-| `/workspace TARGET` | Select a workspace by ID, exact name/path, or unique ID prefix |
-| `/session TARGET` | Open a session by ID, exact title, or unique ID prefix across workspaces |
+| `/ws` | Show all workspaces; choosing one opens its session list |
+| `/ws TARGET` | Select a workspace by ID, exact name/path, or unique ID prefix |
+| `/s` | Show sessions in the current workspace; choose a workspace first if none is selected |
+| `/s TARGET` | Open a session by ID, exact title, or unique ID prefix across workspaces |
+| `/s all` | Show sessions from every workspace |
 | `/new` | Create a session in the selected workspace |
 | `/cancel` | Cancel the active turn; leave pending queue items intact |
 | `/steer TEXT` | Submit steering input |
@@ -65,15 +85,29 @@ Enter submits a prompt. Escape requests cancellation of the active turn. Page Up
 | `/allow`, `/deny` | Answer the displayed approval; allow applies once |
 | `/help`, `/quit` | Show command hints or exit |
 
-Slash commands work in both pickers and the conversation composer. Typing `/` displays matching commands. Names may contain spaces; quotes around the complete target are optional. Ambiguous targets require a full ID. Switching a workspace opens its sessions and detaches the old transcript; switching sessions updates the workspace label. Neither operation cancels a remote agent.
+Slash commands work in both pickers and the conversation composer. Typing `/` displays matching commands. The long forms `/workspace`, `/workspaces`, `/session`, and `/sessions` remain aliases. Names may contain spaces; quotes around the complete target are optional. The unquoted target `all` is reserved for `/s all`; use `/s "all"` or an ID to open a session titled `all`. Ambiguous targets require a full ID. Switching a workspace opens its sessions and detaches the old transcript; switching sessions updates the workspace label. Neither operation cancels a remote agent.
 
 User questions accept typed free-text answers one question at a time. Other sessions' interactions and unrecognized waterfalls delegate with `next`. Failed submissions retain their input; an interrupted HTTP response can leave delivery uncertain, so check the transcript before manually resending. The client never retries a mutation automatically.
 
 ## Client API
 
-Import `Client` from `src/client.ts` with a TypeScript loader, or from `dist/client.js` after building. `authenticate(token)` exchanges credentials; `connect()` opens one multiplexed socket; `listWorkspaces()` and `listSessions(workspaceId?)` return promises of server rows. `call(endpoint, args)` preserves host errors as `RemoteError` with `code` and `details`. Always await `close()` in `finally`. Library consumers opt into persistence with `login(client, token, new CookieStore())` from `src/auth.ts`; `Client.authenticate()` itself only retains credentials in memory.
+Installed packages export `Client` from `dsh-http-tui` and `login`/`CookieStore` from `dsh-http-tui/auth`, with TypeScript declarations. Source consumers can import from `src/client.ts` with a TypeScript loader, or from `dist/client.js` after building. `authenticate(token)` exchanges credentials; `connect()` opens one multiplexed socket; `listWorkspaces()` and `listSessions(workspaceId?)` return promises of server rows. `call(endpoint, args)` preserves host errors as `RemoteError` with `code` and `details`. Always await `close()` in `finally`. Library consumers opt into persistence with `login(client, token, new CookieStore())` from `src/auth.ts`; `Client.authenticate()` itself only retains credentials in memory.
 
 Session and workspace command methods use `{ request: { ... } }` inside `args`; session listing uses `{ _request: {} }`. `$events/result` uses its named arguments directly. Follow snapshots replace retained state after reconnect; durable messages and transient assistant text remain separate. The reader accepts both `event` records and older `chunks` wrappers containing `chunkrow/text-chunks`, `chunkrow/reasoning-chunks`, or `chunkrow/tool-call-chunks`. Hosts without `assistantStream` expose live text through logged chunks; the TUI reconstructs only the unfinished attempt and preserves each packed record’s starting sequence for pagination.
+
+## Publishing to npm
+
+The package name is `dsh-http-tui`; its executable is `dsh-tui`. Before publishing, ensure your npm account can publish this name, or change it to your own scope. Select an appropriate license before distributing the code. The following commands are maintainer actions; creating a local package does not publish it.
+
+```sh
+npm run test:package
+npm login
+npm publish --access public
+```
+
+`test:package` builds a tarball and runs its CLI through an isolated, offline npm-exec installation using the dependency cache populated by installation. `prepublishOnly` checks types and tests; `prepack` compiles JavaScript and declarations. The package includes `dist/`, the two READMEs, and their pairing record; source tests, recordings, and local authentication files are excluded.
+
+Interactive publishing requires npm account authentication and its publishing verification. See the official [publishing guide](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). For later releases, increment the package version before publishing. Registry publication is not part of the local validation performed for this repository.
 
 ## Development and limitations
 

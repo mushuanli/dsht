@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /** Standalone executable entry; connects to an existing host and never launches Harness. */
 import { parseArgs } from 'node:util';
 import { render } from 'ink';
@@ -8,7 +9,7 @@ import { Client } from './client.ts';
 import { Controller } from './controller.ts';
 import { errorText, safeText, string } from './wire.ts';
 
-const HELP = `Usage: npm start -- [options] [list workspaces|list sessions]
+const HELP = `Usage: dsh-tui [options] [list workspaces|list sessions]
 
 With no command, choose a workspace and session interactively.
 
@@ -22,9 +23,9 @@ With no command, choose a workspace and session interactively.
 First login: set DSH_TOKEN to the token printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 Examples:
-  npm start
-  npm start -- list workspaces --json
-  npm start -- list sessions --workspace <id> --json
+  npx dsh-http-tui
+  dsh-tui list workspaces --json
+  dsh-tui list sessions --workspace <id> --json
 `;
 
 async function main(): Promise<void> {
