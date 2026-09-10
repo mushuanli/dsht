@@ -171,17 +171,22 @@ test('tool descriptions follow call IDs and show a separately clipped command pr
   assert.equal(transcript.liveToolOnly, true);
 });
 
-test('finished live reasoning folds before the answer commits and expands without losing text', () => {
-  const transcript = new Transcript(); transcript.accept(snapshot);
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
-  const chunk = (revision: number, value: object) => transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision, index: revision - 2, chunk: value } });
-  chunk(2, { type: 'reasoning-delta', index: 0, text: 'A long thought. '.repeat(20) + 'ending' });
-  assert.ok(historyLayout(transcript, 40).lines.some(line => line.includes('ending')));
-  chunk(3, { type: 'text-delta', index: 1, text: 'The answer' });
-  assert.ok(!historyLayout(transcript, 40).lines.some(line => line.includes('ending')));
-  assert.ok(historyLayout(transcript, 40, 'full').lines.some(line => line.includes('ending')));
-  assert.ok(transcript.liveText.includes('ending'));
-});
+for (const width of [40, 80]) {
+  test(`live reasoning follows width defaults and expands without losing text (${width} columns)`, () => {
+    const transcript = new Transcript(); transcript.accept(snapshot);
+    transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+    const chunk = (revision: number, value: object) => transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision, index: revision - 2, chunk: value } });
+    const thought = 'A long thought. '.repeat(20) + 'ending';
+    chunk(2, { type: 'reasoning-delta', index: 0, text: thought });
+    assert.equal(historyLayout(transcript, width).lines.some(line => line.includes('ending')), width >= 60);
+    assert.ok(historyLayout(transcript, width, 'full').lines.some(line => line.includes('ending')));
+    chunk(3, { type: 'text-delta', index: 1, text: 'The answer' });
+    assert.ok(!historyLayout(transcript, width).lines.some(line => line.includes('ending')));
+    assert.ok(historyLayout(transcript, width).lines.some(line => line.includes('The answer')));
+    assert.ok(historyLayout(transcript, width, 'full').lines.some(line => line.includes('ending')));
+    assert.ok(transcript.liveText.includes(thought));
+  });
+}
 
 test('committed legacy chunks are released while paging cursors and the active turn survive', () => {
   const transcript = new Transcript();
