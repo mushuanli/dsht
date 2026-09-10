@@ -1,5 +1,5 @@
 {
-  "name": "dsht",
+  "name": "@itookit/dsht",
   "version": "0.1.0",
   "type": "module",
   "description": "Standalone terminal client for the DeepSeek Harness HTTP gateway",

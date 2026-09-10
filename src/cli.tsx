@@ -32,7 +32,7 @@ Cookies are saved per server origin and reused on later starts. Tokens are never
 /cost shows session, today and three-day CNY estimates.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
 Examples:
-  npx dsht
+  npx @itookit/dsht
   dsht list workspaces --json
   dsht list sessions --workspace <id> --json
 `;

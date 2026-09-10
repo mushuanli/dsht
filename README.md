@@ -33,19 +33,19 @@ Main features:
 Use Node.js 22.19 or newer and an existing `dsh web` server; the server is a separate prerequisite and is not launched by this client. The default host is the local `http://127.0.0.1:3080`:
 
 ```sh
-npx dsht
+npx @itookit/dsht
 ```
 
 A token is needed only on the first run and after the saved cookie expires. Export it on its own, or export the complete URL printed by `dsh web` and let the client split off its `?token=` parameter:
 
 ```sh
-export DSH_TOKEN=<token> && npx dsht
-export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx dsht
+export DSH_TOKEN=<token> && npx @itookit/dsht
+export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx @itookit/dsht
 ```
 
 `DSH_TOKEN` takes precedence when both are set, and `--url` overrides `DSH_URL` for one run. The token is never written to disk; only the resulting cookie is. Both exports above land in your shell history, so use `read -rs -p 'Host token: ' DSH_TOKEN` where that matters. Another host needs its own origin in `DSH_URL`.
 
-`npx dsht list workspaces --json` and `npx dsht list sessions --json` print workspace and session lists for scripts, and `npm install -g dsht` installs the `dsht` command. These registry commands require the package to be published.
+`npx @itookit/dsht list workspaces --json` and `npx @itookit/dsht list sessions --json` print workspace and session lists for scripts, and `npm install -g @itookit/dsht` installs the `dsht` command. These registry commands require the package to be published.
 
 From a source checkout, install the dependencies and run the TypeScript entry:
 
@@ -65,9 +65,9 @@ The host determines cookie expiration. An expired or rejected cookie requires a 
 ## List workspaces and sessions
 
 ```sh
-npx dsht list workspaces --json
-npx dsht list sessions --json
-npx dsht list sessions --workspace WORKSPACE_ID --json
+npx @itookit/dsht list workspaces --json
+npx @itookit/dsht list sessions --json
+npx @itookit/dsht list sessions --workspace WORKSPACE_ID --json
 ```
 
 From a source checkout, run the same commands through npm or through the source entry; the direct entry avoids npm's script banners:
@@ -159,24 +159,24 @@ Usage files live under `~/.local/state/dsht/cost/<origin-hash>/` (respecting `XD
 
 ## Client API
 
-Installed packages export `Client` from `dsht` and `login`/`CookieStore` from `dsht/auth`, with TypeScript declarations. Source consumers can import from `src/client.ts` with a TypeScript loader, or from `dist/client.js` after building. `authenticate(token)` exchanges credentials; `connect()` opens one multiplexed socket; `listWorkspaces()` and `listSessions(workspaceId?)` return promises of server rows. `call(endpoint, args, signal?)` preserves host errors as `RemoteError` with `code` and `details`. Always await `close()` in `finally`. Library consumers opt into persistence with `login(client, token, new CookieStore())` from `src/auth.ts`; `Client.authenticate()` itself only retains credentials in memory.
+Installed packages export `Client` from `@itookit/dsht` and `login`/`CookieStore` from `@itookit/dsht/auth`, with TypeScript declarations. Source consumers can import from `src/client.ts` with a TypeScript loader, or from `dist/client.js` after building. `authenticate(token)` exchanges credentials; `connect()` opens one multiplexed socket; `listWorkspaces()` and `listSessions(workspaceId?)` return promises of server rows. `call(endpoint, args, signal?)` preserves host errors as `RemoteError` with `code` and `details`. Always await `close()` in `finally`. Library consumers opt into persistence with `login(client, token, new CookieStore())` from `src/auth.ts`; `Client.authenticate()` itself only retains credentials in memory.
 
 Session and workspace command methods use `{ request: { ... } }` inside `args`; session listing uses `{ _request: {} }`. `$events/result` uses its named arguments directly. Follow snapshots replace retained state after reconnect; durable messages and transient assistant text remain separate. The reader accepts both `event` records and older `chunks` wrappers containing `chunkrow/text-chunks`, `chunkrow/reasoning-chunks`, or `chunkrow/tool-call-chunks`. Hosts without `assistantStream` expose live text through logged chunks; the TUI reconstructs only the unfinished attempt and preserves each packed record’s starting sequence for pagination.
 
 ## Publishing to npm
 
-This repository publishes one unscoped public package, `dsht`, from the `mushuanli/dsht` repository. `package.json` is the authority for the fields below.
+This repository publishes one public package, `@itookit/dsht`, from the `mushuanli/dsht` repository. The scope is required because npm rejects the unscoped `dsht` as too similar to existing short names such as `dot` and `st`. `package.json` is the authority for the fields below.
 
 | Field | Value |
 | --- | --- |
-| Name and version | `dsht` `0.1.0` |
-| Executable | `dsht`, or `npx dsht` without installing |
-| Library entries | `dsht` and `dsht/auth` |
+| Name and version | `@itookit/dsht` `0.1.0` |
+| Executable | `dsht`, or `npx @itookit/dsht` without installing |
+| Library entries | `@itookit/dsht` and `@itookit/dsht/auth` |
 | Author | lizlok@gmail.com |
 | License | MIT, with the license text in `LICENSE` |
 | Repository and issues | [mushuanli/dsht](https://github.com/mushuanli/dsht) |
 | Node.js | 22.19 or newer |
-| Registry access | public, unscoped |
+| Registry access | public, under the `@itookit` scope |
 | Published files | `dist/`, both READMEs, their pairing record, the screenshot, and the license |
 
 Descriptions, keywords, and dependencies live in `package.json`. The following commands are maintainer actions; creating a local package does not publish it.
@@ -189,11 +189,11 @@ npm publish --access public
 
 `test:package` builds a tarball and runs its CLI through an isolated, offline npm-exec installation using the dependency cache populated by installation, and rejects any packed path outside the published set above. `prepublishOnly` checks types and tests; `prepack` compiles JavaScript and declarations. Source tests, recordings, and local authentication files are excluded.
 
-`publishConfig.access` is `public`, so the unscoped name needs no extra flag. An account with two-factor authentication publishes with a live code, `npm publish --otp=<code>`; the code is checked at the final request, after the typecheck, suite, and build have already run.
+`publishConfig.access` is `public`, which a scoped package needs to be installable without a paid plan; the flag is therefore part of the package rather than of the publish command. An account with two-factor authentication publishes with a live code, `npm publish --otp=<code>`; the code is checked at the final request, after the typecheck, suite, and build have already run.
 
-Later releases run in `.github/workflows/publish.yml`, which publishes from a version tag with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) and provenance, so no publish token is stored. Configure it once at `npmjs.com` → `dsht` → Settings → Trusted Publisher → GitHub Actions with organization or user `mushuanli`, repository `dsht`, workflow filename `publish.yml`, and allowed action `npm publish`. Trusted publishing cannot create a package, so version `0.1.0` is published by hand; after that, `npm version 0.1.1 && git push --follow-tags` releases.
+Later releases run in `.github/workflows/publish.yml`, which publishes from a version tag with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) and provenance, so no publish token is stored. Configure it once at `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions with organization or user `mushuanli`, repository `dsht`, workflow filename `publish.yml`, and allowed action `npm publish`. Trusted publishing cannot create a package, so version `0.1.0` is published by hand; after that, `npm version 0.1.1 && git push --follow-tags` releases.
 
-The workflow packs without publishing when started manually, and refuses a tag that disagrees with `package.json`. See the official [publishing guide](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). Registry publication is not part of the local validation performed for this repository.
+The workflow packs without publishing when started manually, and refuses a tag that disagrees with `package.json`. See the official [scoped publishing guide](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/) and [npx documentation](https://docs.npmjs.com/cli/npm-exec/). Registry publication is not part of the local validation performed for this repository.
 
 ## Development and limitations
 

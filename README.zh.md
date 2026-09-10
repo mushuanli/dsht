@@ -33,19 +33,19 @@
 需要 Node.js 22.19 或更新版本，以及已经运行的 `dsh web` 服务；服务是单独的前置条件，本客户端不会启动它。默认连接本机 `http://127.0.0.1:3080`：
 
 ```sh
-npx dsht
+npx @itookit/dsht
 ```
 
 仅在首次运行以及已保存的 cookie 过期后需要 token。可以单独导出它，也可以直接导出 `dsh web` 打印的完整地址，由客户端拆出其中的 `?token=` 参数：
 
 ```sh
-export DSH_TOKEN=<token> && npx dsht
-export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx dsht
+export DSH_TOKEN=<token> && npx @itookit/dsht
+export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx @itookit/dsht
 ```
 
 两者同时提供时 `DSH_TOKEN` 优先，`--url` 可覆盖单次运行的 `DSH_URL`。token 不会写入磁盘，只保存兑换得到的 cookie。上面两种 export 都会留在 shell 历史中，在意时改用 `read -rs -p 'Host token: ' DSH_TOKEN`。连接其他服务端需在 `DSH_URL` 中给出其 origin。
 
-`npx dsht list workspaces --json` 和 `npx dsht list sessions --json` 供脚本获取工作区和会话列表，`npm install -g dsht` 会安装 `dsht` 命令。这些 registry 命令要求包已发布。
+`npx @itookit/dsht list workspaces --json` 和 `npx @itookit/dsht list sessions --json` 供脚本获取工作区和会话列表，`npm install -g @itookit/dsht` 会安装 `dsht` 命令。这些 registry 命令要求包已发布。
 
 若使用源码仓库，先安装依赖，再运行 TypeScript 入口：
 
@@ -65,9 +65,9 @@ Cookie 有效期由服务端决定。过期或被拒绝后，需要再次提供 
 ## 列出工作区和会话
 
 ```sh
-npx dsht list workspaces --json
-npx dsht list sessions --json
-npx dsht list sessions --workspace WORKSPACE_ID --json
+npx @itookit/dsht list workspaces --json
+npx @itookit/dsht list sessions --json
+npx @itookit/dsht list sessions --workspace WORKSPACE_ID --json
 ```
 
 在源码仓库中，可以通过 npm 或源码入口执行同样的命令；直接调用入口可以避免 npm 的脚本提示混入输出：
@@ -159,24 +159,24 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 ## 客户端接口
 
-安装后的包通过 `dsht` 导出 `Client`，通过 `dsht/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/client.ts` 导入，或构建后从 `dist/client.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
+安装后的包通过 `@itookit/dsht` 导出 `Client`，通过 `@itookit/dsht/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/client.ts` 导入，或构建后从 `dist/client.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
 
 会话和工作区命令在 `args` 内使用 `{ request: { ... } }`；会话列表使用 `{ _request: {} }`。`$events/result` 直接使用具名参数。重连后的 follow 快照整体替换保留状态；持久消息与临时助手文本分别保存。读取器同时支持 `event` 记录和旧版 `chunks` 包装；后者包含 `chunkrow/text-chunks`、`chunkrow/reasoning-chunks` 或 `chunkrow/tool-call-chunks`。不提供 `assistantStream` 的服务端通过日志 chunk 传递实时文本；TUI 只重建尚未完成的尝试，并保留每条压缩记录的起始序号用于翻页。
 
 ## 发布到 npm
 
-本仓库从 `mushuanli/dsht` 仓库发布一个非 scope 的公开包 `dsht`。下表中 `package.json` 是各字段的依据。
+本仓库从 `mushuanli/dsht` 仓库发布一个公开包 `@itookit/dsht`。必须使用 scope，因为 npm 会以「与 `dot`、`st` 等现有短名过于相似」为由拒绝非 scope 的 `dsht`。下表中 `package.json` 是各字段的依据。
 
 | 字段 | 值 |
 | --- | --- |
-| 名称与版本 | `dsht` `0.1.0` |
-| 可执行命令 | `dsht`，不安装时用 `npx dsht` |
-| 库入口 | `dsht` 和 `dsht/auth` |
+| 名称与版本 | `@itookit/dsht` `0.1.0` |
+| 可执行命令 | `dsht`，不安装时用 `npx @itookit/dsht` |
+| 库入口 | `@itookit/dsht` 和 `@itookit/dsht/auth` |
 | 作者 | lizlok@gmail.com |
 | 许可证 | MIT，许可证正文位于 `LICENSE` |
 | 仓库与问题反馈 | [mushuanli/dsht](https://github.com/mushuanli/dsht) |
 | Node.js | 22.19 或更新版本 |
-| Registry 访问 | public，非 scope |
+| Registry 访问 | public，使用 `@itookit` scope |
 | 发布内容 | `dist/`、两份 README、它们的配对记录、截图和许可证 |
 
 描述、关键词和依赖位于 `package.json`。以下命令属于维护者操作；创建本地安装包不会自动发布。
@@ -189,11 +189,11 @@ npm publish --access public
 
 `test:package` 构建 tarball，然后使用安装依赖时填充的缓存，在隔离的离线 npm-exec 安装中运行 CLI，并拒绝上述发布集合之外的打包路径。`prepublishOnly` 执行类型检查和测试；`prepack` 编译 JavaScript 与类型声明。包内不包含源码测试、录制数据和本地认证文件。
 
-`publishConfig.access` 为 `public`，因此非 scope 包名无需额外参数即可发布。启用两步验证的账号需用即时验证码发布：`npm publish --otp=<验证码>`；验证码在最后一次请求时校验，此时类型检查、测试和构建均已执行完毕。
+`publishConfig.access` 为 `public`；scoped 包需要它才能被公开安装，因此该设置放在包里而不是每次发布命令上。启用两步验证的账号需用即时验证码发布：`npm publish --otp=<验证码>`；验证码在最后一次请求时校验，此时类型检查、测试和构建均已执行完毕。
 
-后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此 `0.1.0` 需手工发布；之后执行 `npm version 0.1.1 && git push --follow-tags` 即可发布。
+后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此 `0.1.0` 需手工发布；之后执行 `npm version 0.1.1 && git push --follow-tags` 即可发布。
 
-手动触发时该工作流只打包不发布，并拒绝与 `package.json` 不一致的 tag。参见官方[发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。Registry 发布不属于本仓库已执行的本地验证。
+手动触发时该工作流只打包不发布，并拒绝与 `package.json` 不一致的 tag。参见官方 [scoped 发布指南](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。Registry 发布不属于本仓库已执行的本地验证。
 
 ## 开发与限制
 
