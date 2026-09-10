@@ -5,7 +5,7 @@ import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CostLedger, DEFAULT_PRICES, pricesFrom, priceAt, lowestPrice, costRecords, costDay, costText, type CostTotal } from '../src/cost.ts';
-import { Controller } from '../src/controller.ts';
+import { Controller, costAddresses } from '../src/controller.ts';
 import { host, until } from './host.ts';
 import type { ObjectValue } from '../src/wire.ts';
 
@@ -193,4 +193,41 @@ test('failed attempt stream usage uses its request route and last sample', async
       stream: [{ type: 'chunk', chunk: { type: 'usage', usage: { ...usage, inputTokens: 1 } } }, { type: 'chunk', chunk: { type: 'usage', usage } }] } } },
   ]));
   assert.equal(summary(ledger.total('s1')).amount, 36.3);
+});
+
+test('subagent list rows yield the parent address in both delivery modes', () => {
+  assert.deepEqual(costAddresses({ sessionId: 's1' }), [{ kind: 'session', sessionId: 's1' }]);
+  assert.deepEqual(costAddresses({ sessionId: 'c', origin: 'subagent', parentSessionId: 'p' }), [
+    { kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' },
+    { kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'one-shot' },
+  ]);
+  // A child row without a parent cannot be addressed as a subagent, so it stays a plain session.
+  assert.deepEqual(costAddresses({ sessionId: 'c', origin: 'subagent' }), [{ kind: 'session', sessionId: 'c' }]);
+});
+
+test('a subagent session is read under its parent address and its other delivery mode', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 1, hasMore: false, header: { id: 'child' }, records: [record(0, at('2026-09-10T10:00:00'))] };
+  fixture.subagent = { sessionId: 'child', updatedAt: 1, running: false, origin: 'subagent', parentSessionId: 'parent' };
+  // The list omits the delivery mode, so the continuable form is rejected before the scan succeeds.
+  fixture.subagentMode = 'one-shot';
+  const ledger = new CostLedger();
+  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined, ledger);
+  t.after(() => controller.stop()); controller.start();
+  await until(() => ledger.scannedAt !== undefined);
+  assert.equal(ledger.total('child').records, 1);
+  assert.equal(ledger.error, '');
+});
+
+test('one failing session does not stop the others from being repriced', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 1, hasMore: false, header: { id: 's1' }, records: [record(0, at('2026-09-10T10:00:00'))] };
+  fixture.failFollow = new Set(['s2']);
+  const ledger = new CostLedger();
+  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  t.after(() => controller.stop()); controller.start();
+  await until(() => ledger.scannedAt !== undefined);
+  assert.ok(ledger.total('s1').records > 0);
+  assert.equal(ledger.hasSession('s2'), false);
+  assert.match(ledger.error, /1 of 2 sessions failed: s2/);
 });

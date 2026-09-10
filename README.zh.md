@@ -355,7 +355,7 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 `/cost` 显示当前会话、今日及今日加前两个自然日的费用。日期使用 Asia/Shanghai，三日统计不是滚动 72 小时。状态栏中 `S:` 表示会话费用，`D:` 表示今日费用。`~` 表示估算；`*` 表示该小计并不精确：请求缺少时间戳、没有价格覆盖，或无法归入所选自然日区间。覆盖不完整另行通报：之前运行缓存的费用视为完整，而账本为空或扫描失败时状态栏出现 `!` 前缀，并在 `/status` 中说明原因。每个服务端 origin 使用独立账本；总额覆盖 HTTP 可见会话及之前缓存的会话，不是供应商账户级账单。
 
-客户端连接后、每 60 秒、任务结束及打开 `/cost` 时在后台通过 HTTP 读取完整历史；服务端更新时间未变的空闲会话跳过扫描。计费不会发起模型请求。显式刷新时可按 Esc 或 Ctrl+C 取消。账本分别统计未缓存输入、缓存读／写和输出，思考 token 已包含在输出中。重试单独计费，同一次尝试的替换用量更新原记录，fork 继承历史不重复计费。缺少结算时间戳的请求仍按该模型族的最低费率给出下限金额，并标记为估算。用量矛盾，以及没有任何模型或供应商条目覆盖的价格，仍标为未计价；模型名是否包含 `pro` 决定按 Pro 还是 Flash 计价，而未列出的供应商不会套用官方价目。扫描失败保留并标明部分缓存结果。
+客户端连接后、每 60 秒、任务结束及打开 `/cost` 时在后台通过 HTTP 读取完整历史；服务端更新时间未变的空闲会话跳过扫描。计费不会发起模型请求。显式刷新时可按 Esc 或 Ctrl+C 取消。账本分别统计未缓存输入、缓存读／写和输出，思考 token 已包含在输出中。重试单独计费，同一次尝试的替换用量更新原记录，fork 继承历史不重复计费。缺少结算时间戳的请求仍按该模型族的最低费率给出下限金额，并标记为估算。用量矛盾，以及没有任何模型或供应商条目覆盖的价格，仍标为未计价；模型名是否包含 `pro` 决定按 Pro 还是 Flash 计价，而未列出的供应商不会套用官方价目。每个会话独立读取：某个会话不可达或被拒绝时只计为失败数量并继续扫描，不会中止整轮；子代理会话按其持久父级地址读取。扫描失败保留并标明部分缓存结果。
 
 内置人民币价格于 2026-09-10 根据[官方价格页](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)核对。北京时间工作日 09:00–12:00、14:00–18:00 为高峰，其余时段半价。Flash 高峰未命中输入／缓存命中输入／输出为每百万 token ¥2/¥0.04/¥8，Pro 为 ¥9/¥0.30/¥27；当前模型名为 `deepseek-flash`，旧 Flash 名称沿用同一费率。供应方已公告自北京时间 2026-09-14 12:00 起将 `deepseek-v4-pro` 交由 Flash 服务并按 Flash 价格计费，内置条目已记录该变更，避免此后高估 Pro 用量。单列的缓存写入按未命中输入价计算。配置中的精确模型价格优先；否则 `deepseek-official` 模型名包含 `pro`（不区分大小写）时按 Pro 计价，其余名称包括临时别名均按 Flash 计价。其他供应商需要显式配置。
 
@@ -377,7 +377,7 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 | 字段 | 值 |
 | --- | --- |
-| 名称与版本 | `@itookit/dsht` `0.2.1` |
+| 名称与版本 | `@itookit/dsht` `0.2.2` |
 | 可执行命令 | `dsht`，不安装时用 `npx @itookit/dsht` |
 | 库入口 | `@itookit/dsht` 和 `@itookit/dsht/auth` |
 | 作者 | lizlok\@gmail.com |
@@ -399,7 +399,7 @@ npm publish --access public
 
 `publishConfig.access` 为 `public`；scoped 包需要它才能被公开安装，因此该设置放在包里而不是每次发布命令上。启用两步验证的账号需用即时验证码发布：`npm publish --otp=<验证码>`；验证码在最后一次请求时校验，此时类型检查、测试和构建均已执行完毕。
 
-后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此最早的版本需手工发布；之后的版本推送对应 tag 即可发布，例如 `npm version 0.2.2 && git push --follow-tags`。
+后续版本由 `.github/workflows/publish.yml` 发布：它以版本 tag 触发，使用 [trusted publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）并生成 provenance，不保存任何发布 token。需在 `npmjs.com` → `@itookit/dsht` → Settings → Trusted Publisher → GitHub Actions 一次性配置：组织或用户 `mushuanli`、仓库 `dsht`、工作流文件名 `publish.yml`、允许动作 `npm publish`。Trusted publishing 无法创建包，因此最早的版本需手工发布；之后的版本推送对应 tag 即可发布，例如 `npm version 0.2.3 && git push --follow-tags`。
 
 手动触发时该工作流只打包不发布，并拒绝与 `package.json` 不一致的 tag。参见官方 [scoped 发布指南](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/)和 [npx 文档](https://docs.npmjs.com/cli/npm-exec/)。Registry 发布不属于本仓库已执行的本地验证。
 

@@ -30,6 +30,23 @@ export interface State {
   transcript: Transcript;
 }
 
+/** Wire addresses for one `session/list` row, in the order the cost scan should try them.
+ *
+ * A subagent child is reachable only under its durable parent, and the list row omits the delivery
+ * mode, so both modes are offered with the continuable form first.
+ * @param session - One row from the host session list.
+ * @returns One plain-session address, or both subagent forms when the row is a child.
+ */
+export function costAddresses(session: ObjectValue): ObjectValue[] {
+  const sessionId = string(session.sessionId);
+  const parentSessionId = typeof session.parentSessionId === 'string' ? session.parentSessionId : '';
+  if (session.origin !== 'subagent' || parentSessionId === '') return [{ kind: 'session', sessionId }];
+  return [
+    { kind: 'subagent', parentSessionId, childSessionId: sessionId, mode: 'continuable' },
+    { kind: 'subagent', parentSessionId, childSessionId: sessionId, mode: 'one-shot' },
+  ];
+}
+
 /** Owns reconnects and subscriptions. User commands remain single-attempt operations. */
 export class Controller {
   state: State = { version: 0, online: false, busy: false, screen: 'workspaces', status: 'Connecting…',
@@ -167,49 +184,78 @@ export class Controller {
       try {
         const sessions = array(object(await client.call('session/list', { _request: {} }, signal)).items).map(object);
         signal.throwIfAborted();
+        const failures: string[] = [];
         for (const session of sessions) {
           signal.throwIfAborted();
           const sessionId = string(session.sessionId);
           if (!session.running && typeof session.updatedAt === 'number' && this.costUpdates.get(sessionId) === session.updatedAt) continue;
-          const snapshot = await new Promise<ObjectValue>((resolve, reject) => {
-            let sub: Subscription | undefined;
-            const timeout = setTimeout(() => finish(new Error('Cost history snapshot timed out')), client.timeoutMs);
-            const onAbort = () => finish(new Error('Cost refresh cancelled'));
-            const finish = (error?: Error, frame?: ObjectValue) => {
-              clearTimeout(timeout); signal.removeEventListener('abort', onAbort); sub?.cancel();
-              if (error) reject(error); else resolve(frame!);
-            };
-            signal.addEventListener('abort', onAbort, { once: true });
-            try { sub = client.subscribe('session/follow', { request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true } }, {
-              item: value => { const frame = object(value); if (frame.type === 'snapshot') finish(undefined, frame); },
-              end: error => finish(error ?? new Error('Cost history stream ended')),
-            }); } catch (error) { finish(error instanceof Error ? error : new Error(errorText(error))); }
-          });
-          const cut = snapshot.cursor;
-          if (typeof cut !== 'number' || !Number.isSafeInteger(cut)) throw new Error('Invalid cost history cursor');
-          let page = snapshot; const events: ObjectValue[] = [];
-          while (true) {
+          try {
+            const history = await this.sessionCostHistory(session, signal);
+            await ledger.replace(sessionId, history.cursor, history.events);
+            if (!session.running && typeof session.updatedAt === 'number') this.costUpdates.set(sessionId, session.updatedAt);
+            this.update({});
+          } catch (error) {
+            // One unreachable or rejected session must not freeze every other session's rates.
             signal.throwIfAborted();
-            const records = array(page.records);
-            events.push(...costRecords(records));
-            if (!page.hasMore) break;
-            const seqs = records.map(r => object(object(r).event).seq);
-            if (!seqs.length || seqs.some(n => typeof n !== 'number' || !Number.isSafeInteger(n))) throw new Error('Invalid cost history page');
-            const beforeSeq = Math.min(...seqs as number[]);
-            page = object(await client.call('session/page', { request: { address: { kind: 'session', sessionId }, throughSeq: cut, beforeSeq, maxMessages: 80 } }, signal));
-            if (page.hasMore && array(page.records).every(r => Number(object(object(r).event).seq) >= beforeSeq)) throw new Error('Cost history page did not advance');
+            failures.push(`${sessionId}: ${errorText(error)}`);
           }
-          if (object(snapshot.header).isSeeded === true && !events.some(e => e.type === 'session/end-seed' && object(e.data).inherited === true)) throw new Error('Cannot attribute inherited session usage');
-          await ledger.replace(sessionId, cut, events);
-          if (!session.running && typeof session.updatedAt === 'number') this.costUpdates.set(sessionId, session.updatedAt);
-          this.update({});
         }
+        ledger.error = failures.length === 0 ? '' : `${failures.length} of ${sessions.length} sessions failed: ${failures[0]}`;
         ledger.scannedAt = Date.now();
       } catch (error) { ledger.error = errorText(error); }
       finally { ledger.scanning = false; this.update({}); }
     })();
     this.costTask = task;
     try { await task; } finally { this.costTask = undefined; }
+  }
+
+  /** Read one session's complete cost history, retrying a subagent child with its other delivery mode. */
+  private async sessionCostHistory(session: ObjectValue, signal: AbortSignal): Promise<{ cursor: number; events: ObjectValue[] }> {
+    let lastError: unknown;
+    for (const address of costAddresses(session)) {
+      try { return await this.readCostHistory(address, signal); }
+      catch (error) {
+        lastError = error;
+        // Only a delivery-mode mismatch justifies the other form; every other failure is final here.
+        if (!(error instanceof RemoteError && error.code === 'subagent/unauthorized')) throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  /** Page one addressed session's history into the billing events the ledger folds. */
+  private async readCostHistory(address: ObjectValue, signal: AbortSignal): Promise<{ cursor: number; events: ObjectValue[] }> {
+    const client = this.host;
+    const snapshot = await new Promise<ObjectValue>((resolve, reject) => {
+      let sub: Subscription | undefined;
+      const timeout = setTimeout(() => finish(new Error('Cost history snapshot timed out')), client.timeoutMs);
+      const onAbort = () => finish(new Error('Cost refresh cancelled'));
+      const finish = (error?: Error, frame?: ObjectValue) => {
+        clearTimeout(timeout); signal.removeEventListener('abort', onAbort); sub?.cancel();
+        if (error) reject(error); else resolve(frame!);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      try { sub = client.subscribe('session/follow', { request: { address, maxMessages: 80, assistantStream: true } }, {
+        item: value => { const frame = object(value); if (frame.type === 'snapshot') finish(undefined, frame); },
+        end: error => finish(error ?? new Error('Cost history stream ended')),
+      }); } catch (error) { finish(error instanceof Error ? error : new Error(errorText(error))); }
+    });
+    const cursor = snapshot.cursor;
+    if (typeof cursor !== 'number' || !Number.isSafeInteger(cursor)) throw new Error('Invalid cost history cursor');
+    let page = snapshot; const events: ObjectValue[] = [];
+    while (true) {
+      signal.throwIfAborted();
+      const records = array(page.records);
+      events.push(...costRecords(records));
+      if (!page.hasMore) break;
+      const seqs = records.map(r => object(object(r).event).seq);
+      if (!seqs.length || seqs.some(n => typeof n !== 'number' || !Number.isSafeInteger(n))) throw new Error('Invalid cost history page');
+      const beforeSeq = Math.min(...seqs as number[]);
+      page = object(await client.call('session/page', { request: { address, throughSeq: cursor, beforeSeq, maxMessages: 80 } }, signal));
+      if (page.hasMore && array(page.records).every(r => Number(object(object(r).event).seq) >= beforeSeq)) throw new Error('Cost history page did not advance');
+    }
+    if (object(snapshot.header).isSeeded === true && !events.some(e => e.type === 'session/end-seed' && object(e.data).inherited === true)) throw new Error('Cannot attribute inherited session usage');
+    return { cursor, events };
   }
 
   /** Refresh both lists from the host, then show the requested picker. */

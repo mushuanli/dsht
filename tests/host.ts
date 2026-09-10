@@ -19,6 +19,9 @@ export async function host() {
   const events = new Map<WebSocket, string>();
   const controls = new Map<WebSocket, string>();
   let controlAvailable = true;
+  const failFollow = new Set<string>();
+  let subagent: ObjectValue | undefined;
+  let subagentMode: 'one-shot' | 'continuable' = 'continuable';
   let defaultModel: ObjectValue = { provider: 'fixture', model: 'chat' };
   let controlBaseline: ObjectValue = { queues: { s1: [] }, jobs: { s1: [] }, projections: {} };
   const follows = new Map<WebSocket, string>();
@@ -62,7 +65,7 @@ export async function host() {
           value = args.query === 'src/' ? [{ path: 'src/hello world.ts', kind: 'file' }]
             : args.query === 'missing' ? [] : [{ path: 'src', kind: 'directory' }, { path: 'README.md', kind: 'file' }];
           break;
-        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [{ ...session, running }, { sessionId: 's2', running: true }] }; break;
+        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...[{ ...session, running }, { sessionId: 's2', running: true }], ...subagent === undefined ? [] : [subagent]] }; break;
         case 'session/create': assert.deepEqual(args, { request: { workspaceId: 'w1' } }); value = { sessionId: 's-new' }; break;
         case 'workspace/create': assert.equal(typeof object(args.request).path, 'string'); value = { workspace, created: false }; break;
         case 'session/prompt': {
@@ -107,7 +110,14 @@ export async function host() {
         if (!controlAvailable) { ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error: { code: 'gateway/method-unavailable', message: 'not installed' } })); return; }
         assert.deepEqual(object(frame.payload).args, {}); controls.set(ws, String(frame.streamId)); item({ type: 'baseline', value: controlBaseline }); }
       else if (frame.endpoint === 'session/follow') {
-        assert.equal(object(object(object(frame.payload).args).request).assistantStream, true);
+        const request = object(object(object(frame.payload).args).request);
+        assert.equal(request.assistantStream, true);
+        const address = object(request.address);
+        const target = String(address.sessionId ?? address.childSessionId ?? '');
+        if (failFollow.has(target)) { ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId,
+          error: { code: 'gateway/method-unavailable', message: 'follow failed', details: {} } })); return; }
+        if (address.kind === 'subagent' && address.mode !== subagentMode) { ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId,
+          error: { code: 'subagent/unauthorized', message: 'subagent mode does not match the supplied address', details: {} } })); return; }
         follows.set(ws, String(frame.streamId)); item(followSnapshot);
       } else ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId,
         error: { code: 'gateway/method-unavailable', message: 'unknown', details: {} } }));
@@ -125,6 +135,9 @@ export async function host() {
     set onPrompt(value: (() => Promise<void>) | undefined) { onPrompt = value; },
     set onCancel(value: (() => Promise<void>) | undefined) { onCancel = value; },
     set controlAvailable(value: boolean) { controlAvailable = value; },
+    set failFollow(value: Set<string>) { failFollow.clear(); for (const id of value) failFollow.add(id); },
+    set subagent(value: ObjectValue | undefined) { subagent = value; },
+    set subagentMode(value: 'one-shot' | 'continuable') { subagentMode = value; },
     set defaultModel(value: ObjectValue) { defaultModel = value; },
     set controlBaseline(value: ObjectValue) { controlBaseline = value; },
     control(value: ObjectValue) { for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId, value })); },

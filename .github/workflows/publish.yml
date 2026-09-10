@@ -10,7 +10,7 @@
 # `npm publish --otp=<code>`; every later release uses this workflow.
 #
 # Release: set the new version in package.json, then push the matching tag.
-#   npm version 0.2.2 && git push --follow-tags
+#   npm version 0.2.3 && git push --follow-tags
 name: publish
 
 on:
