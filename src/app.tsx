@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { useMouseWheel } from './mouse.ts';
 import { TextInput } from './input.tsx';
-import { historyLayout, jumpTarget } from './history.ts';
+import { historyLayout } from './history.ts';
 import { toolLine } from './transcript.ts';
 import { activeReference, fileMention, type FileReference } from './references.ts';
 import { CostPanel } from './cost-view.tsx';
@@ -12,8 +12,8 @@ import { Controller } from './controller.ts';
 import { navigationCommand, sessionLabel } from './navigation.ts';
 import { array, errorText, object, safeText, string, type ObjectValue } from './wire.ts';
 
-const COMMANDS = ['/ws', '/s', '/new', '/older', '/history', '/jump', '/search', '/ssearch', '/wsearch', '/cancel', '/steer', '/allow', '/deny', '/status', '/cost', '/help', '/quit'];
-const HELP = '/ws [name or ID] · /s [title or ID] · /s all · /new · /older · /history [text] · /jump <seq|first|last> · /search text · /ssearch text · /wsearch text · /cancel · /steer text · /allow · /deny · /status · /cost · /quit';
+const COMMANDS = ['/ws', '/s', '/new', '/older', '/history', '/search', '/ssearch', '/wsearch', '/cancel', '/steer', '/allow', '/deny', '/status', '/cost', '/help', '/quit'];
+const HELP = '/ws [name or ID] · /s [title or ID] · /s all · /new · /older · /history [text] · /search text · /ssearch text · /wsearch text · /cancel · /steer text · /allow · /deny · /status · /cost · /quit';
 /** Longest common prefix of the candidate commands, so Tab can extend an ambiguous draft. */
 export function commonPrefix(values: string[]): string {
   let prefix = values[0] ?? '';
@@ -121,6 +121,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
     if (key.escape && searchResults) { setSearchResults(undefined); if (controller.running) void controller.interrupt(true); return; }
     if (key.escape && historyQuery !== undefined) { setHistoryQuery(undefined); if (controller.running) void controller.interrupt(true); return; }
     if (key.ctrl && _value === 'c') {
+      // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
+      if (input !== '') { setInput(''); return; }
       void controller.interrupt().then(shouldExit => { if (shouldExit) exit(); });
       return;
     }
@@ -132,6 +134,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
       return;
     }
     if (key.tab) { completeCommand(); return; }
+    if (key.escape && (help || costExpanded || statusExpanded)) {
+      setHelp(false); setCostExpanded(false); setStatusExpanded(false);
+      if (controller.running) void controller.interrupt(true);
+      return;
+    }
     if (key.escape && state.screen === 'chat') { void controller.interrupt(true); }
     if (key.pageUp) scrollHistory(10);
     if (key.pageDown) scrollHistory(-10);
@@ -182,7 +189,6 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
           }
         });
       }
-      else if (value === '/jump' || value.startsWith('/jump ')) await jumpHistory(jumpTarget(value.slice(5).trim()));
       else if (value === '/older') { await controller.older(); setScroll(value => value + 10); }
       else if (value === '/cancel') await controller.cancelTurn();
       else if (value === '/allow') await controller.approve(true);
@@ -264,18 +270,16 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
       setSearchResults(undefined); setContentSearch(true); setHistoryQuery(query);
     });
   }
-  async function jumpHistory(target: number | 'first' | 'last'): Promise<void> {
+  async function jumpHistory(target: number): Promise<void> {
     if (state.screen !== 'chat') throw new Error('Select a session first');
     ++scrollIntent.current;
-    if (target === 'last') { setHistoryQuery(undefined); setScroll(0); return; }
     const abort = new AbortController();
     historyAbort.current = abort;
     try {
       await controller.historyThrough(target, abort.signal);
       abort.signal.throwIfAborted();
       const current = historyLayout(controller.state.transcript, width);
-      const seq = target === 'first' ? current.messages[0]?.seq : target;
-      const row = seq === undefined ? undefined : current.offsets.get(seq);
+      const row = current.offsets.get(target);
       if (row === undefined) throw new Error('No visible message at this sequence; use /history to choose a record');
       setHistoryQuery(undefined);
       setScroll(Math.max(0, current.lines.length - pageSize - row));
@@ -344,7 +348,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { contr
               {index + Math.max(0, referenceIndex - 5) === referenceIndex ? '❯ ' : '  '}{item.path}{item.kind === 'directory' ? '/' : ''}
             </Text>)}
       </Box>}
-      <Text dimColor>Enter send · Tab complete · Esc cancel · Wheel/PgUp/PgDn scroll · Ctrl+C stop / exit</Text>
+      <Text dimColor>Enter send · Tab complete · Esc cancel · Wheel/PgUp/PgDn scroll · Ctrl+C clear / stop / exit</Text>
       {input.startsWith('/') && !input.includes(' ') && <Text dimColor>{COMMANDS.filter(command => command.startsWith(input)).join('  ')}</Text>}
       {help && <><Text dimColor>{HELP}</Text><Text dimColor>Editing: Ctrl+A/E start/end · Ctrl+K/U kill right/left · Ctrl+W kill word · Ctrl+Y restore</Text></>}
       {costExpanded && <CostPanel controller={controller} />}

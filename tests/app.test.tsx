@@ -134,7 +134,7 @@ test('obsolete reference results cannot replace a newer draft and lookup errors 
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
-test('Ctrl+C stops the current agent even with reference completion open, then exits when idle', async t => {
+test('Ctrl+C clears a draft before stopping the current agent, then exits when idle', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   let exited = false;
@@ -150,6 +150,12 @@ test('Ctrl+C stops the current agent even with reference completion open, then e
   await until(() => controller.running);
   await pressKey(ui, '@');
   await until(() => ui.lastFrame()?.includes('Host files') === true);
+  // The open completion belongs to the draft: the first Ctrl+C discards it without stopping the turn.
+  await pressKey(ui, '\u0003');
+  await until(() => ui.lastFrame()?.includes('Host files') === false);
+  assert.equal(exited, false);
+  assert.equal(controller.running, true);
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
   await pressKey(ui, '\u0003');
   await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
   assert.equal(exited, false);
@@ -188,6 +194,11 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   await until(() => ui.lastFrame()?.includes('Context: ~50%') === true && ui.lastFrame()?.includes('Queued: 0') === true);
   await pressKey(ui, '\u001b');
   await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
+  // Esc closed the details panel; reopen it to watch the metrics across a reconnect.
+  assert.equal(ui.lastFrame()?.includes('Tokens: 1,000 total'), false);
+  await pressKey(ui, '/status');
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Tokens: 1,000 total') === true);
   fixture.controlBaseline = { projections: {}, queues: {}, jobs: {} };
   fixture.disconnect();
   await until(() => !controller.state.online);
@@ -325,10 +336,10 @@ test('mouse scrolling loads history and slash search selects a matching record',
   await until(() => ui.lastFrame()?.includes('#5 You · history-record-5') === true);
   await until(() => !controller.state.busy);
   await press('\r');
-  await until(() => !ui.lastFrame()?.includes('History · loaded') && ui.lastFrame()?.includes('history-record-5') === true);
-  await press('/jump last'); await press('\r');
+  await until(() => !ui.lastFrame()?.includes('History · your prompts') && ui.lastFrame()?.includes('history-record-5') === true);
+  for (let i = 0; i < 60; i++) await press('\x1b[<65;3;4M');
   await until(() => ui.lastFrame()?.includes('history-record-39') === true && !controller.state.busy);
-  await press('/jump first'); await press('\r');
+  for (let i = 0; i < 60; i++) await press('\x1b[<64;3;4M');
   await until(() => ui.lastFrame()?.includes('history-record-0') === true && !controller.state.busy);
   await press('/wsearch 你好'); await press('\r');
   await until(() => ui.lastFrame()?.includes('s2 · 你好 too') === true && !controller.state.busy);
@@ -481,6 +492,23 @@ test('a slash-command panel closes on the next command or after its lifetime', a
   // Without another command the panel closes on its own.
   await until(() => ui.lastFrame()?.includes('Session ID: s1') === false);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('Esc closes an open command panel and keeps the draft beside it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('/ws [name or ID]') === true);
+  await pressKey(ui, 'plain draft');
+  await until(() => ui.lastFrame()?.includes('plain draft') === true);
+  await pressKey(ui, '\u001b');
+  await until(() => ui.lastFrame()?.includes('/ws [name or ID]') === false);
+  assert.equal(ui.lastFrame()?.includes('plain draft'), true);
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
 test('cost coverage warns through the status prefix instead of rewriting a subtotal', async t => {

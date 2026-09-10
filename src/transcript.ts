@@ -50,6 +50,9 @@ export function contentText(content: Json | undefined, tools?: ReadonlyMap<strin
   }).map(safeText).join('\n');
 }
 
+/** Event types that contribute a displayed message; other retained events only affect live state. */
+const DISPLAY_EVENTS = new Set(['user/message', 'assistant/message', 'tool/result']);
+
 /** A displayed message retains the durable sequence for stable reconciliation. */
 export interface Message { seq: number; role: string; text: string; compact?: boolean }
 
@@ -61,6 +64,16 @@ export class Transcript {
   private nextIndex = 0;
   private revision = 0;
   private legacyStream = false;
+  private keysDirty = true;
+  private sortedSeqs: number[] = [];
+  private projectionRevision = 0;
+  private projection: { revision: number; width: number; messages: Message[] } | undefined;
+  private displaySeqsRevision = -1;
+  private displayed: number[] = [];
+  private displayedMessages = new WeakMap<ObjectValue, { width: number; prefix: number; message: Message | undefined }>();
+  private legacyDirty = true;
+  private legacyPosition = '';
+  private legacySeq = -1;
   /** Changes whenever a follow frame or older page can affect the rendered transcript. */
   version = 0;
   cursor = -1;
@@ -76,6 +89,9 @@ export class Transcript {
         this.ready = false;
         this.events.clear();
         this.blocks.clear();
+        this.keysDirty = true;
+        this.projectionRevision++;
+        this.legacyDirty = true;
         this.legacyStream = frame.assistantStream === undefined;
         this.cursor = number(frame.cursor);
         this.hasMore = frame.hasMore === true;
@@ -138,7 +154,8 @@ export class Transcript {
   /** Start of the open durable turn, when its timestamp is present in the retained window. */
   get activeTurnStartedAt(): number | undefined {
     let start: number | undefined;
-    for (const [, event] of [...this.events].sort(([a], [b]) => a - b)) {
+    for (const seq of this.sortedKeys()) {
+      const event = this.events.get(seq)!;
       if (event.type === 'turn/start') start = typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : undefined;
       else if (event.type === 'turn/end') start = undefined;
     }
@@ -146,37 +163,68 @@ export class Transcript {
   }
 
   /** Earliest retained record, used with the opening cursor for backward paging. */
-  get beforeSeq(): number | undefined { return [...this.events.keys()].sort((a, b) => a - b)[0]; }
+  get beforeSeq(): number | undefined { return this.sortedKeys()[0]; }
+
+  /** Retained sequences in ascending order; resorted only when a retained event changes. */
+  private sortedKeys(): number[] {
+    if (this.keysDirty) {
+      this.sortedSeqs = [...this.events.keys()].sort((a, b) => a - b);
+      this.keysDirty = false;
+    }
+    return this.sortedSeqs;
+  }
+
+  /** Sequences of the event types that contribute a displayed message. */
+  private displaySeqs(): number[] {
+    if (this.displaySeqsRevision !== this.projectionRevision) {
+      this.displayed = this.sortedKeys().filter(seq => DISPLAY_EVENTS.has(string(this.events.get(seq)!.type)));
+      this.displaySeqsRevision = this.projectionRevision;
+    }
+    return this.displayed;
+  }
 
   /** Return append-origin conversation only; model-only replacement copies stay hidden. */
   get messages(): Message[] { return this.messagesForWidth(100); }
 
   /** Project history with single-row tool operations at the caller's terminal width.
    * @param width - Available terminal columns.
-   * @returns Conversation messages with compact tool-only rows.
+   * @returns Conversation messages with compact tool-only rows; the array is shared and must not be mutated.
    */
   messagesForWidth(width: number): Message[] {
+    if (this.projection?.revision === this.projectionRevision && this.projection.width === width) return this.projection.messages;
+    const messages = this.project(width);
+    this.projection = { revision: this.projectionRevision, width, messages };
+    return messages;
+  }
+
+  /** Build the message list, reusing each unchanged event's earlier projection at the same width. */
+  private project(width: number): Message[] {
     const result: Message[] = [];
     const tools = new Map<string, ToolSummary>();
-    for (const [seq, event] of [...this.events].sort(([a], [b]) => a - b)) {
+    for (const seq of this.displaySeqs()) {
+      const event = this.events.get(seq)!;
       if (event.surfaceOp !== 'append') continue;
       const data = object(event.data);
-      if (event.type === 'user/message') {
-        const source = data.source ? object(data.source) : undefined;
-        result.push({ seq, role: source && source.kind !== 'user' ? 'Context' : 'You', text: contentText(data.content, tools, width) });
+      const isUser = event.type === 'user/message';
+      const blocks = isUser ? [] : array(object(data.message).content).map(object);
+      for (const block of blocks) {
+        if (block.type === 'tool-call') tools.set(string(block.id), toolSummary(block));
       }
-      else if (event.type === 'assistant/message' || event.type === 'tool/result') {
-        const message = object(data.message);
-        const blocks = array(message.content).map(object);
-        for (const block of blocks) {
-          if (block.type === 'tool-call') tools.set(string(block.id), toolSummary(block));
-        }
-        const text = event.type === 'tool/result'
+      const cached = this.displayedMessages.get(event);
+      if (cached && cached.width === width && cached.prefix === tools.size) {
+        if (cached.message) result.push(cached.message);
+        continue;
+      }
+      const role = isUser ? (data.source && object(data.source).kind !== 'user' ? 'Context' : 'You')
+        : event.type === 'tool/result' ? 'Tool' : 'Assistant';
+      const text = isUser ? contentText(data.content, tools, width)
+        : event.type === 'tool/result'
           ? contentText(blocks.filter(block => block.type === 'tool-result'), tools, width) || toolLine('✓ tool · completed', width)
-          : contentText(message.content, tools, width);
-        if (text) result.push({ seq, role: event.type === 'tool/result' ? 'Tool' : 'Assistant', text,
-          compact: event.type === 'tool/result' || blocks.every(block => block.type === 'tool-call') });
-      }
+          : contentText(blocks, tools, width);
+      const message = text ? { seq, role, text,
+        ...(isUser ? {} : { compact: event.type === 'tool/result' || blocks.every(block => block.type === 'tool-call') }) } : undefined;
+      this.displayedMessages.set(event, { width, prefix: tools.size, message });
+      if (message) result.push(message);
     }
     return result;
   }
@@ -196,6 +244,7 @@ export class Transcript {
   }
 
   private addRecords(records: Json[]): void {
+    const added: ObjectValue[] = [];
     for (const record of records) {
       const entry = object(record);
       if (entry.type !== 'event' && entry.type !== 'chunks') {
@@ -205,24 +254,43 @@ export class Transcript {
       if (entry.type === 'chunks' && !['chunkrow/text-chunks', 'chunkrow/reasoning-chunks', 'chunkrow/tool-call-chunks'].includes(string(event.type))) {
         throw new Error(`Unsupported packed history event: ${string(event.type).slice(0, 100)}`);
       }
-      this.events.set(number(event.seq), event);
+      const seq = number(event.seq);
+      const current = this.events.get(seq);
+      this.events.set(seq, event);
+      if (current === event) continue;
+      added.push(event);
+      if (this.keysDirty || seq <= (this.sortedSeqs[this.sortedSeqs.length - 1] ?? -1)) this.keysDirty = true;
+      else this.sortedSeqs.push(seq);
+      if (DISPLAY_EVENTS.has(string(event.type))) this.projectionRevision++;
+      if (seq <= this.legacySeq) this.legacyDirty = true;
     }
-    if (this.legacyStream) this.rebuildLegacyStream();
+    if (this.legacyStream) this.foldLegacy(added);
   }
 
-  /** Older hosts log chunks directly; replay only the unfinished attempt for live display. */
-  private rebuildLegacyStream(): void {
-    this.blocks.clear();
-    let position = '';
-    for (const [, event] of [...this.events].sort(([a], [b]) => a - b)) {
+  /** Older hosts log chunks directly; fold the unfinished attempt into the live tail for display.
+   * A page behind the folded position, or a replaced event, forces a full re-fold; streamed chunks extend it.
+   */
+  private foldLegacy(added: ObjectValue[]): void {
+    let events: ObjectValue[];
+    if (this.legacyDirty) {
+      this.blocks.clear();
+      this.legacyPosition = '';
+      this.legacySeq = -1;
+      this.legacyDirty = false;
+      events = this.sortedKeys().map(seq => this.events.get(seq)!);
+    } else {
+      events = added.filter(event => number(event.seq) > this.legacySeq).sort((a, b) => number(a.seq) - number(b.seq));
+    }
+    for (const event of events) {
+      this.legacySeq = Math.max(this.legacySeq, number(event.seq));
       if (['step/start', 'step/end', 'turn/end', 'assistant/message', 'assistant/attempt'].includes(string(event.type))) {
         this.blocks.clear();
-        position = '';
+        this.legacyPosition = '';
       } else if (event.type === 'assistant/chunk' || string(event.type).startsWith('chunkrow/')) {
         const data = object(event.data);
         const nextPosition = `${number(data.turn)}:${number(data.step)}`;
-        if (position !== nextPosition) this.blocks.clear();
-        position = nextPosition;
+        if (this.legacyPosition !== nextPosition) this.blocks.clear();
+        this.legacyPosition = nextPosition;
         switch (event.type) {
           case 'assistant/chunk': this.chunk(object(data.chunk)); break;
           case 'chunkrow/text-chunks':

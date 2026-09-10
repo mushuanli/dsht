@@ -1,19 +1,17 @@
 /** History navigation operates on visible record sequences and SGR input packets. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { jumpTarget, historyLayout } from '../src/history.ts';
+import { historyLayout } from '../src/history.ts';
 import { isMouseReport, wheelDirection } from '../src/mouse.ts';
 import { Transcript } from '../src/transcript.ts';
 import { Controller } from '../src/controller.ts';
 import { host, snapshot, until } from './host.ts';
 
-test('history offsets refer to visible messages and jump arguments reject partial numbers', () => {
+test('history offsets refer to visible messages', () => {
   const transcript = new Transcript(); transcript.accept(snapshot);
   const layout = historyLayout(transcript, 30);
   assert.equal(layout.offsets.get(0), 0);
   assert.deepEqual(layout.lines, ['You', '你好', '']);
-  for (const text of ['0', '21', 'first', 'last']) assert.equal(String(jumpTarget(text)), text);
-  for (const text of ['', '-1', '2x', '1.2', '9007199254740992']) assert.throws(() => jumpTarget(text));
 });
 
 test('mouse decoding ignores buttons, motion, releases and horizontal wheels', () => {

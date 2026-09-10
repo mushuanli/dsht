@@ -22,6 +22,30 @@ test('reconciles live text with the committed message and replaces on reconnect'
   assert.equal(transcript.messages.length, 0);
 });
 
+test('reuses the projected conversation across streamed frames and re-folds a split attempt', () => {
+  const transcript = new Transcript();
+  transcript.accept(snapshot);
+  const projected = transcript.messagesForWidth(80);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'text-delta', index: 0, text: 'streamed' } } });
+  assert.equal(transcript.liveText, 'streamed');
+  assert.equal(transcript.messagesForWidth(80), projected);
+
+  const legacy = new Transcript();
+  legacy.accept({ ...snapshot, assistantStream: undefined });
+  const durable = legacy.messagesForWidth(80);
+  const chunk = (seq: number, texts: string[]) => ({ type: 'event', event: { seq, type: 'chunkrow/text-chunks',
+    surfaceOp: 'append', data: { turn: 2, step: 1, index: 0, texts, dt: [] } } });
+  legacy.accept(chunk(5, ['live']));
+  legacy.accept(chunk(6, [' tail']));
+  assert.equal(legacy.liveText, 'live tail');
+  assert.equal(legacy.messagesForWidth(80), durable);
+  // The retained window can split the live attempt: an older page supplies its beginning.
+  legacy.addPage({ records: [chunk(2, ['start '])], hasMore: false });
+  assert.equal(legacy.liveText, 'start live tail');
+});
+
 test('restores compact active streams and detects missed revisions', () => {
   const transcript = new Transcript();
   transcript.accept({ ...snapshot, assistantStream: { revision: 5, activeAttempt: { attemptId: 'a', nextIndex: 2,
