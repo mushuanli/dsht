@@ -30,15 +30,20 @@ Main features:
 
 ## Start
 
-Use Node.js 22.19 or newer and an existing `dsh web` server. Copy the token from the URL printed by that server; the server is a separate prerequisite and is not launched by this client.
-
-Run the published package without cloning or building; `npx dsht` fetches it from the registry:
+Use Node.js 22.19 or newer and an existing `dsh web` server; the server is a separate prerequisite and is not launched by this client. The default host is the local `http://127.0.0.1:3080`:
 
 ```sh
-export DSH_URL=http://127.0.0.1:3080
-read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
 npx dsht
 ```
+
+A token is needed only on the first run and after the saved cookie expires. Export it on its own, or export the complete URL printed by `dsh web` and let the client split off its `?token=` parameter:
+
+```sh
+export DSH_TOKEN=<token> && npx dsht
+export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx dsht
+```
+
+`DSH_TOKEN` takes precedence when both are set, and `--url` overrides `DSH_URL` for one run. The token is never written to disk; only the resulting cookie is. Both exports above land in your shell history, so use `read -rs -p 'Host token: ' DSH_TOKEN` where that matters. Another host needs its own origin in `DSH_URL`.
 
 `npx dsht list workspaces --json` and `npx dsht list sessions --json` print workspace and session lists for scripts, and `npm install -g dsht` installs the `dsht` command. These registry commands require the package to be published.
 
@@ -46,18 +51,16 @@ From a source checkout, install the dependencies and run the TypeScript entry:
 
 ```sh
 npm ci --ignore-scripts
-export DSH_URL=http://127.0.0.1:3080
-read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
 npm start
 ```
 
-Both paths read the same `DSH_URL` and first-login `DSH_TOKEN` variables.
+Both paths read the same `DSH_URL` and `DSH_TOKEN` variables.
 
 Select a workspace with ↑/↓ and Enter, then select a session or **New session**. **All sessions** also exposes sessions outside registered workspaces. **Add workspace** accepts an existing absolute directory on the host, which may differ from your local filesystem. Creating a session requires a selected workspace.
 
-On first login, authentication exchanges `DSH_TOKEN` at `GET /` and saves the cookie per HTTP origin. Later starts, including list commands, reuse that cookie without a token. The store uses `$XDG_STATE_HOME/dsht/auth`, or `~/.local/state/dsht/auth` when unset; `--auth-dir` or `DSHT_AUTH_DIR` overrides it. POSIX directories use 0700 and cookie files use 0600; Windows uses the account directory’s inherited access controls. Launch tokens are never saved.
+On first login, authentication exchanges the token at `GET /` and saves the cookie per HTTP origin. Later starts, including list commands, reuse that cookie without a token. The store uses `$XDG_STATE_HOME/dsht/auth`, or `~/.local/state/dsht/auth` when unset; `--auth-dir` or `DSHT_AUTH_DIR` overrides it. POSIX directories use 0700 and cookie files use 0600; Windows uses the account directory’s inherited access controls. Launch tokens are never saved.
 
-The host determines cookie expiration. An expired or rejected cookie requires `DSH_TOKEN` again; a supplied token refreshes authentication automatically after HTTP 401. Network failures and HTTP 403 do not trigger token exchange. Corrupt or insecure cookie files fail explicitly. The base URL must be an origin without a path or query, and the host must allow its hostname.
+The host determines cookie expiration. An expired or rejected cookie requires a token again; a supplied token refreshes authentication automatically after HTTP 401. Network failures and HTTP 403 do not trigger token exchange. Corrupt or insecure cookie files fail explicitly. The base URL must be an origin without a path or extra query parameters, and the host must allow its hostname.
 
 ## List workspaces and sessions
 

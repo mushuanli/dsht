@@ -12,20 +12,22 @@ import { sessionLabel } from './navigation.ts';
 import { CookieStore, login } from './auth.ts';
 import { Client } from './client.ts';
 import { Controller } from './controller.ts';
+import { endpoint } from './endpoint.ts';
 import { errorText, safeText, string } from './wire.ts';
 
 const HELP = `Usage: dsht [options] [list workspaces|list sessions]
 
 With no command, choose a workspace and session interactively.
 
-  --url <origin>        Host origin (DSH_URL or http://127.0.0.1:3080)
+  --url <url>           Host URL, or the dsh web URL with ?token= (DSH_URL)
   --workspace <id>      Filter list sessions by workspace
   --session <id>        Open a session directly
   --auth-dir <path>     Private cookie directory (or DSHT_AUTH_DIR)
   --json               Print machine-readable list output
   --help               Show this help
 
-First login: set DSH_TOKEN to the token printed by dsh web.
+The default host is http://127.0.0.1:3080.
+First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 /cost shows session, today and three-day CNY estimates.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
@@ -45,10 +47,10 @@ async function main(): Promise<void> {
   if (positionals.length && !list) throw new Error('Unknown command. Use --help.');
   if (!list && (values.json || values.workspace)) throw new Error('--json and --workspace apply to list commands');
   if (list && values.session) throw new Error('--session applies to interactive mode');
-  const token = process.env.DSH_TOKEN;
+  const { url, token } = endpoint(values.url, process.env.DSH_TOKEN);
   const store = new CookieStore(values['auth-dir']);
   if (list) {
-    const client = new Client(values.url);
+    const client = new Client(url);
     try {
       await login(client, token, store);
       if (positionals[1] === 'workspaces' || values.workspace) await client.connect();
@@ -70,10 +72,10 @@ async function main(): Promise<void> {
   try { await writeFile(pricePath, JSON.stringify(DEFAULT_PRICES, null, 2) + '\n', { flag: 'wx', mode: 0o600 }); }
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
   const prices = pricesFrom(JSON.parse(await readFile(pricePath, 'utf8')));
-  const costDirectory = join(process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht'), 'cost', createHash('sha256').update(new URL(values.url).origin).digest('hex'));
+  const costDirectory = join(process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht'), 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory);
   await costs.load();
-  const controller = new Controller(values.url, token, values.session, undefined, client => login(client, token, store), costs);
+  const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs);
   const app = render(<App controller={controller} />, { exitOnCtrlC: false });
   const terminate = () => app.unmount();
   process.once('SIGTERM', terminate);

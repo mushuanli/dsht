@@ -22,6 +22,8 @@ Billing uses durable per-attempt usage rather than differences between cumulativ
 
 The conversation header reads the live title projection before the session-list title and ID. Explicit Esc cancellation bypasses cached running-state admission, shares in-flight cancellation requests, and keeps acknowledgement visible through incoming history until an idle notification. Open menus cancel a known running agent as they close; local navigation or cost loads retain cancellation priority.
 
+Startup configuration accepts the URL that `dsh web` prints, which carries the launch token as a `?token=` query parameter. Splitting that parameter before validation lets users paste the printed line as `DSH_URL` unchanged, while any other path or query still fails so the origin stays unambiguous for cookie and cost scoping. `DSH_TOKEN` keeps precedence over the URL parameter, blank values never authenticate, and the token stays memory-only: only the exchanged cookie reaches disk.
+
 ## Alternatives considered
 
 Reusing Cordis client services couples installation and startup to Harness composition. Rust improves native distribution but duplicates more protocol and terminal integration work. Python adds a runtime ecosystem that the requested Node.js implementation does not need. A separate Git repository keeps dependency installation and release history independent.

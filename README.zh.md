@@ -30,15 +30,20 @@
 
 ## 启动
 
-需要 Node.js 22.19 或更新版本，以及已经运行的 `dsh web` 服务。从服务打印的 URL 中取得 token；服务是单独的前置条件，本客户端不会启动它。
-
-直接运行已发布的包，无需克隆或构建；`npx dsht` 会从 registry 获取它：
+需要 Node.js 22.19 或更新版本，以及已经运行的 `dsh web` 服务；服务是单独的前置条件，本客户端不会启动它。默认连接本机 `http://127.0.0.1:3080`：
 
 ```sh
-export DSH_URL=http://127.0.0.1:3080
-read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
 npx dsht
 ```
+
+仅在首次运行以及已保存的 cookie 过期后需要 token。可以单独导出它，也可以直接导出 `dsh web` 打印的完整地址，由客户端拆出其中的 `?token=` 参数：
+
+```sh
+export DSH_TOKEN=<token> && npx dsht
+export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx dsht
+```
+
+两者同时提供时 `DSH_TOKEN` 优先，`--url` 可覆盖单次运行的 `DSH_URL`。token 不会写入磁盘，只保存兑换得到的 cookie。上面两种 export 都会留在 shell 历史中，在意时改用 `read -rs -p 'Host token: ' DSH_TOKEN`。连接其他服务端需在 `DSH_URL` 中给出其 origin。
 
 `npx dsht list workspaces --json` 和 `npx dsht list sessions --json` 供脚本获取工作区和会话列表，`npm install -g dsht` 会安装 `dsht` 命令。这些 registry 命令要求包已发布。
 
@@ -46,18 +51,16 @@ npx dsht
 
 ```sh
 npm ci --ignore-scripts
-export DSH_URL=http://127.0.0.1:3080
-read -rs -p 'Host token: ' DSH_TOKEN; export DSH_TOKEN; echo
 npm start
 ```
 
-两种方式读取相同的 `DSH_URL` 和首次登录的 `DSH_TOKEN` 变量。
+两种方式读取相同的 `DSH_URL` 和 `DSH_TOKEN` 变量。
 
 使用 ↑/↓ 和 Enter 选择工作区，然后选择已有会话或 **New session**。**All sessions** 同时显示未归属注册工作区的会话。**Add workspace** 接收服务端已有目录的绝对路径，该路径可能与本机文件系统不同。新建会话前必须选择工作区。
 
-首次登录通过 `GET /` 兑换 `DSH_TOKEN`，并按 HTTP origin 保存 cookie。后续启动和列表命令自动复用 cookie，无需再次提供 token。默认目录为 `$XDG_STATE_HOME/dsht/auth`，未设置时使用 `~/.local/state/dsht/auth`；可通过 `--auth-dir` 或 `DSHT_AUTH_DIR` 覆盖。POSIX 下目录权限为 0700、cookie 文件为 0600；Windows 使用账户目录继承的访问控制。启动 token 永不保存。
+首次登录通过 `GET /` 兑换 token，并按 HTTP origin 保存 cookie。后续启动和列表命令自动复用 cookie，无需再次提供 token。默认目录为 `$XDG_STATE_HOME/dsht/auth`，未设置时使用 `~/.local/state/dsht/auth`；可通过 `--auth-dir` 或 `DSHT_AUTH_DIR` 覆盖。POSIX 下目录权限为 0700、cookie 文件为 0600；Windows 使用账户目录继承的访问控制。启动 token 永不保存。
 
-Cookie 有效期由服务端决定。过期或被拒绝后，需要再次提供 `DSH_TOKEN`；已提供 token 时，HTTP 401 会自动触发重新认证。网络故障和 HTTP 403 不触发 token 兑换。损坏或权限不安全的 cookie 文件会明确报错。服务地址必须是不带路径或查询参数的 origin，且主机名须受服务端信任。
+Cookie 有效期由服务端决定。过期或被拒绝后，需要再次提供 token；已提供 token 时，HTTP 401 会自动触发重新认证。网络故障和 HTTP 403 不触发 token 兑换。损坏或权限不安全的 cookie 文件会明确报错。服务地址必须是不带路径、且除 `token` 外无其他查询参数的 origin，主机名须受服务端信任。
 
 ## 列出工作区和会话
 

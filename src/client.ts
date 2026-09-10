@@ -42,7 +42,7 @@ export class Client {
     this.base = new URL(base);
     if (!['http:', 'https:'].includes(this.base.protocol) || this.base.username || this.base.password
       || this.base.pathname !== '/' || this.base.search || this.base.hash) {
-      throw new Error('Server URL must be an HTTP(S) origin without token, path, or credentials');
+      throw new Error('Server URL must be an HTTP(S) origin without a path, query, or credentials');
     }
   }
 

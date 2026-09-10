@@ -51,3 +51,17 @@ test('help requires no token and invalid commands fail without exposing the toke
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /DSH_TOKEN/);
 });
+
+test('the URL printed by dsh web authenticates without DSH_TOKEN', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const authenticated = await run(['list', 'workspaces', '--json'], { DSH_URL: `${fixture.url}/?token=fixture-token` });
+  assert.equal(authenticated.code, 0, authenticated.stderr);
+  assert.equal(JSON.parse(authenticated.stdout).items[0].workspaceId, 'w1');
+  assert.equal(fixture.loginCount, 1);
+  const precedence = await run(['list', 'sessions', '--json'], { DSH_URL: `${fixture.url}/?token=stale`, DSH_TOKEN: 'fixture-token' });
+  assert.equal(precedence.code, 0, precedence.stderr);
+  const extra = await run(['list', 'workspaces', '--json'], { DSH_URL: `${fixture.url}/?token=fixture-token&x=1` });
+  assert.equal(extra.code, 1);
+  assert.match(extra.stderr, /origin/);
+  assert(!extra.stderr.includes('fixture-token'));
+});
