@@ -1,0 +1,119 @@
+/** Loopback wire fixture; each test atomically owns its server and closes every socket. */
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { WebSocketServer, type WebSocket } from 'ws';
+import { array, object, type ObjectValue } from '../src/wire.ts';
+
+export const workspace = { workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1'] };
+export const session = { sessionId: 's1', running: false, projections: { values: { title: 'First conversation' } } };
+export const snapshot = { type: 'snapshot', cursor: 0, hasMore: false, header: { id: 's1' }, records: [
+  { type: 'event', event: { seq: 0, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: '你好' }] } } },
+], assistantStream: { revision: 0 } };
+
+export async function host() {
+  const calls: ObjectValue[] = [];
+  const opens: ObjectValue[] = [];
+  const cancels: ObjectValue[] = [];
+  const sockets = new Set<WebSocket>();
+  const events = new Map<WebSocket, string>();
+  const follows = new Map<WebSocket, string>();
+  let baseline = [workspace];
+  let wrongIdentity = false;
+  let businessError = false;
+  const server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url!, 'http://fixture');
+      if (url.pathname === '/') {
+        assert.equal(request.method, 'GET');
+        if (url.searchParams.get('token') !== 'fixture-token') { response.writeHead(401).end(); return; }
+        response.writeHead(303, { 'set-cookie': 'dsh-auth-fixture=valid; HttpOnly; Path=/; SameSite=Strict', location: '/' }).end();
+        return;
+      }
+      assert.equal(request.headers.cookie, 'dsh-auth-fixture=valid');
+      assert.equal(request.method, 'POST');
+      let raw = '';
+      for await (const chunk of request) raw += chunk;
+      const body = object(JSON.parse(raw));
+      assert.equal(body.type, 'client-request');
+      assert.equal(url.pathname, `/api/${body.method}`);
+      assert.deepEqual(Object.keys(object(body.payload)), ['args']);
+      const args = object(object(body.payload).args);
+      calls.push(body);
+      let value: unknown;
+      switch (body.method) {
+        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [session, { sessionId: 's2', running: true }] }; break;
+        case 'session/create': assert.deepEqual(args, { request: { workspaceId: 'w1' } }); value = { sessionId: 's-new' }; break;
+        case 'workspace/create': assert.equal(typeof object(args.request).path, 'string'); value = { workspace, created: false }; break;
+        case 'session/prompt': {
+          const prompt = object(args.request);
+          assert.equal(typeof prompt.requestId, 'string');
+          assert.equal(typeof prompt.sessionId, 'string');
+          assert.equal(array(prompt.content).length, 1);
+          value = { accepted: true }; break;
+        }
+        case 'session/cancel': assert.equal(typeof object(args.request).sessionId, 'string'); value = { accepted: true }; break;
+        case 'session/page': value = { records: [], hasMore: false }; break;
+        case '$events/result': assert.equal(args.clientId, 'client-1'); value = {}; break;
+        default: response.writeHead(404).end(); return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        type: 'server-response', rpcId: wrongIdentity ? 'wrong' : body.rpcId,
+        result: businessError ? { ok: false, error: { code: 'session/agent-busy', message: 'busy', details: { reason: 'test' } } }
+          : { ok: true, value },
+      }));
+    } catch (error) { response.writeHead(500).end(String(error)); }
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    if (request.url !== '/api/remote.mux' || request.headers.cookie !== 'dsh-auth-fixture=valid') {
+      socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n'); return;
+    }
+    wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws));
+  });
+  wss.on('connection', ws => {
+    sockets.add(ws);
+    ws.on('close', () => { sockets.delete(ws); events.delete(ws); follows.delete(ws); });
+    ws.on('message', raw => {
+      const frame = object(JSON.parse(raw.toString()));
+      if (frame.type === 'cancel') { cancels.push(frame); return; }
+      opens.push(frame);
+      const item = (value: unknown) => ws.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value }));
+      if (frame.endpoint === '$events') { events.set(ws, String(frame.streamId)); item({ type: 'ready', clientId: 'client-1', host: { home: '/host' } }); }
+      else if (frame.endpoint === 'workspace/follow') { assert.deepEqual(object(frame.payload).args, {}); item({ type: 'baseline', value: { items: baseline, archivedSessionIds: [] } }); }
+      else if (frame.endpoint === 'session/follow') {
+        assert.equal(object(object(object(frame.payload).args).request).assistantStream, true);
+        follows.set(ws, String(frame.streamId)); item(snapshot);
+      } else ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId,
+        error: { code: 'gateway/method-unavailable', message: 'unknown', details: {} } }));
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert(address && typeof address === 'object');
+  return {
+    url: `http://127.0.0.1:${address.port}`, calls, opens, cancels,
+    set baseline(value: typeof baseline) { baseline = value; },
+    set wrongIdentity(value: boolean) { wrongIdentity = value; },
+    set businessError(value: boolean) { businessError = value; },
+    emit(value: ObjectValue) { for (const [ws, streamId] of events) ws.send(JSON.stringify({ type: 'item', streamId, value })); },
+    follow(value: ObjectValue) { for (const [ws, streamId] of follows) ws.send(JSON.stringify({ type: 'item', streamId, value })); },
+    disconnect() { for (const ws of sockets) ws.terminate(); },
+    async close() {
+      for (const ws of sockets) ws.terminate();
+      await new Promise<void>(resolve => wss.close(() => resolve()));
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    },
+  };
+}
+
+/** Poll observable state with a bounded deadline, never assume readiness from a fixed delay. */
+export async function until(condition: () => boolean, timeout = 5000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for test state');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}

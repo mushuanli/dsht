@@ -1,0 +1,29 @@
+{
+  "name": "dsh-http-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone terminal client for the DeepSeek Harness HTTP gateway",
+  "engines": { "node": ">=22.19" },
+  "scripts": {
+    "start": "tsx src/cli.tsx",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
+    "test": "tsx --test tests/*.test.ts tests/*.test.tsx"
+  },
+  "dependencies": {
+    "ink": "^6.8.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.0",
+    "wrap-ansi": "^9.0.2",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.2.0",
+    "@types/ws": "^8.18.1",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.22.0",
+    "typescript": "^5.9.3"
+  }
+}
