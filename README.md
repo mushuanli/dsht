@@ -398,7 +398,7 @@ This repository publishes one public package, `@itookit/dsht`, from the `mushuan
 
 | Field | Value |
 | --- | --- |
-| Name and version | `@itookit/dsht` `0.2.2` |
+| Name and version | `@itookit/dsht` `0.2.4` |
 | Executable | `dsht`, or `npx @itookit/dsht` without installing |
 | Library entries | `@itookit/dsht` and `@itookit/dsht/auth` |
 | Author | lizlok@gmail.com |
@@ -436,7 +436,7 @@ node dist/cli.js --help
 
 Tests use isolated HTTP/WebSocket hosts, drive the real Ink picker and composer, run the CLI in subprocesses, and project copied Harness v2 workspace-edit and v0 packed-chunk recordings. The repository needs no model credentials for these checks. The recording and expected transcript live under `tests/`; they do not depend on a parent checkout. Live model-provider behavior is not covered by these tests.
 
-`npm test` renders frames without styling, because the assertions and the recorded expectations in `tests/expected/` describe text. A test runner started from a terminal exports `FORCE_COLOR=1` to each test file, which makes Ink interleave SGR escapes between a prompt and its text; `npm run test:terminal` reproduces that environment on any host, and `prepublishOnly` runs it so a publish from a terminal validates what a terminal actually renders.
+`npm test` renders frames without styling, because the assertions and the recorded expectations in `tests/expected/` describe text. A test runner started from a terminal exports `FORCE_COLOR=1` to each test file, which makes Ink interleave SGR escapes between a prompt and its text; `npm run test:terminal` reproduces that environment on any host, and `prepublishOnly` runs it so a publish from a terminal validates what a terminal actually renders. Theme tests render separate truecolor and plain subprocesses with terminal and CI color detection isolated from the parent environment.
 
 Typing reuses history projection and wrapping until the transcript revision or terminal width changes; host updates and older pages invalidate that reuse. `bench:input` measures local input-to-render work with 20 and 500 synthetic messages, 30 measured keystrokes after warmup, and history projection read counts. It excludes network/model time and is a diagnostic, not a machine-independent latency threshold.
 

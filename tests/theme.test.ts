@@ -4,6 +4,20 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
 
+/** Render with an explicit color depth, independent of terminal and CI detection. */
+function renderFixture(source: string, color: '0' | '3'): string {
+  // TERM=dumb uses FORCE_COLOR directly; Azure detection runs before that TERM check.
+  const env: NodeJS.ProcessEnv = { ...process.env, TERM: 'dumb', FORCE_COLOR: color };
+  delete env.TF_BUILD;
+  delete env.NO_COLOR;
+  delete env.NODE_DISABLE_COLORS;
+  const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], {
+    cwd: new URL('..', import.meta.url), encoding: 'utf8', env,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
 const script = `
 import { createElement } from 'react';
 import { renderToString } from 'ink';
@@ -19,16 +33,9 @@ process.stdout.write(renderToString(createElement(HistoryViewport,{rows}),{colum
 `;
 
 test('Mocha emits truecolor role colors and supports a plain terminal', () => {
-  const run = (color: string) => {
-    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
-      cwd: new URL('..', import.meta.url), encoding: 'utf8', env: { ...process.env, FORCE_COLOR: color },
-    });
-    assert.equal(result.status, 0, result.stderr);
-    return result.stdout;
-  };
-  const colored = run('3');
+  const colored = renderFixture(script, '3');
   for (const rgb of ['137;180;250', '166;227;161', '203;166;247', '137;220;235', '243;139;168']) assert.ok(colored.includes(`\x1b[38;2;${rgb}m`), colored);
-  const plain = run('0');
+  const plain = renderFixture(script, '0');
   assert.equal(stripVTControlCharacters(colored), plain);
   assert.doesNotMatch(plain, /\x1b/);
   assert.ok(plain.includes('❯ User\n✦ Assistant'));
@@ -55,15 +62,8 @@ controller.state = {...controller.state,online:false};
 frames.push(renderToString(createElement(StatusBar,{controller,width:140}),{columns:140}));
 process.stdout.write(JSON.stringify(frames));
 `;
-  const run = (color: string): string[] => {
-    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', statusScript], {
-      cwd: new URL('..', import.meta.url), encoding: 'utf8', env: { ...process.env, FORCE_COLOR: color },
-    });
-    assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout) as string[];
-  };
-  const colored = run('3');
-  const plain = run('0');
+  const colored = JSON.parse(renderFixture(statusScript, '3')) as string[];
+  const plain = JSON.parse(renderFixture(statusScript, '0')) as string[];
   assert.deepEqual(colored.map(stripVTControlCharacters), plain);
   assert.ok(colored[0]!.includes('\x1b[38;2;166;227;161m'));
   assert.ok(colored[0]!.includes('\x1b[38;2;203;166;247m'));
