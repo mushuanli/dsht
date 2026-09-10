@@ -87,8 +87,9 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false 
   const view = controller.telemetry.view(state.sessionId);
   const costs = controller.costs;
   const sessionCost = costs?.hasSession(state.sessionId) ? costText(costs.total(state.sessionId)) : '?';
-  const todayEstimate = costs ? costText(costs.total(undefined, 1, Date.now())) : '?';
-  const todayCost = costs && (!costs.scannedAt || costs.error) && !todayEstimate.endsWith('*') ? todayEstimate + '*' : todayEstimate;
+  const todayCost = costs ? costText(costs.total(undefined, 1, Date.now())) : '?';
+  // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
+  const coverage = costs?.coverage ?? 'complete';
   const label = workspace ? `${workspace.title} · ${workspace.path}` : 'none selected';
   if (!expanded) {
     const selection = record(view.values.modelSelection);
@@ -103,7 +104,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false 
     const compactCount = (value: number | undefined) => value === undefined ? '?' : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
     const activity = running ? `Working ${since === undefined ? '?' : elapsedTime(now - since)}${state.transcript.activeTurnStartedAt === undefined ? '~' : ''}` : 'Idle';
     const fields = [
-      `${!state.online ? 'Offline · ' : ''}${state.controlError || state.modelError ? '! ' : ''}${activity}`,
+      `${!state.online ? 'Offline · ' : ''}${state.controlError || state.modelError || coverage === 'partial' ? '! ' : ''}${activity}`,
       model, `ws: ${workspace ? workspace.title : '—'}`,
       `ctx: ${used !== undefined && capacity !== undefined && capacity > 0 ? `~${Math.min(100, Math.round(used / capacity * 100))}%` : '?'}`,
       `tok: ${compactCount(total)}`,
@@ -124,6 +125,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false 
     <Text wrap="truncate-end">Workspace: {safeText(label)}</Text>
     {metricLines(view.values, state.defaultModel, running).map((line, index) => <Text key={index} dimColor>{safeText(line)}</Text>)}
     {costs && <Text dimColor>Cost (CNY estimate): Session {sessionCost} · Today {todayCost}</Text>}
+    {costs && coverage === 'partial' && <Text color="yellow">Cost coverage incomplete: {costs.error ? safeText(costs.error) : 'no complete scan yet'}</Text>}
     <Text dimColor>Queued: {count(view.queued)} · Active jobs: {count(view.jobs)}</Text>
     {state.controlError && <Text color="yellow">{safeText(state.controlError)}</Text>}
     {state.modelError && <Text color="yellow">Model catalog unavailable: {safeText(state.modelError)}</Text>}

@@ -9,6 +9,7 @@ import { App } from '../src/app.tsx';
 import { Controller } from '../src/controller.ts';
 import { array, object } from '../src/wire.ts';
 import { host, until } from './host.ts';
+import { StatusBar } from '../src/status.tsx';
 
 test('startup requires workspace and session selection before showing the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
@@ -480,4 +481,32 @@ test('a slash-command panel closes on the next command or after its lifetime', a
   // Without another command the panel closes on its own.
   await until(() => ui.lastFrame()?.includes('Session ID: s1') === false);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('cost coverage warns through the status prefix instead of rewriting a subtotal', async t => {
+  const { CostLedger, costRecords } = await import('../src/cost.ts');
+  const fixture = await host(); t.after(() => fixture.close());
+  const ledger = new CostLedger();
+  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  controller.state = { ...controller.state, sessionId: 's1', online: true };
+  const bar = (expanded = false) => {
+    const ui = render(<StatusBar controller={controller} expanded={expanded} />);
+    const frame = ui.lastFrame() ?? '';
+    ui.unmount(); ui.cleanup();
+    return frame;
+  };
+  // With nothing cached the prefix warns, and no subtotal claims incompleteness of its own.
+  assert.match(bar(), /! Idle/);
+  assert.match(bar(), /S:\? D:~¥0\.0000(?!\*)/);
+  await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T10:00:00+08:00'),
+    type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]));
+  // Charges cached by an earlier run already cover the history, so the bar stops warning.
+  const cached = bar();
+  assert.doesNotMatch(cached, /! Idle/);
+  assert.match(cached, /S:~¥2\.0000/);
+  assert.match(bar(true), /Cost \(CNY estimate\): Session ~¥2\.0000/);
+  ledger.error = 'scan failed';
+  assert.match(bar(), /! Idle/);
+  assert.match(bar(true), /Cost coverage incomplete: scan failed/);
 });

@@ -71,6 +71,20 @@ test('a request without a settlement time keeps a floor amount and stays estimat
   assert.deepEqual(summary(ledger.total(undefined, 1, at('2026-09-10T12:00:00'))), { amount: 0, unknown: 0, estimated: 1, records: 1 });
 });
 
+test('coverage reports missing data and failures without distrusting cached charges', async () => {
+  const ledger = new CostLedger();
+  assert.equal(ledger.coverage, 'partial');
+  ledger.scanning = true;
+  assert.equal(ledger.coverage, 'scanning');
+  ledger.scanning = false;
+  assert.equal(ledger.coverage, 'partial');
+  await ledger.replace('s1', 1, costRecords([record(0, at('2026-09-10T10:00:00'))]));
+  // Charges cached by an earlier run are complete coverage even before this run scans.
+  assert.equal(ledger.coverage, 'complete');
+  ledger.error = 'scan failed';
+  assert.equal(ledger.coverage, 'partial');
+});
+
 test('session, today and three-calendar-day costs retain unknowns and avoid replacement/retry duplication', async () => {
   const ledger = new CostLedger();
   const records = [record(0, at('2026-09-10T10:00:00')), record(1, at('2026-09-10T11:00:00'), 0),

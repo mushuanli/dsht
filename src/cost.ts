@@ -79,6 +79,9 @@ interface Saved { version: 1; sessionId: string; cut: number; charges: Charge[] 
  */
 export interface CostTotal { amount: number; unknown: number; estimated: number; records: number }
 
+/** How much of the visible history the cached ledger currently covers. */
+export type Coverage = 'complete' | 'scanning' | 'partial';
+
 /** Price family used when a recorded model name has no exact entry. */
 function priceFamily(model: string): string { return model.toLowerCase().includes('pro') ? 'deepseek-v4-pro' : 'deepseek-flash'; }
 
@@ -147,6 +150,15 @@ export class CostLedger {
   scanning = false;
   error = '';
   constructor(readonly prices: PriceVersion[] = DEFAULT_PRICES, readonly directory?: string) {}
+
+  /** Cached charges count as complete; only a failed scan or an empty ledger is partial.
+   * @returns Coverage of the current totals, so callers can mark them without re-deriving the rule.
+   */
+  get coverage(): Coverage {
+    if (this.scanning) return 'scanning';
+    if (this.error) return 'partial';
+    return this.scannedAt !== undefined || this.sessions.size > 0 ? 'complete' : 'partial';
+  }
 
   /** Load immutable cut files, keeping the newest complete scan for each session. */
   async load(): Promise<void> {

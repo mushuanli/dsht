@@ -19,8 +19,11 @@ export function CostPanel({ controller }: { controller: Controller }) {
   return <Box flexDirection="column" borderStyle="single" paddingX={1}>
     <Text bold>Cost · CNY estimate · Asia/Shanghai · /cost closes</Text>
     {rows.map(([label, total]) => <Text key={label}>{label}: {total ? `${costText(total)} · ${total.unknown} unpriced${total.estimated ? ` · ${total.estimated} estimated` : ''} / ${total.records} requests` : '?'}</Text>)}
-    <Text dimColor>{costs.scanning ? 'Refreshing all visible sessions…' : costs.scannedAt ? `Last refresh: ${new Date(costs.scannedAt).toISOString()}` : 'Partial cached totals · awaiting complete scan'}</Text>
-    <Text dimColor>Recorded settlement time determines tariff; * means incomplete. Provider invoices are authoritative.</Text>
+    <Text dimColor>{costs.scanning ? 'Refreshing all visible sessions…'
+      : costs.coverage === 'partial' ? 'Partial totals · awaiting a complete scan'
+      : costs.scannedAt ? `Last refresh: ${new Date(costs.scannedAt).toISOString()}`
+      : 'Cached totals from the previous run'}</Text>
+    <Text dimColor>Recorded settlement time determines tariff; * means a subtotal is not exact. Provider invoices are authoritative.</Text>
     {costs.error && <Text color="yellow">Partial totals: {safeText(costs.error)}</Text>}
     {costs.missing().slice(0, 6).map(reason => <Text key={reason} color="yellow">{safeText(reason)}</Text>)}
   </Box>;
