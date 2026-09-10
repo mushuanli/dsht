@@ -17,8 +17,18 @@ export async function host() {
   const cancels: ObjectValue[] = [];
   const sockets = new Set<WebSocket>();
   const events = new Map<WebSocket, string>();
+  const controls = new Map<WebSocket, string>();
+  let controlAvailable = true;
+  let defaultModel: ObjectValue = { provider: 'fixture', model: 'chat' };
+  let controlBaseline: ObjectValue = { queues: { s1: [] }, jobs: { s1: [] }, projections: {} };
   const follows = new Map<WebSocket, string>();
   let baseline = [workspace];
+  let running = false;
+  let onPage: (() => Promise<ObjectValue>) | undefined;
+  let searchResult: ObjectValue = { items: [{ sessionId: 's1', snippet: '你好' }, { sessionId: 's2', snippet: '你好 too' }], hasMore: false };
+  let followSnapshot: ObjectValue = snapshot;
+  let onPrompt: (() => Promise<void>) | undefined;
+  let onCancel: (() => Promise<void>) | undefined;
   let wrongIdentity = false;
   let businessError = false;
   let cookie = 'valid';
@@ -45,18 +55,27 @@ export async function host() {
       calls.push(body);
       let value: unknown;
       switch (body.method) {
-        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [session, { sessionId: 's2', running: true }] }; break;
+        case 'session/modelCatalog': assert.deepEqual(args, {}); value = { default: defaultModel }; break;
+        case 'fileReferences/list':
+          assert.equal(args.agentId, 's1');
+          assert.equal(typeof args.query, 'string');
+          value = args.query === 'src/' ? [{ path: 'src/hello world.ts', kind: 'file' }]
+            : args.query === 'missing' ? [] : [{ path: 'src', kind: 'directory' }, { path: 'README.md', kind: 'file' }];
+          break;
+        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [{ ...session, running }, { sessionId: 's2', running: true }] }; break;
         case 'session/create': assert.deepEqual(args, { request: { workspaceId: 'w1' } }); value = { sessionId: 's-new' }; break;
         case 'workspace/create': assert.equal(typeof object(args.request).path, 'string'); value = { workspace, created: false }; break;
         case 'session/prompt': {
           const prompt = object(args.request);
+          await onPrompt?.();
           assert.equal(typeof prompt.requestId, 'string');
           assert.equal(typeof prompt.sessionId, 'string');
           assert.equal(array(prompt.content).length, 1);
           value = { accepted: true }; break;
         }
-        case 'session/cancel': assert.equal(typeof object(args.request).sessionId, 'string'); value = { accepted: true }; break;
-        case 'session/page': value = { records: [], hasMore: false }; break;
+        case 'session/cancel': assert.equal(typeof object(args.request).sessionId, 'string'); await onCancel?.(); value = { accepted: true }; break;
+        case 'session/search': assert.equal(typeof object(args.request).query, 'string'); value = searchResult; break;
+        case 'session/page': value = await onPage?.() ?? { records: [], hasMore: false }; break;
         case '$events/result': assert.equal(args.clientId, 'client-1'); value = {}; break;
         default: response.writeHead(404).end(); return;
       }
@@ -76,7 +95,7 @@ export async function host() {
   });
   wss.on('connection', ws => {
     sockets.add(ws);
-    ws.on('close', () => { sockets.delete(ws); events.delete(ws); follows.delete(ws); });
+    ws.on('close', () => { sockets.delete(ws); events.delete(ws); follows.delete(ws); controls.delete(ws); });
     ws.on('message', raw => {
       const frame = object(JSON.parse(raw.toString()));
       if (frame.type === 'cancel') { cancels.push(frame); return; }
@@ -84,9 +103,12 @@ export async function host() {
       const item = (value: unknown) => ws.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value }));
       if (frame.endpoint === '$events') { events.set(ws, String(frame.streamId)); item({ type: 'ready', clientId: 'client-1', host: { home: '/host' } }); }
       else if (frame.endpoint === 'workspace/follow') { assert.deepEqual(object(frame.payload).args, {}); item({ type: 'baseline', value: { items: baseline, archivedSessionIds: [] } }); }
+      else if (frame.endpoint === 'session/control') {
+        if (!controlAvailable) { ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error: { code: 'gateway/method-unavailable', message: 'not installed' } })); return; }
+        assert.deepEqual(object(frame.payload).args, {}); controls.set(ws, String(frame.streamId)); item({ type: 'baseline', value: controlBaseline }); }
       else if (frame.endpoint === 'session/follow') {
         assert.equal(object(object(object(frame.payload).args).request).assistantStream, true);
-        follows.set(ws, String(frame.streamId)); item(snapshot);
+        follows.set(ws, String(frame.streamId)); item(followSnapshot);
       } else ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId,
         error: { code: 'gateway/method-unavailable', message: 'unknown', details: {} } }));
     });
@@ -97,12 +119,23 @@ export async function host() {
   assert(address && typeof address === 'object');
   return {
     url: `http://127.0.0.1:${address.port}`, calls, opens, cancels,
+    set onPage(value: (() => Promise<ObjectValue>) | undefined) { onPage = value; },
+    set searchResult(value: ObjectValue) { searchResult = value; },
+    set followSnapshot(value: ObjectValue) { followSnapshot = value; },
+    set onPrompt(value: (() => Promise<void>) | undefined) { onPrompt = value; },
+    set onCancel(value: (() => Promise<void>) | undefined) { onCancel = value; },
+    set controlAvailable(value: boolean) { controlAvailable = value; },
+    set defaultModel(value: ObjectValue) { defaultModel = value; },
+    set controlBaseline(value: ObjectValue) { controlBaseline = value; },
+    control(value: ObjectValue) { for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId, value })); },
     get loginCount() { return loginCount; },
     set cookie(value: string) { cookie = value; },
     set baseline(value: typeof baseline) { baseline = value; },
     set wrongIdentity(value: boolean) { wrongIdentity = value; },
     set businessError(value: boolean) { businessError = value; },
-    emit(value: ObjectValue) { for (const [ws, streamId] of events) ws.send(JSON.stringify({ type: 'item', streamId, value })); },
+    emit(value: ObjectValue) {
+      if (value.type === 'emit' && value.event === 'api-session/status' && array(value.args)[0] === 's1') running = array(value.args)[1] === true;
+      for (const [ws, streamId] of events) ws.send(JSON.stringify({ type: 'item', streamId, value })); },
     follow(value: ObjectValue) { for (const [ws, streamId] of follows) ws.send(JSON.stringify({ type: 'item', streamId, value })); },
     disconnect() { for (const ws of sockets) ws.terminate(); },
     async close() {

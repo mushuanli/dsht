@@ -8,19 +8,13 @@ Current DSH file policy: danger-full-access. The DSH file sandbox does not restr
 
 Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox escalation (do not set `sandbox_permissions`).
 
-Assistant
-⚙ bash {"command":"printf 'WORLD\n' >> greeting.txt","description":"Append WORLD to greeting.txt"}
+⚙ bash · Append WORLD to greeting.txt
 
-Tool
-↳ (no output)
+✓ bash · Append WORLD to greeting.txt
 
-Assistant
-⚙ bash {"command":"cat greeting.txt","description":"Read greeting.txt to confirm"}
+⚙ bash · Read greeting.txt to confirm
 
-Tool
-↳ hello
-WORLD
-
+✓ bash · Read greeting.txt to confirm
 
 Assistant
 DONE

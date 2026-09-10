@@ -1,22 +1,57 @@
 /** Human transcript projection from durable events and ephemeral assistant chunks. */
+import wrapAnsi from 'wrap-ansi';
 import { array, object, safeText, string, type Json, type ObjectValue } from './wire.ts';
 
+interface ToolSummary { name: string; operation?: string }
+
+function toolSummary(block: ObjectValue): ToolSummary {
+  let args: ObjectValue = {};
+  if (typeof block.arguments === 'string' && block.arguments.trimStart().startsWith('{')) {
+    try {
+      const value: unknown = JSON.parse(block.arguments);
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) args = value as ObjectValue;
+    } catch { /* Partial or non-JSON arguments have no operation summary. */ }
+  }
+  const operation = [args.description, args.command, args.cmd, args.path, args.filePath, args.file_path, args.query]
+    .find(value => typeof value === 'string' && value.trim());
+  return { name: string(block.name), ...(typeof operation === 'string' ? { operation } : {}) };
+}
+
+/** Fit a tool operation to one terminal row without exposing the result body.
+ * @param text - Tool name, status icon and optional operation.
+ * @param width - Available terminal columns.
+ * @returns A single line with an ellipsis when shortened.
+ */
+export function toolLine(text: string, width: number): string {
+  const clean = safeText(text).replace(/\s+/gu, ' ').trim();
+  if (width < 2) return width === 1 ? '…' : '';
+  const options = { hard: true, wordWrap: false, trim: false };
+  return wrapAnsi(clean, width, options).includes('\n')
+    ? wrapAnsi(clean, width - 1, options).split('\n')[0] + '…' : clean;
+}
+
 /** Render known content blocks and preserve unknown plugin blocks as JSON. */
-export function contentText(content: Json | undefined): string {
+export function contentText(content: Json | undefined, tools?: ReadonlyMap<string, ToolSummary>, width = 100): string {
   return array(content).map(value => {
     const block = object(value);
     switch (block.type) {
       case 'text': return string(block.text);
       case 'reasoning': return `◇ ${string(block.text)}`;
-      case 'tool-call': return `⚙ ${string(block.name)} ${string(block.arguments)}`;
-      case 'tool-result': return `${block.isError ? '✗' : '↳'} ${contentText(block.content)}`;
+      case 'tool-call': {
+        const tool = toolSummary(block);
+        return toolLine(`⚙ ${tool.name}${tool.operation ? ` · ${tool.operation}` : ''}`, width);
+      }
+      case 'tool-result': {
+        const tool = tools?.get(String(block.toolCallId));
+        return toolLine(`${block.isError ? '✗' : '✓'} ${tool?.name ?? 'tool'} · ${tool?.operation ?? (block.isError ? 'failed' : 'completed')}`, width);
+      }
       default: return JSON.stringify(block);
     }
   }).map(safeText).join('\n');
 }
 
 /** A displayed message retains the durable sequence for stable reconciliation. */
-export interface Message { seq: number; role: string; text: string }
+export interface Message { seq: number; role: string; text: string; compact?: boolean }
 
 /** Opening snapshots replace all state; durable events are deduplicated by sequence. */
 export class Transcript {
@@ -26,12 +61,15 @@ export class Transcript {
   private nextIndex = 0;
   private revision = 0;
   private legacyStream = false;
+  /** Changes whenever a follow frame or older page can affect the rendered transcript. */
+  version = 0;
   cursor = -1;
   hasMore = false;
   ready = false;
 
   /** Apply one follow frame; reject stream gaps so callers can reopen a snapshot. */
   accept(value: unknown): void {
+    this.version++;
     const frame = object(value);
     switch (frame.type) {
       case 'snapshot': {
@@ -91,35 +129,71 @@ export class Transcript {
 
   /** Add an older page without replacing the live tail. */
   addPage(value: unknown): void {
+    this.version++;
     const page = object(value);
     this.addRecords(array(page.records));
     this.hasMore = page.hasMore === true;
+  }
+
+  /** Start of the open durable turn, when its timestamp is present in the retained window. */
+  get activeTurnStartedAt(): number | undefined {
+    let start: number | undefined;
+    for (const [, event] of [...this.events].sort(([a], [b]) => a - b)) {
+      if (event.type === 'turn/start') start = typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : undefined;
+      else if (event.type === 'turn/end') start = undefined;
+    }
+    return start;
   }
 
   /** Earliest retained record, used with the opening cursor for backward paging. */
   get beforeSeq(): number | undefined { return [...this.events.keys()].sort((a, b) => a - b)[0]; }
 
   /** Return append-origin conversation only; model-only replacement copies stay hidden. */
-  get messages(): Message[] {
+  get messages(): Message[] { return this.messagesForWidth(100); }
+
+  /** Project history with single-row tool operations at the caller's terminal width.
+   * @param width - Available terminal columns.
+   * @returns Conversation messages with compact tool-only rows.
+   */
+  messagesForWidth(width: number): Message[] {
     const result: Message[] = [];
+    const tools = new Map<string, ToolSummary>();
     for (const [seq, event] of [...this.events].sort(([a], [b]) => a - b)) {
       if (event.surfaceOp !== 'append') continue;
       const data = object(event.data);
       if (event.type === 'user/message') {
         const source = data.source ? object(data.source) : undefined;
-        result.push({ seq, role: source && source.kind !== 'user' ? 'Context' : 'You', text: contentText(data.content) });
+        result.push({ seq, role: source && source.kind !== 'user' ? 'Context' : 'You', text: contentText(data.content, tools, width) });
       }
       else if (event.type === 'assistant/message' || event.type === 'tool/result') {
         const message = object(data.message);
-        const text = contentText(message.content);
-        if (text) result.push({ seq, role: event.type === 'tool/result' ? 'Tool' : 'Assistant', text });
+        const blocks = array(message.content).map(object);
+        for (const block of blocks) {
+          if (block.type === 'tool-call') tools.set(string(block.id), toolSummary(block));
+        }
+        const text = event.type === 'tool/result'
+          ? contentText(blocks.filter(block => block.type === 'tool-result'), tools, width) || toolLine('✓ tool · completed', width)
+          : contentText(message.content, tools, width);
+        if (text) result.push({ seq, role: event.type === 'tool/result' ? 'Tool' : 'Assistant', text,
+          compact: event.type === 'tool/result' || blocks.every(block => block.type === 'tool-call') });
       }
     }
     return result;
   }
 
   /** Text from the active attempt is transient and never duplicated into durable history. */
-  get liveText(): string { return contentText([...this.blocks].sort(([a], [b]) => a - b).map(([, b]) => b)); }
+  get liveText(): string { return this.liveTextForWidth(100); }
+
+  /** Whether the active stream contains only tool operations, with no assistant prose. */
+  get liveToolOnly(): boolean { return this.blocks.size > 0 && [...this.blocks.values()].every(block => block.type === 'tool-call'); }
+
+  /** Render live tool operations within a terminal row.
+   * @param width - Available terminal columns.
+   * @returns Transient assistant text with clipped tool rows.
+   */
+  liveTextForWidth(width: number): string {
+    return contentText([...this.blocks].sort(([a], [b]) => a - b).map(([, b]) => b), undefined, width);
+  }
 
   private addRecords(records: Json[]): void {
     for (const record of records) {
@@ -185,7 +259,7 @@ export class Transcript {
       const block = this.blocks.get(index);
       this.blocks.set(index, { type: 'tool-call', id: string(chunk.id),
         name: typeof chunk.name === 'string' ? chunk.name : block?.name ?? '',
-        arguments: (block ? string(block.arguments) : '') + string(chunk.argumentsDelta) });
+        arguments: '' });
     } else if (chunk.type === 'block-end') this.blocks.set(number(chunk.index), object(chunk.block));
   }
 }

@@ -1,7 +1,8 @@
 /** Snapshot replacement, durable reconciliation, and stream gap detection. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Transcript } from '../src/transcript.ts';
+import wrapAnsi from 'wrap-ansi';
+import { contentText, Transcript } from '../src/transcript.ts';
 import { snapshot } from './host.ts';
 
 test('reconciles live text with the committed message and replaces on reconnect', () => {
@@ -70,4 +71,50 @@ test('rejects unrecognized packed events and inconsistent packed member counts',
   assert.throws(() => transcript.accept({ ...snapshot, assistantStream: undefined,
     records: [{ type: 'chunks', event: { type: 'chunkrow/text-chunks', seq: 0,
       data: { turn: 1, step: 1, index: 0, dt: [], texts: ['a', 'b'] } } }] }), /Invalid packed history member count/);
+});
+
+test('tool summaries hide arguments and nested results in live output and history', () => {
+  const transcript = new Transcript();
+  transcript.accept(snapshot);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'call', name: 'bash', argumentsDelta: 'PRIVATE_COMMAND' } } });
+  assert.equal(transcript.liveText, '⚙ bash');
+  transcript.accept({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append',
+    data: { message: { content: [{ type: 'tool-call', id: 'call', name: 'bash', arguments: 'PRIVATE_COMMAND' }] } } } });
+  transcript.accept({ type: 'event', event: { seq: 2, type: 'tool/result', surfaceOp: 'append',
+    data: { message: { content: [{ type: 'tool-result', toolCallId: 'call', isError: true,
+      content: [{ type: 'text', text: 'PRIVATE_RESULT' }, { type: 'custom-tool-data', secret: 'PRIVATE_DATA' }] }] } } } });
+  assert.deepEqual(transcript.messages.slice(1).map(message => message.text), ['⚙ bash', '✗ bash · failed']);
+  assert.equal(JSON.stringify(transcript.messages).includes('PRIVATE'), false);
+});
+
+test('tool descriptions follow their call IDs and remain a single terminal row', () => {
+  const transcript = new Transcript();
+  transcript.accept(snapshot);
+  transcript.accept({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [
+    { type: 'tool-call', id: 'a', name: 'bash', arguments: JSON.stringify({ description: 'Read package.json', command: 'cat package.json', other: 'PRIVATE_OTHER' }) },
+    { type: 'tool-call', id: 'b', name: 'bash', arguments: JSON.stringify({ command: 'printf "长命令内容"\n'.repeat(20) }) },
+  ] } } } });
+  transcript.accept({ type: 'event', event: { seq: 2, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [
+    { type: 'tool-result', toolCallId: 'b', isError: true, content: [{ type: 'text', text: 'PRIVATE_OUTPUT' }] },
+    { type: 'tool-result', toolCallId: 'a', isError: false, content: [{ type: 'text', text: 'PRIVATE_OUTPUT' }] },
+  ] } } } });
+  const messages = transcript.messagesForWidth(32).slice(1);
+  assert.equal(messages[0]!.text.split('\n')[0], '⚙ bash · Read package.json');
+  assert.equal(messages[1]!.text.split('\n')[1], '✓ bash · Read package.json');
+  assert.ok(messages[1]!.text.startsWith('✗ bash · printf'));
+  assert.ok(messages.every(message => message.compact));
+  for (const message of messages) for (const row of message.text.split('\n')) {
+    assert.equal(wrapAnsi(row, 32, { hard: true, wordWrap: false }).includes('\n'), false);
+    assert.equal(row.includes('PRIVATE'), false);
+  }
+  assert.ok(messages[1]!.text.split('\n')[0]!.endsWith('…'));
+  assert.equal(contentText([{ type: 'tool-call', name: 'read', arguments: '{unfinished' }]), '⚙ read');
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'live', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'live', revision: 2, index: 0,
+    chunk: { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c', name: 'bash',
+      arguments: JSON.stringify({ description: 'Read package.json', command: 'cat package.json' }) } } } });
+  assert.equal(transcript.liveTextForWidth(32), '⚙ bash · Read package.json');
+  assert.equal(transcript.liveToolOnly, true);
 });

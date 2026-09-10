@@ -1,0 +1,3 @@
+Host files · ↑ ↓ select · Tab/Enter insert · Esc close
+❯ src/
+  README.md

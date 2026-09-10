@@ -1,10 +1,13 @@
 /** UI state and connection generations for the standalone terminal client. */
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Client, HttpError, type Subscription } from './client.ts';
+import { Client, HttpError, RemoteError, type Subscription } from './client.ts';
 import { AuthenticationRequired } from './auth.ts';
 import { resolveTarget, sessionLabel } from './navigation.ts';
+import { CostLedger, costRecords } from './cost.ts';
+import { Telemetry } from './telemetry.ts';
 import { Transcript } from './transcript.ts';
+import { fileReferences, type FileReference } from './references.ts';
 import { array, errorText, object, string, type Json, type ObjectValue } from './wire.ts';
 
 /** State shared by the picker and conversation view. */
@@ -21,6 +24,9 @@ export interface State {
   workspaceId?: string;
   sessionId?: string;
   pending: ObjectValue[];
+  controlError?: string;
+  modelError?: string;
+  defaultModel?: ObjectValue;
   transcript: Transcript;
 }
 
@@ -36,9 +42,71 @@ export class Controller {
   private runTask: Promise<void> | undefined;
   private generationFailed: ((error: Error) => void) | undefined;
   private selection = 0;
+  telemetry = new Telemetry();
+  private observedRunningAt = new Map<string, number>();
+  private catalogRevision = 0;
+  private catalogTasks = new Set<Promise<void>>();
+  private runningUpdates = new Map<string, boolean>();
+  private stoppingSession?: string;
+  private interruptTask: Promise<boolean> | undefined;
+  private admission: Promise<Json | undefined> | undefined;
+  private costUpdates = new Map<string, number>();
+  private costAbort?: AbortController;
+  private costTask: Promise<void> | undefined;
+  private costTimer: ReturnType<typeof setInterval> | undefined;
+
+  /** Host running state covers model generation, tools, and waits between assistant attempts. */
+  get running(): boolean {
+    const id = this.state.sessionId;
+    return id !== undefined && (this.runningUpdates.get(id)
+      ?? this.state.sessions.find(row => row.sessionId === id)?.running === true);
+  }
+
+  /** Current title projection, falling back to the list title and then the session ID. */
+  get sessionName(): string | undefined {
+    const id = this.state.sessionId;
+    if (!id) return;
+    const title = this.telemetry.view(id).values.title;
+    const row = this.state.sessions.find(item => item.sessionId === id);
+    return title !== undefined ? sessionLabel({ sessionId: id, projections: { values: { title } } })
+      : row ? sessionLabel(row) : id;
+  }
+
+  /** Epoch start from the retained turn log, or when this client first observed the run. */
+  get workingSince(): number | undefined {
+    if (!this.running || !this.state.sessionId) return undefined;
+    return this.state.transcript.activeTurnStartedAt ?? this.observedRunningAt.get(this.state.sessionId);
+  }
+
+  /** Stop the selected turn, or allow exit only while idle. Repeated keys share one request.
+   * @param force - Send an explicit cancellation even when the cached running flag is idle.
+   * @returns True when the caller may exit; cancellation failures retain the client.
+   */
+  interrupt(force = false): Promise<boolean> {
+    if (this.interruptTask) return this.interruptTask;
+    if (!force && !this.running && !this.admission && this.state.pending.length === 0) {
+      return Promise.resolve(!this.state.busy);
+    }
+    const sessionId = this.sessionId;
+    this.stoppingSession = sessionId;
+    this.update({ status: 'Stopping…', error: '' });
+    const task = (async () => {
+      try {
+        // Admission must settle before cancellation can address the newly submitted turn.
+        // The prompt caller reports admission failures; an existing turn still needs cancellation.
+        await this.admission?.catch(() => undefined);
+        await this.host.call('session/cancel', { request: { sessionId } });
+        if (this.stoppingSession === sessionId && this.state.sessionId === sessionId) this.update({ status: 'Cancellation requested · waiting for host' });
+      } catch (error) { this.stoppingSession = undefined; this.update({ status: 'Cancellation failed', error: errorText(error) }); }
+      return false;
+    })();
+    this.interruptTask = task;
+    void task.finally(() => { this.interruptTask = undefined; });
+    return task;
+  }
   constructor(readonly base: string, token: string | undefined, readonly initialSession?: string,
     private makeClient: () => Client = () => new Client(base),
-    private authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? '')) {}
+    private authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger) {}
 
   /** React-compatible state subscription. */
   subscribe = (listener: () => void): (() => void) => {
@@ -54,9 +122,13 @@ export class Controller {
   /** Cancel retries and HTTP, close the socket, and wait for the loop to settle. */
   async stop(): Promise<void> {
     this.abort.abort();
+    clearInterval(this.costTimer);
     this.generationFailed?.(new Error('Client stopped'));
     await this.client?.close();
     await this.runTask;
+    await this.interruptTask;
+    await Promise.all(this.catalogTasks);
+    await this.costTask;
   }
 
   /** Run a UI operation and expose errors without destroying the current input. */
@@ -66,6 +138,70 @@ export class Controller {
     try { await operation(); return true; }
     catch (error) { this.update({ error: errorText(error) }); return false; }
     finally { this.update({ busy: false }); }
+  }
+
+  /** Refresh all HTTP-visible sessions without changing the selected conversation.
+   * @param signal - Optional cancellation for an explicit /cost refresh.
+   */
+  async refreshCosts(signal: AbortSignal = this.abort.signal): Promise<void> {
+    if (!this.costs) return;
+    if (this.costTask) {
+      const cancel = () => this.costAbort?.abort();
+      signal.addEventListener('abort', cancel, { once: true });
+      try { await this.costTask; } finally { signal.removeEventListener('abort', cancel); }
+      return;
+    }
+    this.costAbort = new AbortController();
+    signal = AbortSignal.any([signal, this.abort.signal, this.costAbort.signal]);
+    const ledger = this.costs; const client = this.host;
+    ledger.scanning = true; ledger.error = ''; this.update({});
+    const task = (async () => {
+      try {
+        const sessions = array(object(await client.call('session/list', { _request: {} }, signal)).items).map(object);
+        signal.throwIfAborted();
+        for (const session of sessions) {
+          signal.throwIfAborted();
+          const sessionId = string(session.sessionId);
+          if (!session.running && typeof session.updatedAt === 'number' && this.costUpdates.get(sessionId) === session.updatedAt) continue;
+          const snapshot = await new Promise<ObjectValue>((resolve, reject) => {
+            let sub: Subscription | undefined;
+            const timeout = setTimeout(() => finish(new Error('Cost history snapshot timed out')), client.timeoutMs);
+            const onAbort = () => finish(new Error('Cost refresh cancelled'));
+            const finish = (error?: Error, frame?: ObjectValue) => {
+              clearTimeout(timeout); signal.removeEventListener('abort', onAbort); sub?.cancel();
+              if (error) reject(error); else resolve(frame!);
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+            try { sub = client.subscribe('session/follow', { request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true } }, {
+              item: value => { const frame = object(value); if (frame.type === 'snapshot') finish(undefined, frame); },
+              end: error => finish(error ?? new Error('Cost history stream ended')),
+            }); } catch (error) { finish(error instanceof Error ? error : new Error(errorText(error))); }
+          });
+          const cut = snapshot.cursor;
+          if (typeof cut !== 'number' || !Number.isSafeInteger(cut)) throw new Error('Invalid cost history cursor');
+          let page = snapshot; const events: ObjectValue[] = [];
+          while (true) {
+            signal.throwIfAborted();
+            const records = array(page.records);
+            events.push(...costRecords(records));
+            if (!page.hasMore) break;
+            const seqs = records.map(r => object(object(r).event).seq);
+            if (!seqs.length || seqs.some(n => typeof n !== 'number' || !Number.isSafeInteger(n))) throw new Error('Invalid cost history page');
+            const beforeSeq = Math.min(...seqs as number[]);
+            page = object(await client.call('session/page', { request: { address: { kind: 'session', sessionId }, throughSeq: cut, beforeSeq, maxMessages: 80 } }, signal));
+            if (page.hasMore && array(page.records).every(r => Number(object(object(r).event).seq) >= beforeSeq)) throw new Error('Cost history page did not advance');
+          }
+          if (object(snapshot.header).isSeeded === true && !events.some(e => e.type === 'session/end-seed' && object(e.data).inherited === true)) throw new Error('Cannot attribute inherited session usage');
+          await ledger.replace(sessionId, cut, events);
+          if (!session.running && typeof session.updatedAt === 'number') this.costUpdates.set(sessionId, session.updatedAt);
+          this.update({});
+        }
+        ledger.scannedAt = Date.now();
+      } catch (error) { ledger.error = errorText(error); }
+      finally { ledger.scanning = false; this.update({}); }
+    })();
+    this.costTask = task;
+    try { await task; } finally { this.costTask = undefined; }
   }
 
   /** Refresh both lists from the host, then show the requested picker. */
@@ -126,6 +262,7 @@ export class Controller {
 
   /** Replace the selected transcript and cancel its preceding follow stream. */
   async selectSession(sessionId: string): Promise<void> {
+    this.stoppingSession = undefined;
     await this.releasePending();
     this.follow?.cancel();
     const selection = ++this.selection;
@@ -133,6 +270,7 @@ export class Controller {
     const workspace = this.state.workspaces.find(item => array(item.sessionIds).includes(sessionId));
     const workspaceId = workspace ? string(workspace.workspaceId)
       : this.state.sessions.some(item => item.sessionId === sessionId) ? undefined : this.state.workspaceId;
+    if (!this.observedRunningAt.has(sessionId)) this.observedRunningAt.set(sessionId, Date.now());
     this.update({ sessionId, workspaceId, showAllSessions: false, transcript, screen: 'chat', status: 'Loading session…' });
     this.follow = this.host.subscribe('session/follow', {
       request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true },
@@ -141,7 +279,9 @@ export class Controller {
         if (selection !== this.selection) return;
         try {
           transcript.accept(value);
-          this.update({ transcript, status: transcript.liveText ? 'Responding…' : 'Connected' });
+          const frame = object(value);
+          if (frame.type === 'snapshot') this.telemetry.snapshot(sessionId, frame.projections);
+          this.update({ transcript, status: this.stoppingSession === sessionId ? this.state.status : transcript.liveText ? 'Responding…' : 'Connected' });
         } catch (error) { this.generationFailed?.(new Error(errorText(error))); }
       },
       end: error => {
@@ -152,13 +292,59 @@ export class Controller {
     });
   }
 
+  /** Wait for the selected follow snapshot, failing on disconnect or cancellation.
+   * @param signal - Cancels waiting without closing the session.
+   */
+  async waitForHistory(signal: AbortSignal): Promise<void> {
+    const transcript = this.state.transcript;
+    const deadline = Date.now() + this.host.timeoutMs;
+    while (!transcript.ready) {
+      signal.throwIfAborted();
+      if (!this.state.online || this.state.transcript !== transcript) throw new Error('Session changed while loading history');
+      if (Date.now() >= deadline) throw new Error('Session snapshot timed out');
+      await delay(20, undefined, { signal });
+    }
+  }
+
+  /** Search the host's bounded global results, optionally retaining workspace members.
+   * @param query - Literal message text.
+   * @param workspaceOnly - Restrict returned hits to the selected workspace's session IDs.
+   * @param signal - Cancels the HTTP search.
+   * @returns Session snippets and the global truncation flag, preserved after filtering.
+   */
+  async searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: ObjectValue[]; hasMore: boolean }> {
+    const workspace = this.state.workspaces.find(item => item.workspaceId === this.state.workspaceId);
+    if (workspaceOnly && !workspace) throw new Error('Select a workspace first');
+    const result = object(await this.host.call('session/search', { request: { query } }, signal));
+    if (!Array.isArray(result.items) || typeof result.hasMore !== 'boolean') throw new Error('Invalid session search response');
+    const items = result.items.map(value => {
+      const item = object(value);
+      if (typeof item.sessionId !== 'string' || typeof item.snippet !== 'string') throw new Error('Invalid session search item');
+      return item;
+    });
+    const ids = new Set(array(workspace?.sessionIds ?? []));
+    return { items: workspaceOnly ? items.filter(item => ids.has(item.sessionId!)) : items, hasMore: result.hasMore };
+  }
+
+  /** Search paths on the host; does not read or upload file contents.
+   * @param query - Path text after @, relative to the selected session cwd.
+   * @param signal - Cancels an obsolete composer lookup.
+   * @returns Validated candidates in host order.
+   */
+  async references(query: string, signal: AbortSignal): Promise<FileReference[]> {
+    return fileReferences(await this.host.call('fileReferences/list', { agentId: this.sessionId, query }, signal));
+  }
+
   /** Admit a prompt once; a failed response can have an uncertain delivery outcome. */
   async prompt(text: string, mode: 'queue' | 'steer' = 'queue'): Promise<void> {
+    this.stoppingSession = undefined;
     if (!this.state.transcript.ready) throw new Error('Wait for the session snapshot before sending');
-    await this.host.call('session/prompt', { request: {
+    const admission = this.host.call('session/prompt', { request: {
       sessionId: this.sessionId, requestId: randomUUID(), mode,
       content: [{ type: 'text', text }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     } });
+    this.admission = admission;
+    try { await admission; } finally { if (this.admission === admission) this.admission = undefined; }
     this.update({ status: 'Accepted · waiting for host' });
   }
 
@@ -169,16 +355,34 @@ export class Controller {
   }
 
   /** Add a page before the retained window using its fixed opening cut. */
-  async older(): Promise<void> {
+  async older(signal?: AbortSignal): Promise<void> {
     const transcript = this.state.transcript;
     if (!transcript.ready || !transcript.hasMore || transcript.beforeSeq === undefined) return;
     const result = await this.host.call('session/page', { request: {
       address: { kind: 'session', sessionId: this.sessionId }, throughSeq: transcript.cursor,
       beforeSeq: transcript.beforeSeq, maxMessages: 80,
-    } });
+    } }, signal);
     if (transcript !== this.state.transcript) return;
     transcript.addPage(result);
     this.update({ transcript });
+  }
+
+  /** Load the prefix required for an explicit history jump; never loop on an unadvancing page.
+   * @param target - Visible record sequence, or first for the oldest available history.
+   * @param signal - Cancels local paging without interrupting the remote agent.
+   */
+  async historyThrough(target: number | 'first', signal: AbortSignal): Promise<void> {
+    const transcript = this.state.transcript;
+    if (!transcript.ready) throw new Error('Wait for the session snapshot');
+    while (transcript.hasMore && (target === 'first' || transcript.beforeSeq !== undefined && transcript.beforeSeq > target)) {
+      signal.throwIfAborted();
+      const before = transcript.beforeSeq;
+      await this.older(signal);
+      if (this.state.transcript !== transcript) throw new Error('Session changed while loading history');
+      if (transcript.hasMore && (before === undefined || transcript.beforeSeq === undefined || transcript.beforeSeq >= before)) {
+        throw new Error('Host history page did not advance');
+      }
+    }
   }
 
   /** Answer the oldest selected-session interaction, after explicit user action. */
@@ -222,9 +426,27 @@ export class Controller {
     for (const pending of this.state.pending) await this.reply(pending, { kind: 'next' });
     this.update({ pending: [] });
   }
+  private refreshCatalog(client: Client): void {
+    const revision = ++this.catalogRevision;
+    const task = client.call('session/modelCatalog', {}).then(value => {
+      if (client === this.client && revision === this.catalogRevision) this.update({ defaultModel: object(object(value).default), modelError: undefined });
+    }, error => {
+      if (client === this.client && revision === this.catalogRevision) this.update({ defaultModel: undefined, modelError: errorText(error) });
+    }).catch(error => {
+      if (client === this.client && revision === this.catalogRevision) this.update({ defaultModel: undefined, modelError: errorText(error) });
+    });
+    this.catalogTasks.add(task);
+    void task.finally(() => this.catalogTasks.delete(task));
+  }
+
   private async run(): Promise<void> {
     let attempt = 0;
     while (!this.abort.signal.aborted) {
+      this.stoppingSession = undefined;
+      this.runningUpdates.clear();
+      this.observedRunningAt.clear();
+      this.telemetry = new Telemetry();
+      this.update({ controlError: undefined, modelError: undefined, defaultModel: undefined });
       const client = this.makeClient();
       this.client = client;
       try {
@@ -254,7 +476,19 @@ export class Controller {
                 this.update({ pending: this.state.pending.filter(item => item.eventId !== frame.eventId) });
               } else if (frame.type === 'emit' && frame.event === 'api-session/status') {
                 const args = array(frame.args);
-                if (args[0] === this.state.sessionId) this.update({ status: args[1] ? 'Running…' : 'Idle' });
+                const sessionId = string(args[0]);
+                if (typeof args[1] !== 'boolean') throw new Error('Invalid session running state');
+                if (args[1] && !this.runningUpdates.get(sessionId)) this.observedRunningAt.set(sessionId, Date.now());
+                if (!args[1]) {
+                  this.observedRunningAt.delete(sessionId);
+                  if (this.stoppingSession === sessionId) this.stoppingSession = undefined;
+                }
+                this.runningUpdates.set(sessionId, args[1]);
+                this.update({ sessions: this.state.sessions.map(row => row.sessionId === sessionId ? { ...row, running: args[1]! } : row),
+                  ...(sessionId === this.state.sessionId ? { status: args[1] ? 'Running…' : 'Idle' } : {}) });
+                if (!args[1] && this.costs && this.state.online) void this.refreshCosts();
+              } else if (frame.type === 'emit' && ['llm/adapters-updated', 'settings/document-updated', 'credentials/reference-updated'].includes(String(frame.event))) {
+                this.refreshCatalog(client);
               } else if (frame.type === 'emit' && frame.event === 'api-session/error') {
                 const args = array(frame.args);
                 if (args[0] === this.state.sessionId) this.update({ status: 'Agent error', error: errorText(args[1]) });
@@ -264,12 +498,36 @@ export class Controller {
           });
         });
         await ready;
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Session control baseline timed out')), client.timeoutMs);
+          client.subscribe('session/control', {}, {
+            item: value => {
+              try {
+                this.telemetry.accept(value);
+                this.update({});
+                clearTimeout(timer); resolve();
+              } catch (error) { clearTimeout(timer); reject(error); fail(new Error(errorText(error))); }
+            },
+            end: error => {
+              clearTimeout(timer);
+              if (error instanceof RemoteError && error.code === 'gateway/method-unavailable') {
+                this.update({ controlError: 'Live metrics unavailable on this host' }); resolve();
+              } else { const reason = error ?? new Error('Session control stream ended'); reject(reason); fail(reason); }
+            },
+          });
+        });
+        this.refreshCatalog(client);
         this.update({ online: true, status: 'Connected', error: '', pending: [] });
         const screen = this.state.screen;
         await this.showPicker(screen === 'sessions' ? 'sessions' : 'workspaces');
         const sessionId = this.state.sessionId ?? this.initialSession;
         if (sessionId && (screen === 'chat' || this.initialSession && !this.state.sessionId)) await this.selectSession(sessionId);
         attempt = 0;
+        if (this.costs) {
+          void this.refreshCosts();
+          clearInterval(this.costTimer);
+          this.costTimer = setInterval(() => { if (this.state.online) void this.refreshCosts(); }, 60_000);
+        }
         const error = await disconnected;
         if (!this.abort.signal.aborted) throw error;
       } catch (error) {
@@ -279,11 +537,13 @@ export class Controller {
         }
         if (!this.abort.signal.aborted) this.update({ error: errorText(error), status: 'Reconnecting…' });
       } finally {
+        clearInterval(this.costTimer);
         this.generationFailed = undefined;
         this.selection++;
         this.state.transcript.ready = false;
         this.update({ online: false, pending: [] });
         await client.close();
+        await this.costTask;
       }
       if (!this.abort.signal.aborted) {
         try { await delay(Math.min(500 * 2 ** attempt++, 10_000) * (0.8 + Math.random() * 0.4), undefined,

@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 /** Standalone executable entry; connects to an existing host and never launches Harness. */
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { CostLedger, DEFAULT_PRICES, pricesFrom } from './cost.ts';
 import { parseArgs } from 'node:util';
 import { render } from 'ink';
 import { App } from './app.tsx';
@@ -22,6 +27,8 @@ With no command, choose a workspace and session interactively.
 
 First login: set DSH_TOKEN to the token printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
+/cost shows session, today and three-day CNY estimates.
+DSH_TUI_CONFIG_DIR overrides the prices.json directory; DSH_TUI_STATE_DIR overrides usage storage.
 Examples:
   npx dsh-http-tui
   dsh-tui list workspaces --json
@@ -57,8 +64,17 @@ async function main(): Promise<void> {
     return;
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
-  const controller = new Controller(values.url, token, values.session, undefined, client => login(client, token, store));
-  const app = render(<App controller={controller} />);
+  const config = process.env.DSH_TUI_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'dsh-http-tui');
+  await mkdir(config, { recursive: true, mode: 0o700 });
+  const pricePath = join(config, 'prices.json');
+  try { await writeFile(pricePath, JSON.stringify(DEFAULT_PRICES, null, 2) + '\n', { flag: 'wx', mode: 0o600 }); }
+  catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
+  const prices = pricesFrom(JSON.parse(await readFile(pricePath, 'utf8')));
+  const costDirectory = join(process.env.DSH_TUI_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsh-http-tui'), 'cost', createHash('sha256').update(new URL(values.url).origin).digest('hex'));
+  const costs = new CostLedger(prices, costDirectory);
+  await costs.load();
+  const controller = new Controller(values.url, token, values.session, undefined, client => login(client, token, store), costs);
+  const app = render(<App controller={controller} />, { exitOnCtrlC: false });
   const terminate = () => app.unmount();
   process.once('SIGTERM', terminate);
   controller.start();

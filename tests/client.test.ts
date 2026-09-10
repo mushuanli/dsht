@@ -106,3 +106,68 @@ test('workspace and session commands switch across workspaces without creating o
   assert.equal(controller.state.screen, 'sessions');
   assert(!fixture.calls.some(call => call.method === 'session/create' || call.method === 'session/cancel'));
 });
+
+test('cancelling one unary lookup leaves subsequent authenticated requests usable', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const client = new Client(fixture.url); t.after(() => client.close());
+  await client.authenticate('fixture-token');
+  const abort = new AbortController();
+  abort.abort();
+  await assert.rejects(client.call('fileReferences/list', { agentId: 's1', query: '' }, abort.signal), { name: 'AbortError' });
+  assert.deepEqual(await client.call('fileReferences/list', { agentId: 's1', query: 'src/' }),
+    [{ path: 'src/hello world.ts', kind: 'file' }]);
+});
+
+test('interrupt cancels a running selected session, coalesces repeated keys, and exits only after idle', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  assert.equal(await controller.interrupt(), true);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.running);
+  let release!: () => void;
+  fixture.onCancel = () => new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release?.());
+  const first = controller.interrupt();
+  assert.equal(controller.interrupt(), first);
+  await until(() => release !== undefined);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/cancel').length, 1);
+  release();
+  assert.equal(await first, false);
+  assert.equal(controller.running, true);
+  fixture.onCancel = undefined;
+  fixture.businessError = true;
+  assert.equal(await controller.interrupt(), false);
+  assert.match(controller.state.error, /session\/agent-busy/);
+  fixture.businessError = false;
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', false] });
+  await until(() => !controller.running);
+  assert.equal(await controller.interrupt(), true);
+  await controller.selectSession('s2');
+  assert.equal(controller.running, true);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s2', false] });
+  await until(() => !controller.running);
+  assert.equal(await controller.interrupt(), true);
+});
+
+test('Ctrl+C during prompt admission waits for admission before sending cancellation', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  let release!: () => void;
+  fixture.onPrompt = () => new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release?.());
+  const prompt = controller.prompt('work');
+  await until(() => release !== undefined);
+  const interrupt = controller.interrupt();
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+  release();
+  await prompt;
+  assert.equal(await interrupt, false);
+  assert.equal(fixture.calls.at(-1)?.method, 'session/cancel');
+});

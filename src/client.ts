@@ -77,12 +77,17 @@ export class Client {
     return this.expiresAt === undefined ? undefined : { cookie: this.cookie, expiresAt: this.expiresAt };
   }
 
-  /** Invoke an exact endpoint once. Mutations are never automatically retried. */
-  async call(endpoint: string, args: ObjectValue = {}): Promise<Json | undefined> {
+  /** Invoke an exact endpoint once. Mutations are never automatically retried.
+   * @param endpoint - Namespace/method endpoint.
+   * @param args - Host parameter names and JSON values.
+   * @param signal - Optional caller cancellation, combined with client close and timeout.
+   * @returns The decoded result value; HTTP, remote, and cancellation errors reject.
+   */
+  async call(endpoint: string, args: ObjectValue = {}, signal?: AbortSignal): Promise<Json | undefined> {
     if (!/^[\w$-]+\/[\w$-]+$/.test(endpoint)) throw new Error('Invalid RPC endpoint');
     const rpcId = randomUUID();
     const response = await fetch(new URL(`/api/${endpoint}`, this.base), {
-      method: 'POST', redirect: 'error', signal: this.signal(),
+      method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([this.signal(), signal]) : this.signal(),
       headers: { 'content-type': 'application/json', cookie: this.cookie },
       body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } }),
     });

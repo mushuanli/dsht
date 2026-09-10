@@ -14,8 +14,8 @@ export function sessionLabel(session: ObjectValue): string {
   if (projections && typeof projections === 'object' && !Array.isArray(projections)) {
     const values = projections.values;
     const title = values && typeof values === 'object' && !Array.isArray(values) ? values.title : undefined;
-    if (typeof title === 'string' && title) return safeText(title);
-    if (title && typeof title === 'object' && !Array.isArray(title) && typeof title.title === 'string') return safeText(title.title);
+    if (typeof title === 'string' && safeText(title).trim()) return safeText(title).trim();
+    if (title && typeof title === 'object' && !Array.isArray(title) && typeof title.title === 'string' && safeText(title.title).trim()) return safeText(title.title).trim();
   }
   return string(session.sessionId);
 }

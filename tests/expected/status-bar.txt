@@ -1,0 +1,6 @@
+Session ID: s1
+Workspace: Project α · /host/project
+Model: p/chat
+Context: ~25% (25 / 100) · Tokens: 1,000 total
+In (uncached): 100 · Out: 200 · Cache read/write: 300/400
+Queued: 2 · Active jobs: 1
