@@ -1,7 +1,9 @@
 /** UI state and connection generations for the standalone terminal client. */
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Client, type Subscription } from './client.ts';
+import { Client, HttpError, type Subscription } from './client.ts';
+import { AuthenticationRequired } from './auth.ts';
+import { resolveTarget, sessionLabel } from './navigation.ts';
 import { Transcript } from './transcript.ts';
 import { array, errorText, object, string, type Json, type ObjectValue } from './wire.ts';
 
@@ -33,8 +35,9 @@ export class Controller {
   private runTask: Promise<void> | undefined;
   private generationFailed: ((error: Error) => void) | undefined;
   private selection = 0;
-  constructor(readonly base: string, private token: string, readonly initialSession?: string,
-    private makeClient: () => Client = () => new Client(base)) {}
+  constructor(readonly base: string, token: string | undefined, readonly initialSession?: string,
+    private makeClient: () => Client = () => new Client(base),
+    private authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? '')) {}
 
   /** React-compatible state subscription. */
   subscribe = (listener: () => void): (() => void) => {
@@ -72,7 +75,31 @@ export class Controller {
   }
 
   /** Pick a workspace, or use all sessions when the identity is omitted. */
-  pickWorkspace(workspaceId?: string): void { this.update({ workspaceId, screen: 'sessions' }); }
+  pickWorkspace(workspaceId?: string): void {
+    this.follow?.cancel();
+    this.selection++;
+    this.update({ workspaceId, sessionId: undefined, transcript: new Transcript(), screen: 'sessions' });
+  }
+
+  /** Open a workspace picker, or resolve a workspace by ID, exact title/path, or unique ID prefix. */
+  async switchWorkspace(query?: string): Promise<void> {
+    if (!query) { await this.showPicker('workspaces'); return; }
+    const workspaces = await this.host.listWorkspaces();
+    const workspace = resolveTarget(workspaces, query, 'workspaceId', item => [string(item.title), string(item.path)]);
+    const sessions = await this.host.listSessions();
+    await this.releasePending();
+    this.update({ workspaces, sessions });
+    this.pickWorkspace(string(workspace.workspaceId));
+  }
+
+  /** Open the session picker, or switch across workspaces using a session ID or exact title. */
+  async switchSession(query?: string): Promise<void> {
+    if (!query) { await this.showPicker('sessions'); return; }
+    const [workspaces, sessions] = await Promise.all([this.host.listWorkspaces(), this.host.listSessions()]);
+    const session = resolveTarget(sessions, query, 'sessionId', item => [sessionLabel(item)]);
+    this.update({ workspaces, sessions });
+    await this.selectSession(string(session.sessionId));
+  }
 
   /** Prompt for a host path without starting a local agent. */
   enterPath(): void { this.update({ screen: 'path' }); }
@@ -98,7 +125,10 @@ export class Controller {
     this.follow?.cancel();
     const selection = ++this.selection;
     const transcript = new Transcript();
-    this.update({ sessionId, transcript, screen: 'chat', status: 'Loading session…' });
+    const workspace = this.state.workspaces.find(item => array(item.sessionIds).includes(sessionId));
+    const workspaceId = workspace ? string(workspace.workspaceId)
+      : this.state.sessions.some(item => item.sessionId === sessionId) ? undefined : this.state.workspaceId;
+    this.update({ sessionId, workspaceId, transcript, screen: 'chat', status: 'Loading session…' });
     this.follow = this.host.subscribe('session/follow', {
       request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true },
     }, {
@@ -193,7 +223,7 @@ export class Controller {
       const client = this.makeClient();
       this.client = client;
       try {
-        await client.authenticate(this.token);
+        await this.authenticate(client);
         await client.connect();
         let fail!: (error: Error) => void;
         const disconnected = new Promise<Error>(resolve => { fail = resolve; });
@@ -238,6 +268,10 @@ export class Controller {
         const error = await disconnected;
         if (!this.abort.signal.aborted) throw error;
       } catch (error) {
+        if (error instanceof AuthenticationRequired || error instanceof HttpError && [401, 403].includes(error.status)) {
+          this.update({ error: `${errorText(error)}. Set DSH_TOKEN and restart to log in.`, status: 'Login required' });
+          return;
+        }
         if (!this.abort.signal.aborted) this.update({ error: errorText(error), status: 'Reconnecting…' });
       } finally {
         this.generationFailed = undefined;

@@ -4,6 +4,11 @@ import { once } from 'node:events';
 import WebSocket from 'ws';
 import { array, object, string, type Json, type ObjectValue } from './wire.ts';
 
+/** HTTP failure remains distinct from host business errors. */
+export class HttpError extends Error {
+  constructor(readonly status: number, endpoint: string) { super(`${endpoint}: HTTP ${status}`); }
+}
+
 /** Host business failure, including the original machine-readable details. */
 export class RemoteError extends Error {
   readonly code: string;
@@ -29,6 +34,7 @@ interface Listener {
 export class Client {
   readonly base: URL;
   private cookie = '';
+  private expiresAt: number | undefined;
   private socket: WebSocket | undefined;
   private listeners = new Map<string, Listener>();
   private lifetime = new AbortController();
@@ -40,16 +46,35 @@ export class Client {
     }
   }
 
-  /** Exchange a startup token only at GET /; the cookie is kept in memory. */
+  /** Exchange a startup token only at GET / and retain the server's cookie expiration. */
   async authenticate(token: string): Promise<void> {
     const url = new URL('/', this.base);
     url.searchParams.set('token', token);
     const response = await fetch(url, { redirect: 'manual', signal: this.signal() });
-    if (response.status !== 303) throw new Error(`Authentication failed (HTTP ${response.status})`);
-    this.cookie = response.headers.getSetCookie()
-      .map(value => value.split(';')[0]!).filter(value => value.startsWith('dsh-auth-')).join('; ');
+    if (response.status !== 303) {
+      await response.body?.cancel();
+      throw new HttpError(response.status, 'Authentication failed');
+    }
+    const header = response.headers.getSetCookie().find(value => value.startsWith('dsh-auth-'));
     await response.body?.cancel();
-    if (!this.cookie) throw new Error('Authentication response omitted the dsh-auth cookie');
+    if (!header) throw new Error('Authentication response omitted the dsh-auth cookie');
+    this.restoreCookie(header.split(';')[0]!);
+    const maxAge = /;\s*max-age=(-?\d+)(?:;|$)/i.exec(header)?.[1];
+    const expires = /;\s*expires=([^;]+)/i.exec(header)?.[1];
+    const expiration = maxAge === undefined ? Date.parse(expires ?? '') : Date.now() + Number(maxAge) * 1000;
+    this.expiresAt = Number.isSafeInteger(expiration) ? expiration : undefined;
+  }
+
+  /** Restore one origin-scoped cookie read by the caller's credential store. */
+  restoreCookie(cookie: string): void {
+    if (!/^dsh-auth-[\w-]+=[A-Za-z0-9._-]+$/.test(cookie)) throw new Error('Invalid saved authentication cookie');
+    this.cookie = cookie;
+    this.expiresAt = undefined;
+  }
+
+  /** Session-only cookies are not eligible for persistent storage. */
+  get persistentCookie(): { cookie: string; expiresAt: number } | undefined {
+    return this.expiresAt === undefined ? undefined : { cookie: this.cookie, expiresAt: this.expiresAt };
   }
 
   /** Invoke an exact endpoint once. Mutations are never automatically retried. */
@@ -61,7 +86,10 @@ export class Client {
       headers: { 'content-type': 'application/json', cookie: this.cookie },
       body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } }),
     });
-    if (!response.ok) throw new Error(`${endpoint}: HTTP ${response.status}`);
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new HttpError(response.status, endpoint);
+    }
     const body = object(await response.json());
     if (body.type !== 'server-response' || body.rpcId !== rpcId) throw new Error('RPC response identity mismatch');
     const result = object(body.result);

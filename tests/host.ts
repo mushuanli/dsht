@@ -21,16 +21,19 @@ export async function host() {
   let baseline = [workspace];
   let wrongIdentity = false;
   let businessError = false;
+  let cookie = 'valid';
+  let loginCount = 0;
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url!, 'http://fixture');
       if (url.pathname === '/') {
+        loginCount++;
         assert.equal(request.method, 'GET');
         if (url.searchParams.get('token') !== 'fixture-token') { response.writeHead(401).end(); return; }
-        response.writeHead(303, { 'set-cookie': 'dsh-auth-fixture=valid; HttpOnly; Path=/; SameSite=Strict', location: '/' }).end();
+        response.writeHead(303, { 'set-cookie': `dsh-auth-fixture=${cookie}; HttpOnly; Path=/; SameSite=Strict; Max-Age=3600`, location: '/' }).end();
         return;
       }
-      assert.equal(request.headers.cookie, 'dsh-auth-fixture=valid');
+      if (request.headers.cookie !== `dsh-auth-fixture=${cookie}`) { response.writeHead(401).end(); return; }
       assert.equal(request.method, 'POST');
       let raw = '';
       for await (const chunk of request) raw += chunk;
@@ -66,7 +69,7 @@ export async function host() {
   });
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (request, socket, head) => {
-    if (request.url !== '/api/remote.mux' || request.headers.cookie !== 'dsh-auth-fixture=valid') {
+    if (request.url !== '/api/remote.mux' || request.headers.cookie !== `dsh-auth-fixture=${cookie}`) {
       socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n'); return;
     }
     wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws));
@@ -94,6 +97,8 @@ export async function host() {
   assert(address && typeof address === 'object');
   return {
     url: `http://127.0.0.1:${address.port}`, calls, opens, cancels,
+    get loginCount() { return loginCount; },
+    set cookie(value: string) { cookie = value; },
     set baseline(value: typeof baseline) { baseline = value; },
     set wrongIdentity(value: boolean) { wrongIdentity = value; },
     set businessError(value: boolean) { businessError = value; },

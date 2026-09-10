@@ -16,4 +16,4 @@ Reusing Cordis client services couples installation and startup to Harness compo
 
 ## Consequences
 
-The adapter must track pre-stable host wire changes. Cookies exist only in memory, and unknown waterfalls delegate rather than blocking the host. The tests cover local HTTP/WS transport, user selection, command subprocesses, and recorded transcript projection; they do not claim live model-provider coverage. No existing decision record in this independent repository is superseded.
+The adapter must track pre-stable host wire changes. The CLI persists origin-scoped cookies through atomic owner-private files, validates cached authentication before reuse, and only refreshes rejected credentials when a startup token is available. Launch tokens remain memory-only. Slash selectors resolve exact identities or names before unique ID prefixes and reject ambiguity. Unknown waterfalls delegate rather than blocking the host. The tests cover local HTTP/WS transport, user selection, command subprocesses, and recorded transcript projection; they do not claim live model-provider coverage. No existing decision record in this independent repository is superseded.

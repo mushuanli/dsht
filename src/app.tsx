@@ -4,30 +4,19 @@ import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
 import wrapAnsi from 'wrap-ansi';
 import { Controller } from './controller.ts';
+import { sessionLabel } from './navigation.ts';
 import { array, object, safeText, string, type ObjectValue } from './wire.ts';
 
-const HELP = '/sessions  /workspaces  /new  /older  /cancel  /steer text  /allow  /deny  /quit';
-
-/** Render a session title from the optional host projection, falling back to its ID. */
-export function sessionLabel(session: ObjectValue): string {
-  const projections = session.projections;
-  if (projections && typeof projections === 'object' && !Array.isArray(projections)) {
-    const values = projections.values;
-    const title = values && typeof values === 'object' && !Array.isArray(values) ? values.title : undefined;
-    if (typeof title === 'string' && title) return safeText(title);
-    if (title && typeof title === 'object' && !Array.isArray(title) && typeof title.title === 'string') {
-      return safeText(title.title);
-    }
-  }
-  return string(session.sessionId);
-}
+const COMMANDS = ['/workspace', '/session', '/workspaces', '/sessions', '/new', '/older', '/cancel', '/steer', '/allow', '/deny', '/help', '/quit'];
+const HELP = '/workspace [ID or name] · /session [ID or title] · /new · /older · /cancel · /steer text · /allow · /deny · /quit';
 
 interface Choice { key: string; label: string; action(): void }
 
-function Picker({ choices, enabled }: { choices: Choice[]; enabled: boolean }) {
+function Picker({ choices, enabled, canSelect }: { choices: Choice[]; enabled: boolean; canSelect(): boolean }) {
   const [selected, setSelected] = useState(0);
   const current = Math.min(selected, choices.length - 1);
   useInput((_input, key) => {
+    if (!canSelect()) return;
     if (key.upArrow) setSelected(Math.max(0, current - 1));
     else if (key.downArrow) setSelected(Math.min(choices.length - 1, current + 1));
     else if (key.return) choices[current]?.action();
@@ -72,9 +61,13 @@ export function App({ controller }: { controller: Controller }) {
     if (value === '/quit') { exit(); return; }
     if (value === '/help') { setHelp(value => !value); setInput(''); return; }
     const accepted = await controller.perform(async () => {
-      if (state.screen === 'path') await controller.createWorkspace(value);
-      else if (value === '/sessions') await controller.showPicker('sessions');
-      else if (value === '/workspaces') await controller.showPicker('workspaces');
+      const navigation = /^\/(workspace|workspaces|session|sessions)(?:\s+(.+))?$/.exec(value);
+      if (navigation) {
+        if (navigation[1]!.startsWith('workspace')) await controller.switchWorkspace(navigation[2]);
+        else await controller.switchSession(navigation[2]);
+        setScroll(0);
+      }
+      else if (state.screen === 'path') await controller.createWorkspace(value);
       else if (value === '/new') await controller.createSession();
       else if (value === '/older') { await controller.older(); setScroll(value => value + 10); }
       else if (value === '/cancel') await controller.cancelTurn();
@@ -88,6 +81,7 @@ export function App({ controller }: { controller: Controller }) {
         setAnswers(previous => ({ ...previous, [eventId]: next }));
       } else if (pending) throw new Error('Answer the approval with /allow or /deny');
       else if (value.startsWith('/')) throw new Error('Unknown command. Use /help.');
+      else if (state.screen !== 'chat') throw new Error('Choose a session or type /workspace or /session');
       else { await controller.prompt(value); setScroll(0); }
     });
     if (accepted) setInput('');
@@ -124,7 +118,8 @@ export function App({ controller }: { controller: Controller }) {
     {state.error && <Text color="red">{state.error}</Text>}
     {state.screen === 'workspaces' || state.screen === 'sessions' ? <Box flexDirection="column" marginY={1}>
       <Text bold>{state.screen === 'workspaces' ? 'Choose workspace' : 'Choose session'}</Text>
-      <Picker key={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices} enabled={state.online && !state.busy} />
+      <Picker key={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices} enabled={state.online && !state.busy && !input}
+        canSelect={() => !draft.current && controller.state.online && !controller.state.busy} />
     </Box> : <>
       {state.screen === 'chat' && <Box flexDirection="column" marginY={1}>
         <Text>{visible.length ? visible.join('\n') : 'Start a conversation with the host agent.'}</Text>
@@ -137,13 +132,14 @@ export function App({ controller }: { controller: Controller }) {
         {question?.options && <Text>{array(question.options).map(option => string(object(option).label)).join(' · ')}</Text>}
         <Text dimColor>{question ? 'Type your answer below' : '/allow approves once · /deny rejects'}</Text>
       </Box>}
+    </>}
       <Box borderStyle="round" borderColor={state.online ? 'cyan' : 'gray'} paddingX={1}>
         <Text color="cyan">❯ </Text>
         <TextInput value={input} onChange={setInput} onSubmit={() => { void submit(draft.current); }}
           focus={state.online && !state.busy} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message or /help'} />
       </Box>
       <Text dimColor>Enter send · Esc cancel · PgUp/PgDn scroll · Ctrl+C exit</Text>
+      {input.startsWith('/') && !input.includes(' ') && <Text dimColor>{COMMANDS.filter(command => command.startsWith(input)).join('  ')}</Text>}
       {help && <Text dimColor>{HELP}</Text>}
-    </>}
   </Box>;
 }

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { Client, RemoteError } from '../src/client.ts';
 import { Controller } from '../src/controller.ts';
 import { object } from '../src/wire.ts';
-import { host, until } from './host.ts';
+import { host, until, workspace } from './host.ts';
 
 test('lists workspaces and sessions over one authenticated mux, cancelling baseline streams', async t => {
   const fixture = await host(); t.after(() => fixture.close());
@@ -73,4 +73,25 @@ test('logical stream errors settle and disconnected lists fail promptly', async 
   }));
   assert.equal(callbackError?.message, 'callback failure');
   assert.equal((await client.listWorkspaces()).length, 1);
+});
+
+test('workspace and session commands switch across workspaces without creating or cancelling agents', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.baseline = [workspace, { ...workspace, workspaceId: 'w2', title: 'Project β', path: '/host/second', sessionIds: ['s2'] }];
+  const controller = new Controller(fixture.url, 'fixture-token'); t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.state.workspaces.length === 2);
+  await controller.switchWorkspace('Project α');
+  assert.equal(controller.state.workspaceId, 'w1');
+  await controller.switchSession('First conversation');
+  await until(() => controller.state.transcript.ready);
+  await controller.switchSession('s2');
+  assert.equal(controller.state.workspaceId, 'w2');
+  assert.equal(controller.state.sessionId, 's2');
+  await assert.rejects(controller.switchSession('s'), /Ambiguous/);
+  assert.equal(controller.state.sessionId, 's2');
+  await controller.switchWorkspace('/host/project');
+  assert.equal(controller.state.sessionId, undefined);
+  assert.equal(controller.state.screen, 'sessions');
+  assert(!fixture.calls.some(call => call.method === 'session/create' || call.method === 'session/cancel'));
 });
