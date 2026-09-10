@@ -189,7 +189,6 @@ export class CostLedger {
    */
   async replace(sessionId: string, cut: number, events: ObjectValue[]): Promise<void> {
     if ((this.sessions.get(sessionId)?.cut ?? -2) > cut) return;
-    const old = new Map(this.sessions.get(sessionId)?.charges.map(c => [c.key, c]));
     const charges: Charge[] = [];
     const inheritedCut = Math.max(-1, ...events.filter(e => e.type === 'session/end-seed' && object(e.data).inherited === true).map(e => Number(e.seq)));
     let route: ObjectValue = {}; let last: { turn: unknown; step: unknown; index: number } | undefined;
@@ -211,13 +210,9 @@ export class CostLedger {
       const index = last && d.turn !== null && d.step !== null && last.turn === d.turn && last.step === d.step ? last.index : charges.length;
       const key = charges[index]?.key ?? String(e.seq);
       if (!usage && charges[index]?.usage) continue;
-      const previous = old.get(key);
-      if (previous?.amount !== undefined && previous.time === time && previous.provider === provider && previous.model === model
-        && usage && previous.usage && Object.keys(usage).every(k => usage[k as keyof Usage] === previous.usage![k as keyof Usage])) {
-        charges[index] = previous; last = { turn: d.turn, step: d.step, index }; continue;
-      }
-      const reusable = previous?.price && previous.provider === provider && previous.model === model ? [previous.price] : this.prices;
-      const selected = time === undefined ? lowestPrice(reusable, provider, model) : priceAt(reusable, provider, model, time);
+      // Every scan reprices from the current configuration, so correcting prices.json updates
+      // stored totals instead of leaving the version an earlier scan happened to apply.
+      const selected = time === undefined ? lowestPrice(this.prices, provider, model) : priceAt(this.prices, provider, model, time);
       const estimate = usage && selected ? (usage.input * selected.rates.input + usage.output * selected.rates.output + usage.cacheRead * selected.rates.cacheRead + usage.cacheWrite * selected.rates.cacheWrite) / 1e6 : undefined;
       const amount = estimate !== undefined && Number.isFinite(estimate) ? estimate : undefined;
       charges[index] = { key, time, provider, model, usage, price: selected?.price, amount,

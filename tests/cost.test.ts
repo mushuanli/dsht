@@ -111,17 +111,34 @@ test('fork seed records are excluded while inherited request routes remain usabl
   assert.deepEqual(summary(ledger.total('fork')), { amount: 5.02, unknown: 0, estimated: 0, records: 1 });
 });
 
-test('ledger restart retains rates and stores no conversation text', async t => {
+test('every scan reprices stored requests from the current table and stores no conversation text', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-cost-')); t.after(() => rm(directory, { recursive: true, force: true }));
   const ledger = new CostLedger(DEFAULT_PRICES, directory); await ledger.load();
   const events = costRecords([record(0, at('2026-09-10T10:00:00'))]);
   await ledger.replace('s1', 0, events);
+  assert.equal(summary(ledger.total('s1')).amount, 10.04);
   const changed = DEFAULT_PRICES.map(p => ({ ...p, peak: { ...p.peak, input: 999 } }));
   const restarted = new CostLedger(changed, directory); await restarted.load();
   await restarted.replace('s1', 1, events);
-  assert.equal(summary(restarted.total('s1')).amount, 10.04);
+  assert.equal(summary(restarted.total('s1')).amount, 1007.04);
   const files = await readdir(directory); assert.equal(files.length, 1);
   assert.doesNotMatch(await readFile(join(directory, files[0]!), 'utf8'), /PRIVATE PROMPT|content/);
+});
+
+test('a renamed table reprices charges an earlier scan already priced', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-cost-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  // The 2026-09-10 correction renamed the Flash model and lowered its rates, which left stored
+  // charges matching neither the recorded alias nor the new family name.
+  const legacy = { ...DEFAULT_PRICES[0]!, id: 'deepseek-2026-09-10-deepseek-v4-flash', model: 'deepseek-v4-flash',
+    peak: { input: 3, cacheRead: 0.1, cacheWrite: 3, output: 9 },
+    offPeak: { input: 1.5, cacheRead: 0.05, cacheWrite: 1.5, output: 4.5 } };
+  const events = costRecords([record(0, at('2026-09-10T10:00:00'))]);
+  const before = new CostLedger(pricesFrom([legacy]), directory); await before.load();
+  await before.replace('s1', 0, events);
+  assert.equal(summary(before.total('s1')).amount, 12.1);
+  const after = new CostLedger(DEFAULT_PRICES, directory); await after.load();
+  await after.replace('s1', 1, events);
+  assert.equal(summary(after.total('s1')).amount, 10.04);
 });
 
 test('billing scans all HTTP sessions without changing the selected session', async t => {
