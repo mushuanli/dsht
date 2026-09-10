@@ -1,4 +1,5 @@
 /** Billing estimates with explicit coverage, calendar and unknown-price indicators. */
+import { useTheme } from './theme.ts';
 import { Box, Text } from 'ink';
 import { costText } from './cost.ts';
 import type { Controller } from './controller.ts';
@@ -9,6 +10,7 @@ import { safeText } from './wire.ts';
  * @returns Billing panel, including unpriced models and refresh errors.
  */
 export function CostPanel({ controller }: { controller: Controller }) {
+  const theme = useTheme();
   const costs = controller.costs;
   if (!costs) return <Text>Cost tracking is unavailable</Text>;
   const id = controller.state.sessionId;
@@ -24,7 +26,7 @@ export function CostPanel({ controller }: { controller: Controller }) {
       : costs.scannedAt ? `Last refresh: ${new Date(costs.scannedAt).toISOString()}`
       : 'Cached totals from the previous run'}</Text>
     <Text dimColor>Recorded settlement time determines tariff; * means a subtotal is not exact. Provider invoices are authoritative.</Text>
-    {costs.error && <Text color="yellow">Partial totals: {safeText(costs.error)}</Text>}
-    {costs.missing().slice(0, 6).map(reason => <Text key={reason} color="yellow">{safeText(reason)}</Text>)}
+    {costs.error && <Text color={theme.colors.context}>Partial totals: {safeText(costs.error)}</Text>}
+    {costs.missing().slice(0, 6).map(reason => <Text key={reason} color={theme.colors.context}>{safeText(reason)}</Text>)}
   </Box>;
 }

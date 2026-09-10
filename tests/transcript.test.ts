@@ -136,11 +136,11 @@ test('tool summaries hide arguments and nested results in live output and histor
   transcript.accept({ type: 'event', event: { seq: 2, type: 'tool/result', surfaceOp: 'append',
     data: { message: { content: [{ type: 'tool-result', toolCallId: 'call', isError: true,
       content: [{ type: 'text', text: 'PRIVATE_RESULT' }, { type: 'custom-tool-data', secret: 'PRIVATE_DATA' }] }] } } } });
-  assert.deepEqual(transcript.messages.slice(1).map(message => message.text), ['⚙ bash', '✗ bash · failed']);
+  assert.deepEqual(transcript.messages.slice(1).map(message => message.text), ['✗ bash']);
   assert.equal(JSON.stringify(transcript.messages).includes('PRIVATE'), false);
 });
 
-test('tool descriptions follow their call IDs and remain a single terminal row', () => {
+test('tool descriptions follow call IDs and show a separately clipped command preview', () => {
   const transcript = new Transcript();
   transcript.accept(snapshot);
   transcript.accept({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [
@@ -152,20 +152,95 @@ test('tool descriptions follow their call IDs and remain a single terminal row',
     { type: 'tool-result', toolCallId: 'a', isError: false, content: [{ type: 'text', text: 'PRIVATE_OUTPUT' }] },
   ] } } } });
   const messages = transcript.messagesForWidth(32).slice(1);
-  assert.equal(messages[0]!.text.split('\n')[0], '⚙ bash · Read package.json');
-  assert.equal(messages[1]!.text.split('\n')[1], '✓ bash · Read package.json');
-  assert.ok(messages[1]!.text.startsWith('✗ bash · printf'));
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]!.text.split('\n')[0], '✓ bash · Read package.json');
+  assert.equal(messages[0]!.text.split('\n')[1], '  $ cat package.json');
+  assert.ok(messages[0]!.text.split('\n')[2]!.startsWith('✗ bash · printf'));
   assert.ok(messages.every(message => message.compact));
   for (const message of messages) for (const row of message.text.split('\n')) {
     assert.equal(wrapAnsi(row, 32, { hard: true, wordWrap: false }).includes('\n'), false);
     assert.equal(row.includes('PRIVATE'), false);
   }
-  assert.ok(messages[1]!.text.split('\n')[0]!.endsWith('…'));
+  assert.ok(transcript.messagesForWidth(16)[1]!.text.split('\n')[0]!.endsWith('…'));
   assert.equal(contentText([{ type: 'tool-call', name: 'read', arguments: '{unfinished' }]), '⚙ read');
   transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'live', revision: 1 } });
   transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'live', revision: 2, index: 0,
     chunk: { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c', name: 'bash',
       arguments: JSON.stringify({ description: 'Read package.json', command: 'cat package.json' }) } } } });
-  assert.equal(transcript.liveTextForWidth(32), '⚙ bash · Read package.json');
+  assert.equal(transcript.liveTextForWidth(32), '⚙ bash · Read package.json\n  $ cat package.json');
   assert.equal(transcript.liveToolOnly, true);
+});
+
+test('finished live reasoning folds before the answer commits and expands without losing text', () => {
+  const transcript = new Transcript(); transcript.accept(snapshot);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  const chunk = (revision: number, value: object) => transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision, index: revision - 2, chunk: value } });
+  chunk(2, { type: 'reasoning-delta', index: 0, text: 'A long thought. '.repeat(20) + 'ending' });
+  assert.ok(historyLayout(transcript, 40).lines.some(line => line.includes('ending')));
+  chunk(3, { type: 'text-delta', index: 1, text: 'The answer' });
+  assert.ok(!historyLayout(transcript, 40).lines.some(line => line.includes('ending')));
+  assert.ok(historyLayout(transcript, 40, 'full').lines.some(line => line.includes('ending')));
+  assert.ok(transcript.liveText.includes('ending'));
+});
+
+test('committed legacy chunks are released while paging cursors and the active turn survive', () => {
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, assistantStream: undefined, records: [
+    { type: 'event', event: { seq: 0, type: 'turn/start', time: 1000, data: { turn: 1 } } },
+    ...Array.from({ length: 200 }, (_, index) => ({ type: 'event', event: { seq: index + 1, type: 'assistant/chunk',
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'part ' } } } })),
+    { type: 'event', event: { seq: 201, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: 'Committed answer' }] } } } },
+  ] });
+  assert.equal(transcript.retainedRecordCount, 1);
+  assert.equal(transcript.beforeSeq, 0);
+  assert.equal(transcript.activeTurnStartedAt, 1000);
+  assert.equal(transcript.liveText, '');
+  transcript.addPage({ records: [{ type: 'event', event: { seq: -1, type: 'turn/end', data: { turn: 0 } } }], hasMore: false });
+  assert.equal(transcript.activeTurnStartedAt, 1000);
+  assert.equal(transcript.beforeSeq, -1);
+  assert.equal(transcript.liveText, '');
+});
+
+test('tool descriptions include only the first command line and do not repeat a command fallback', () => {
+  assert.equal(contentText([{ type: 'tool-call', name: 'bash', arguments: JSON.stringify({ description: 'Run checks', command: 'npm test\nnpm run build' }) }]), '⚙ bash · Run checks\n  $ npm test');
+  assert.equal(contentText([{ type: 'tool-call', name: 'bash', arguments: JSON.stringify({ command: 'npm test\nnpm run build' }) }]), '⚙ bash · npm test');
+});
+
+test('reasoning navigation caches short prompt summaries independently of stream frames and refreshes after paging', () => {
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, records: [{ type: 'event', event: { seq: 10, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'reasoning', text: 'thought '.repeat(1000) }] } } } }], hasMore: true });
+  const entries = transcript.thoughts;
+  assert.equal(entries[0]?.prompt, 'Prompt precedes loaded history');
+  assert.ok(entries[0]!.preview.length <= 120);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', index: 0, revision: 2, chunk: { type: 'text-delta', index: 0, text: 'output' } } });
+  assert.equal(transcript.thoughts, entries);
+  transcript.addPage({ records: [{ type: 'event', event: { seq: 5, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'The original prompt' }] } } }], hasMore: false });
+  assert.equal(transcript.thoughts[0]?.promptSeq, 5);
+  assert.equal(transcript.thoughts[0]?.prompt, 'The original prompt');
+});
+
+
+test('tool completion replaces the cached call and paging merges an orphan result', () => {
+  const call = { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [
+    { type: 'tool-call', id: 'a', name: 'bash', arguments: JSON.stringify({ description: 'Run checks', command: 'npm test' }) },
+  ] } } };
+  const result = { seq: 2, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [
+    { type: 'tool-result', toolCallId: 'a', isError: false },
+  ] } } };
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, records: [{ type: 'event', event: call }] });
+  assert.match(transcript.messages[0]!.text, /^⚙/);
+  transcript.accept({ type: 'event', event: result });
+  assert.equal(transcript.messages.length, 1);
+  assert.equal(transcript.messages[0]!.seq, 1);
+  assert.equal(transcript.messages[0]!.text, '✓ bash · Run checks\n  $ npm test');
+  const cached = transcript.messages[0];
+  assert.equal(transcript.messages[0], cached);
+  const paged = new Transcript();
+  paged.accept({ ...snapshot, cursor: 2, records: [{ type: 'event', event: result }], hasMore: true });
+  assert.equal(paged.messages[0]!.text, '✓ tool · completed');
+  paged.addPage({ records: [{ type: 'event', event: call }], hasMore: false });
+  assert.equal(paged.messages.length, 1);
+  assert.equal(paged.messages[0]!.text, cached!.text);
 });

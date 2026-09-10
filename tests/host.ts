@@ -17,15 +17,20 @@ export async function host() {
   const cancels: ObjectValue[] = [];
   const sockets = new Set<WebSocket>();
   const events = new Map<WebSocket, string>();
+  let replayInteractions: ObjectValue[] = [];
   const controls = new Map<WebSocket, string>();
   let controlAvailable = true;
   const failFollow = new Set<string>();
   let subagent: ObjectValue | undefined;
   let subagentMode: 'one-shot' | 'continuable' = 'continuable';
+  let presets: ObjectValue[] = ['standard', 'ptc', 'minimal', 'cordis'].map(id => ({ id, trust: 'system' }));
+  let modelCatalog: ObjectValue = { groups: [], failures: [], routableProviders: ['fixture'] };
   let defaultModel: ObjectValue = { provider: 'fixture', model: 'chat' };
   let controlBaseline: ObjectValue = { queues: { s1: [] }, jobs: { s1: [] }, projections: {} };
   const follows = new Map<WebSocket, string>();
   let baseline = [workspace];
+  let archivedSessionIds: string[] = [];
+  let blank = false;
   let running = false;
   let onPage: (() => Promise<ObjectValue>) | undefined;
   let searchResult: ObjectValue = { items: [{ sessionId: 's1', snippet: '你好' }, { sessionId: 's2', snippet: '你好 too' }], hasMore: false };
@@ -58,15 +63,36 @@ export async function host() {
       calls.push(body);
       let value: unknown;
       switch (body.method) {
-        case 'session/modelCatalog': assert.deepEqual(args, {}); value = { default: defaultModel }; break;
+        case 'agentPresets/list': assert.deepEqual(args, {}); value = { presets, authorable: false }; break;
+        case 'session/modelCatalog': assert.deepEqual(args, {}); value = { ...modelCatalog, default: defaultModel }; break;
+        case 'session/selectModel': {
+          const selection = object(args.request);
+          assert.equal(typeof selection.sessionId, 'string');
+          assert.equal(typeof selection.provider, 'string');
+          assert.equal(typeof selection.model, 'string');
+          value = { selected: { provider: selection.provider, model: selection.model,
+            ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }) } }; break;
+        }
         case 'fileReferences/list':
           assert.equal(args.agentId, 's1');
           assert.equal(typeof args.query, 'string');
           value = args.query === 'src/' ? [{ path: 'src/hello world.ts', kind: 'file' }]
             : args.query === 'missing' ? [] : [{ path: 'src', kind: 'directory' }, { path: 'README.md', kind: 'file' }];
           break;
-        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...[{ ...session, running }, { sessionId: 's2', running: true }], ...subagent === undefined ? [] : [subagent]] }; break;
+        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...[{ ...session, running, blank }, { sessionId: 's2', running: true }], ...subagent === undefined ? [] : [subagent]] }; break;
         case 'session/create': assert.deepEqual(args, { request: { workspaceId: 'w1' } }); value = { sessionId: 's-new' }; break;
+        case 'workspace/delete': {
+          const id = object(args.request).workspaceId;
+          assert.equal(typeof id, 'string');
+          if (!businessError) baseline = baseline.filter(row => row.workspaceId !== id);
+          value = { deleted: true }; break;
+        }
+        case 'workspace/archiveSession': {
+          const id = object(args.request).sessionId;
+          assert.equal(typeof id, 'string');
+          if (!businessError) archivedSessionIds = [...new Set([...archivedSessionIds, String(id)])];
+          value = { archivedSessionIds }; break;
+        }
         case 'workspace/create': assert.equal(typeof object(args.request).path, 'string'); value = { workspace, created: false }; break;
         case 'session/prompt': {
           const prompt = object(args.request);
@@ -104,8 +130,8 @@ export async function host() {
       if (frame.type === 'cancel') { cancels.push(frame); return; }
       opens.push(frame);
       const item = (value: unknown) => ws.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value }));
-      if (frame.endpoint === '$events') { events.set(ws, String(frame.streamId)); item({ type: 'ready', clientId: 'client-1', host: { home: '/host' } }); }
-      else if (frame.endpoint === 'workspace/follow') { assert.deepEqual(object(frame.payload).args, {}); item({ type: 'baseline', value: { items: baseline, archivedSessionIds: [] } }); }
+      if (frame.endpoint === '$events') { events.set(ws, String(frame.streamId)); item({ type: 'ready', clientId: 'client-1', host: { home: '/host' } }); for (const frame of replayInteractions) item(frame); }
+      else if (frame.endpoint === 'workspace/follow') { assert.deepEqual(object(frame.payload).args, {}); item({ type: 'baseline', value: { items: baseline, archivedSessionIds } }); }
       else if (frame.endpoint === 'session/control') {
         if (!controlAvailable) { ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error: { code: 'gateway/method-unavailable', message: 'not installed' } })); return; }
         assert.deepEqual(object(frame.payload).args, {}); controls.set(ws, String(frame.streamId)); item({ type: 'baseline', value: controlBaseline }); }
@@ -129,6 +155,8 @@ export async function host() {
   assert(address && typeof address === 'object');
   return {
     url: `http://127.0.0.1:${address.port}`, calls, opens, cancels,
+    set replayInteractions(value: ObjectValue[]) { replayInteractions = value; },
+    set blank(value: boolean) { blank = value; },
     set onPage(value: (() => Promise<ObjectValue>) | undefined) { onPage = value; },
     set searchResult(value: ObjectValue) { searchResult = value; },
     set followSnapshot(value: ObjectValue) { followSnapshot = value; },
@@ -138,6 +166,8 @@ export async function host() {
     set failFollow(value: Set<string>) { failFollow.clear(); for (const id of value) failFollow.add(id); },
     set subagent(value: ObjectValue | undefined) { subagent = value; },
     set subagentMode(value: 'one-shot' | 'continuable') { subagentMode = value; },
+    set presets(value: ObjectValue[]) { presets = value; },
+    set modelCatalog(value: ObjectValue) { modelCatalog = value; },
     set defaultModel(value: ObjectValue) { defaultModel = value; },
     set controlBaseline(value: ObjectValue) { controlBaseline = value; },
     control(value: ObjectValue) { for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId, value })); },

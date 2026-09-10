@@ -6,9 +6,14 @@ import { AuthenticationRequired } from './auth.ts';
 import { resolveTarget, sessionLabel } from './navigation.ts';
 import { CostLedger, costRecords } from './cost.ts';
 import { Telemetry } from './telemetry.ts';
-import { Transcript } from './transcript.ts';
+import { Transcript, toolLine } from './transcript.ts';
+import { releaseHistoryLayout } from './history.ts';
+import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from './memory.ts';
 import { fileReferences, type FileReference } from './references.ts';
 import { array, errorText, object, string, type Json, type ObjectValue } from './wire.ts';
+
+/** Resolved navigation-removal identity; empty marks a fresh blank, idle session eligible for immediate archival. */
+export interface RemovalTarget { kind: 'workspace' | 'session'; id: string; name: string; path?: string; empty?: boolean }
 
 /** State shared by the picker and conversation view. */
 export interface State {
@@ -26,8 +31,16 @@ export interface State {
   pending: ObjectValue[];
   controlError?: string;
   modelError?: string;
+  presetError?: string;
+  presets?: ObjectValue[];
   defaultModel?: ObjectValue;
   transcript: Transcript;
+}
+
+/** Bounded search results contain navigation summaries, never complete message bodies. */
+export interface HistorySearch {
+  items: { seq: number; role: string; preview: string }[];
+  truncated: boolean;
 }
 
 /** Wire addresses for one `session/list` row, in the order the cost scan should try them.
@@ -52,6 +65,7 @@ export class Controller {
   state: State = { version: 0, online: false, busy: false, screen: 'workspaces', status: 'Connecting…',
     error: '', workspaces: [], sessions: [], showAllSessions: false, pending: [], transcript: new Transcript() };
   private observers = new Set<() => void>();
+  private interactions = new Map<string, ObjectValue>();
   private abort = new AbortController();
   private client: Client | undefined;
   private clientId = '';
@@ -59,8 +73,10 @@ export class Controller {
   private runTask: Promise<void> | undefined;
   private generationFailed: ((error: Error) => void) | undefined;
   private selection = 0;
-  telemetry = new Telemetry();
+  private historyPinned = false;
+  telemetry = new Telemetry(new Set(['title', 'modelSelection', 'contextPressure', 'tokenUsage', 'sessionStats', 'agentPreset']));
   private observedRunningAt = new Map<string, number>();
+  private presetClient?: Client;
   private catalogRevision = 0;
   private catalogTasks = new Set<Promise<void>>();
   private runningUpdates = new Map<string, boolean>();
@@ -87,6 +103,58 @@ export class Controller {
     const row = this.state.sessions.find(item => item.sessionId === id);
     return title !== undefined ? sessionLabel({ sessionId: id, projections: { values: { title } } })
       : row ? sessionLabel(row) : id;
+  }
+
+  /** Current agent-preset name, matching the web header's built-in labels and custom metadata. */
+  get sessionMode(): string | undefined {
+    if (!this.state.sessionId) return undefined;
+    const id = this.telemetry.view(this.state.sessionId).values.agentPreset;
+    if (typeof id !== 'string') return undefined;
+    const preset = this.state.presets?.find(item => item.id === id);
+    const builtIn = new Map([['standard', 'Standard mode'], ['ptc', 'PTC mode'], ['minimal', 'Minimal mode'], ['cordis', 'Creator mode']]);
+    return preset?.trust === 'system' && builtIn.has(id) ? builtIn.get(id)
+      : typeof preset?.name === 'string' ? preset.name : id;
+  }
+
+  /** Load the optional preset roster once per connection, only when a session names a preset. */
+  loadPresetNames(): void {
+    const client = this.client;
+    if (!client || !this.state.online || this.presetClient === client) return;
+    this.presetClient = client;
+    const task = client.call('agentPresets/list', {}).then(value => {
+      if (client === this.client) this.update({ presets: array(object(value).presets).map(object), presetError: undefined });
+    }).catch(error => {
+      if (client === this.client) this.update({ presets: [], presetError: errorText(error) });
+    });
+    this.catalogTasks.add(task);
+    void task.finally(() => this.catalogTasks.delete(task));
+  }
+
+  /** Fetch current model routes and adapter-owned reasoning choices for the selected session.
+   * @returns Host catalog; provider failures remain available to the selector.
+   */
+  async modelCatalog(): Promise<ObjectValue> {
+    const sessionId = this.sessionId;
+    const selection = this.selection;
+    const value = object(await this.host.call('session/modelCatalog', {}));
+    if (selection !== this.selection || sessionId !== this.state.sessionId) throw new Error('Session changed while loading models');
+    return value;
+  }
+
+  /** Select the next request's model; the host also attempts to save its deployment default.
+   * @param provider - Host provider route ID.
+   * @param model - Exact model ID.
+   * @param reasoningEffort - Optional adapter-owned effort ID; omission uses its default.
+   */
+  async selectModel(provider: string, model: string, reasoningEffort?: string): Promise<void> {
+    const sessionId = this.sessionId;
+    const selection = this.selection;
+    const selected = object(object(await this.host.call('session/selectModel', { request: {
+      sessionId, provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    } })).selected);
+    if (selection !== this.selection || sessionId !== this.state.sessionId) return;
+    this.update({ status: `Next request: ${string(selected.provider)} / ${string(selected.model)}${selected.reasoningEffort ? ` · ${string(selected.reasoningEffort)}` : ''}` });
+    this.refreshCatalog(this.host);
   }
 
   /** Epoch start from the retained turn log, or when this client first observed the run. */
@@ -123,7 +191,7 @@ export class Controller {
   }
   constructor(readonly base: string, token: string | undefined, readonly initialSession?: string,
     private makeClient: () => Client = () => new Client(base),
-    private authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger) {}
+    private authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS) {}
 
   /** React-compatible state subscription. */
   subscribe = (listener: () => void): (() => void) => {
@@ -146,6 +214,27 @@ export class Controller {
     await this.interruptTask;
     await Promise.all(this.catalogTasks);
     await this.costTask;
+    this.releaseTranscript();
+  }
+
+  /** Keep history stable while the user reads, searches, or expands it; trim again at the live tail.
+   * @param pinned - Whether the main transcript is actively being read away from its tail.
+   */
+  pinHistory(pinned: boolean): void {
+    this.historyPinned = pinned;
+    if (!pinned && this.reclaimHistory()) this.update({});
+  }
+
+  private reclaimHistory(): number {
+    if (this.historyPinned || !this.state.online) return 0;
+    const removed = this.state.transcript.trimHistory(this.historyLimits);
+    if (removed) releaseHistoryLayout(this.state.transcript);
+    return removed;
+  }
+
+  private releaseTranscript(): void {
+    releaseHistoryLayout(this.state.transcript);
+    this.state.transcript.dispose(); this.historyPinned = false;
   }
 
   /** Stop the selected turn and then close, so quitting does not leave host work running.
@@ -260,15 +349,60 @@ export class Controller {
 
   /** Refresh both lists from the host, then show the requested picker. */
   async showPicker(screen: 'workspaces' | 'sessions'): Promise<void> {
-    await this.releasePending();
     const [workspaces, sessions] = await Promise.all([this.host.listWorkspaces(), this.host.listSessions()]);
     this.update({ screen, workspaces, sessions });
   }
 
+  /** Resolve a removal command to one reviewable object without changing the selection.
+   * @param kind - Workspace registration removal or session archival.
+   * @param query - Exact name, ID, or unambiguous ID prefix.
+   * @returns The fixed identity and display details for confirmation.
+   */
+  async removalTarget(kind: 'workspace' | 'session', query: string): Promise<RemovalTarget> {
+    const items = kind === 'workspace' ? await this.host.listWorkspaces() : await this.host.listSessions();
+    const row = resolveTarget(items, query, kind === 'workspace' ? 'workspaceId' : 'sessionId',
+      item => kind === 'workspace' ? [string(item.title), string(item.path)] : [sessionLabel(item)]);
+    return kind === 'workspace' ? { kind, id: string(row.workspaceId), name: string(row.title), path: string(row.path) }
+      : { kind, id: string(row.sessionId), name: sessionLabel(row),
+        empty: row.blank === true && row.running === false
+          && !this.runningUpdates.get(string(row.sessionId))
+          && !(this.telemetry.view(string(row.sessionId)).queued ?? 0)
+          && !(this.telemetry.view(string(row.sessionId)).jobs ?? 0)
+          && !(this.state.sessionId === row.sessionId && this.admission) };
+
+  }
+
+  /** Apply a confirmed removal or freshly verified empty-session archival; directories and logs are preserved.
+   * @param target - Exact workspace or session identity reviewed by the user.
+   */
+  async removeTarget(target: RemovalTarget): Promise<void> {
+    const client = this.host;
+    const receipt = object(await client.call(target.kind === 'workspace' ? 'workspace/delete' : 'workspace/archiveSession', {
+      request: target.kind === 'workspace' ? { workspaceId: target.id } : { sessionId: target.id },
+    }));
+    if (client !== this.client) return;
+    if (target.kind === 'session') {
+      client.archivedSessionIds = new Set(array(receipt.archivedSessionIds).map(string));
+      if (this.state.sessionId === target.id) {
+        this.pickWorkspace(this.state.workspaceId);
+      }
+    } else {
+      if (receipt.deleted !== true) throw new Error('Host did not confirm workspace removal');
+      this.update({ workspaces: this.state.workspaces.filter(row => row.workspaceId !== target.id),
+        ...(this.state.workspaceId === target.id ? { workspaceId: undefined } : {}) });
+    }
+    this.update({ screen: target.kind === 'workspace' ? 'workspaces' : 'sessions',
+      status: target.kind === 'workspace' ? 'Workspace registration removed' : 'Session archived' });
+    // A refresh failure must not make a successful mutation look like a rejected deletion.
+    try { await this.showPicker(target.kind === 'workspace' ? 'workspaces' : 'sessions'); }
+    catch (error) { this.update({ error: `Removal completed; list refresh failed: ${errorText(error)}` }); }
+  }
+
   /** Pick a workspace, or use all sessions when the identity is omitted. */
   pickWorkspace(workspaceId?: string): void {
-    this.follow?.cancel();
     this.selection++;
+    this.follow?.cancel(); this.follow = undefined;
+    this.releaseTranscript();
     this.update({ workspaceId, sessionId: undefined, showAllSessions: false, transcript: new Transcript(), screen: 'sessions' });
   }
 
@@ -278,7 +412,6 @@ export class Controller {
     const workspaces = await this.host.listWorkspaces();
     const workspace = resolveTarget(workspaces, query, 'workspaceId', item => [string(item.title), string(item.path)]);
     const sessions = await this.host.listSessions();
-    await this.releasePending();
     this.update({ workspaces, sessions });
     this.pickWorkspace(string(workspace.workspaceId));
   }
@@ -317,9 +450,9 @@ export class Controller {
   /** Replace the selected transcript and cancel its preceding follow stream. */
   async selectSession(sessionId: string): Promise<void> {
     this.stoppingSession = undefined;
-    await this.releasePending();
-    this.follow?.cancel();
     const selection = ++this.selection;
+    this.follow?.cancel(); this.follow = undefined;
+    this.releaseTranscript();
     const transcript = new Transcript();
     const workspace = this.state.workspaces.find(item => array(item.sessionIds).includes(sessionId));
     const workspaceId = workspace ? string(workspace.workspaceId)
@@ -333,9 +466,10 @@ export class Controller {
         if (selection !== this.selection) return;
         try {
           transcript.accept(value);
+          this.reclaimHistory();
           const frame = object(value);
           if (frame.type === 'snapshot') this.telemetry.snapshot(sessionId, frame.projections);
-          this.update({ transcript, status: this.stoppingSession === sessionId ? this.state.status : transcript.liveText ? 'Responding…' : 'Connected' });
+          this.update({ transcript, status: this.stoppingSession === sessionId ? this.state.status : transcript.hasLiveContent ? 'Responding…' : 'Connected' });
         } catch (error) { this.generationFailed?.(new Error(errorText(error))); }
       },
       end: error => {
@@ -409,16 +543,88 @@ export class Controller {
   }
 
   /** Add a page before the retained window using its fixed opening cut. */
-  async older(signal?: AbortSignal): Promise<void> {
-    const transcript = this.state.transcript;
+  async older(signal?: AbortSignal, transcript = this.state.transcript): Promise<void> {
+    const selection = this.selection;
+    if (transcript === this.state.transcript) this.historyPinned = true;
     if (!transcript.ready || !transcript.hasMore || transcript.beforeSeq === undefined) return;
     const result = await this.host.call('session/page', { request: {
       address: { kind: 'session', sessionId: this.sessionId }, throughSeq: transcript.cursor,
       beforeSeq: transcript.beforeSeq, maxMessages: 80,
     } }, signal);
-    if (transcript !== this.state.transcript) return;
+    if (selection !== this.selection) return;
     transcript.addPage(result);
-    this.update({ transcript });
+    this.update({});
+  }
+
+  /** Search one page at a time, preserving only the first 200 matches and releasing temporary content.
+   * @param query - Literal, case-insensitive text including folded reasoning.
+   * @param signal - Cancels HTTP and processing without cancelling the agent.
+   * @returns Newest-first bounded summaries and an explicit truncation flag.
+   */
+  async searchHistory(query: string, signal: AbortSignal): Promise<HistorySearch> {
+    const source = this.state.transcript;
+    if (!source.ready) throw new Error('Wait for the session snapshot');
+    const sessionId = this.sessionId;
+    const selection = this.selection;
+    const throughSeq = source.readThrough;
+    const needle = query.toLowerCase();
+    const result: HistorySearch = { items: [], truncated: false };
+    const scan = (transcript: Transcript): boolean => {
+      const messages = transcript.messages;
+      for (let index = messages.length - 1; index >= 0; index--) {
+        signal.throwIfAborted();
+        const message = messages[index]!;
+        if (message.role === 'Tool') continue;
+        const text = message.text;
+        const match = text.toLowerCase().indexOf(needle);
+        if (match < 0) continue;
+        if (result.items.length === 200) { result.truncated = true; return false; }
+        result.items.push({ seq: message.seq, role: message.role, preview: Buffer.from(toolLine(text.slice(Math.max(0, match - 40), match + needle.length + 100), 160)).toString('utf8') });
+      }
+      return true;
+    };
+    signal.throwIfAborted();
+    if (!scan(source)) return result;
+    let beforeSeq = source.beforeSeq;
+    let hasMore = source.hasMore;
+    while (hasMore && beforeSeq !== undefined) {
+      const page = object(await this.host.call('session/page', { request: {
+        address: { kind: 'session', sessionId }, throughSeq, beforeSeq, maxMessages: 80,
+      } }, signal));
+      signal.throwIfAborted();
+      if (selection !== this.selection) throw new Error('Session changed while searching history');
+      const temporary = new Transcript();
+      try {
+        temporary.accept({ type: 'snapshot', cursor: throughSeq, assistantStream: { revision: 0 }, records: page.records, hasMore: page.hasMore });
+        const next = temporary.beforeSeq;
+        if (temporary.hasMore && (next === undefined || next >= beforeSeq)) throw new Error('Host history page did not advance');
+        if (!scan(temporary)) return result;
+        beforeSeq = next; hasMore = temporary.hasMore;
+      } finally { temporary.dispose(); }
+    }
+    return result;
+  }
+
+  /** Load a separate small window ending at a search target; the live transcript keeps following.
+   * @param target - Durable message sequence to display.
+   * @param signal - Cancels the target-page request.
+   * @returns A caller-owned historical window that must be disposed when closed.
+   */
+  async historyAt(target: number, signal: AbortSignal): Promise<Transcript> {
+    const source = this.state.transcript;
+    const selection = this.selection;
+    const page = object(await this.host.call('session/page', { request: {
+      address: { kind: 'session', sessionId: this.sessionId }, throughSeq: source.readThrough,
+      beforeSeq: target + 1, maxMessages: 80,
+    } }, signal));
+    signal.throwIfAborted();
+    if (selection !== this.selection) throw new Error('Session changed while opening history');
+    const window = new Transcript();
+    try {
+      window.accept({ type: 'snapshot', cursor: source.readThrough, assistantStream: { revision: 0 }, records: page.records, hasMore: page.hasMore });
+      if (!window.messages.some(message => message.seq === target)) throw new Error('The host did not return the requested message');
+      return window;
+    } catch (error) { window.dispose(); throw error; }
   }
 
   /** Load the prefix required for an explicit history jump; never loop on an unadvancing page.
@@ -444,7 +650,8 @@ export class Controller {
     const pending = this.state.pending[0];
     if (!pending) throw new Error('No pending interaction');
     await this.reply(pending, { kind: 'result', value });
-    this.update({ pending: this.state.pending.filter(item => item.eventId !== pending.eventId) });
+    this.interactions.delete(string(pending.eventId));
+    this.update({});
   }
 
   /** Restrict an approval command to an approval request. */
@@ -455,10 +662,11 @@ export class Controller {
 
   /** Present only sessions explicitly accounted to the selected workspace. */
   get visibleSessions(): ObjectValue[] {
-    if (this.state.showAllSessions || !this.state.workspaceId) return this.state.sessions;
+    const sessions = this.state.sessions.filter(item => !this.client?.archivedSessionIds.has(string(item.sessionId)));
+    if (this.state.showAllSessions || !this.state.workspaceId) return sessions;
     const workspace = this.state.workspaces.find(item => item.workspaceId === this.state.workspaceId);
     const ids = new Set(array(workspace?.sessionIds ?? []).map(string));
-    return this.state.sessions.filter(item => ids.has(string(item.sessionId)));
+    return sessions.filter(item => ids.has(string(item.sessionId)));
   }
 
   private get host(): Client {
@@ -470,15 +678,14 @@ export class Controller {
     return this.state.sessionId;
   }
   private update(patch: Partial<State>): void {
-    this.state = { ...this.state, ...patch, version: this.state.version + 1 };
+    const next = { ...this.state, ...patch, version: this.state.version + 1 };
+    next.pending = next.online && next.screen === 'chat'
+      ? [...this.interactions.values()].filter(frame => frame.agentId === next.sessionId) : [];
+    this.state = next;
     for (const observer of this.observers) observer();
   }
   private async reply(frame: ObjectValue, outcome: ObjectValue): Promise<void> {
     await this.host.call('$events/result', { clientId: this.clientId, eventId: string(frame.eventId), outcome });
-  }
-  private async releasePending(): Promise<void> {
-    for (const pending of this.state.pending) await this.reply(pending, { kind: 'next' });
-    this.update({ pending: [] });
   }
   private refreshCatalog(client: Client): void {
     const revision = ++this.catalogRevision;
@@ -500,7 +707,7 @@ export class Controller {
       this.runningUpdates.clear();
       this.observedRunningAt.clear();
       this.telemetry = new Telemetry();
-      this.update({ controlError: undefined, modelError: undefined, defaultModel: undefined });
+      this.update({ controlError: undefined, modelError: undefined, defaultModel: undefined, presets: undefined, presetError: undefined });
       const client = this.makeClient();
       this.client = client;
       try {
@@ -519,15 +726,16 @@ export class Controller {
                 clearTimeout(timer);
                 resolve();
               } else if (frame.type === 'waterfall') {
-                if (frame.agentId === this.state.sessionId && this.state.screen === 'chat'
-                  && ['approval/request', 'user-questions/request'].includes(string(frame.event))) {
-                  this.update({ pending: [...this.state.pending, frame] });
+                if (['approval/request', 'user-questions/request'].includes(string(frame.event))) {
+                  this.interactions.set(string(frame.eventId), frame);
+                  this.update({});
                 } else {
                   void client.call('$events/result', { clientId: this.clientId,
                     eventId: string(frame.eventId), outcome: { kind: 'next' } }).catch(error => fail(new Error(errorText(error))));
                 }
               } else if (frame.type === 'cancel') {
-                this.update({ pending: this.state.pending.filter(item => item.eventId !== frame.eventId) });
+                this.interactions.delete(string(frame.eventId));
+                this.update({});
               } else if (frame.type === 'emit' && frame.event === 'api-session/status') {
                 const args = array(frame.args);
                 const sessionId = string(args[0]);
@@ -595,6 +803,7 @@ export class Controller {
         this.generationFailed = undefined;
         this.selection++;
         this.state.transcript.ready = false;
+        this.interactions.clear();
         this.update({ online: false, pending: [] });
         await client.close();
         await this.costTask;

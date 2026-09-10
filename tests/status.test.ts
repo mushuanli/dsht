@@ -1,5 +1,6 @@
 /** Exact host telemetry formatting and replacement semantics, independent of clock scheduling. */
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { compactStatus, metricLines, elapsedTime } from '../src/status.tsx';
 import wrapAnsi from 'wrap-ansi';
@@ -48,20 +49,25 @@ test('projection snapshots preserve newer keys, remove absent capabilities and r
 });
 
 test('working duration handles minutes, hours and clock skew', () => {
-  assert.equal(elapsedTime(-1000), '0m 0s');
+  assert.equal(elapsedTime(-1000), '0s');
   assert.equal(elapsedTime(65_999), '1m 5s');
   assert.equal(elapsedTime(3_661_000), '1h 1m 1s');
 });
 
-test('single-row status keeps core metrics visible and shortens wide names before dropping details', () => {
-  const fields = ['Working 1m 5s', 'deepseek-v4.1-flash-expires-on-0910 (high)', 'ws: 中文工作区名称很长', 'ctx: ~25%', 'tok: 1K', 'in/out: 100/200', '/status'];
-  const wide = compactStatus(fields, 200);
-  assert.equal(wide, fields.join(' · '));
-  for (const width of [60, 80, 100]) {
+test('single-row status keeps grouped metrics and prioritizes the stop hint on narrow terminals', () => {
+  const fields = ['◐ Working · 8s · Ctrl+C Stop'.padEnd(31), 'v4.1-flash · high', '~¥1.23/~¥5.00', '███░░░░░░░ ~25%', '42 turns · 166.2M tok'];
+  assert.equal(compactStatus(fields, 140), fields.join('   '));
+  const ready = compactStatus(['● Ready'.padEnd(31), ...fields.slice(1)], 140);
+  assert.equal([compactStatus(fields, 140), ready].join('\n') + '\n', readFileSync(new URL('./expected/status-compact.txt', import.meta.url), 'utf8'));
+  assert.equal(ready.indexOf('v4.1'), compactStatus(fields, 140).indexOf('v4.1'));
+  for (const width of [1, 10, 24, 40, 60, 80, 100]) {
     const row = compactStatus(fields, width);
     assert.equal(wrapAnsi(row, width, { hard: true, wordWrap: false }).includes('\n'), false);
-    assert.match(row, /ctx: ~25%.*tok: 1K/);
+    if (width >= 40) assert.match(row, /Ctrl\+C Stop/);
   }
+  const names = [fields[0]!, '中文模型名称很长很长 · high', ...fields.slice(2)];
+  assert.equal(wrapAnsi(compactStatus(names, 60), 60, { hard: true, wordWrap: false }).includes('\n'), false);
   assert.equal(compactStatus(['name\nnewline\tvalue'], 100), 'name newline value');
   assert.equal(compactStatus(fields, 1), '…');
+  assert.equal(compactStatus(fields, 0), '');
 });

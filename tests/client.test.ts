@@ -171,3 +171,29 @@ test('Ctrl+C during prompt admission waits for admission before sending cancella
   assert.equal(await interrupt, false);
   assert.equal(fixture.calls.at(-1)?.method, 'session/cancel');
 });
+
+
+test('replayed questions survive startup, picker navigation and reconnect without declining the request', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const frame = { type: 'waterfall', event: 'user-questions/request', eventId: 'question-1', agentId: 's1',
+    request: { questions: [{ id: 'q1', question: 'Two decisions before I commit', options: [{ label: 'Review first' }] }] } };
+  fixture.replayInteractions = [frame];
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.state.transcript.ready && controller.state.pending.length === 1);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+  await controller.showPicker('workspaces');
+  assert.equal(controller.state.pending.length, 0);
+  await controller.selectSession('s1');
+  await until(() => controller.state.pending.length === 1);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+  fixture.disconnect();
+  await until(() => !controller.state.online);
+  await until(() => controller.state.online && controller.state.transcript.ready && controller.state.pending.length === 1);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+  await controller.answer({ answers: [{ id: 'q1', selected: ['Review first'] }] });
+  assert.equal(controller.state.pending.length, 0);
+  const reply = object(object(fixture.calls.find(call => call.method === '$events/result')!.payload).args);
+  assert.equal(object(reply.outcome).kind, 'result');
+});

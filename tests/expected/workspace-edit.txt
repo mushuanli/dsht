@@ -8,13 +8,11 @@ Current DSH file policy: danger-full-access. The DSH file sandbox does not restr
 
 Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox escalation (do not set `sandbox_permissions`).
 
-⚙ bash · Append WORLD to greeting.txt
-
 ✓ bash · Append WORLD to greeting.txt
-
-⚙ bash · Read greeting.txt to confirm
+  $ printf 'WORLD
 
 ✓ bash · Read greeting.txt to confirm
+  $ cat greeting.txt
 
 Assistant
 DONE

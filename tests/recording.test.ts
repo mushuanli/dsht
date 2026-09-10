@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { historyLayout } from '../src/history.ts';
 import { Transcript } from '../src/transcript.ts';
 import { object } from '../src/wire.ts';
 
@@ -16,8 +17,9 @@ test('recorded workspace editing displays tool calls, results, and final assista
   const actual = transcript.messages.map(message => `${message.compact ? '' : message.role + '\n'}${message.text}`).join('\n\n') + '\n';
   const expected = readFileSync(new URL('./expected/workspace-edit.txt', import.meta.url), 'utf8');
   assert.equal(actual, expected);
+  assert.equal(historyLayout(transcript, 80).lines.join('\n') + '\n', readFileSync(new URL('./expected/workspace-edit-terminal.txt', import.meta.url), 'utf8'));
   assert.equal(transcript.messages.at(-1)?.text, 'DONE');
-  assert(transcript.messages.some(message => message.role === 'Tool'));
+  assert.equal(transcript.messages.filter(message => message.parts.some(part => part.kind === 'success')).length, 2);
 });
 
 test('recorded legacy packed reasoning, tools and text project only their committed messages', () => {
@@ -27,6 +29,6 @@ test('recorded legacy packed reasoning, tools and text project only their commit
   assert.equal(transcript.ready, true);
   assert.equal(transcript.liveText, '');
   assert.equal(transcript.messages.filter(message => message.role === 'Assistant').length, 2);
-  assert(transcript.messages.some(message => message.role === 'Tool' && message.text === '✗ bash · Run echo HELLO'));
+  assert(transcript.messages.some(message => message.parts.some(part => part.kind === 'error' && part.text.startsWith('✗ bash · Run echo HELLO'))));
   assert(transcript.messages.at(-1)?.text.includes('bash is disabled by policy'));
 });

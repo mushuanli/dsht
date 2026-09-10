@@ -10,6 +10,9 @@ export class Telemetry {
   private jobs = new Map<string, number>();
   ready = false;
 
+  /** Optionally retain only projection capabilities consumed by this client. */
+  constructor(private readonly retainedKeys?: ReadonlySet<string>) {}
+
   /** Replace all control state on a new stream baseline, then accept replacement frames.
    * @param value - One decoded session/control frame.
    */
@@ -32,6 +35,7 @@ export class Telemetry {
       const seq = sequence(frame.seq);
       if (seq < (entry.revisions.get(key) ?? entry.baseline)) return;
       if (frame.value === undefined) throw new Error('Missing projection value');
+      if (this.retainedKeys && !this.retainedKeys.has(key)) return;
       entry.values[key] = frame.value;
       entry.revisions.set(key, seq);
     } else if (frame.type === 'queue') this.queues.set(id, array(frame.items).length);
@@ -51,6 +55,7 @@ export class Telemetry {
     const entry = this.entry(id);
     if (seq < entry.baseline) return;
     for (const key of new Set([...Object.keys(entry.values), ...Object.keys(values)])) {
+      if (this.retainedKeys && !this.retainedKeys.has(key)) continue;
       if ((entry.revisions.get(key) ?? -1) > seq) continue;
       if (Object.hasOwn(values, key)) entry.values[key] = values[key]!;
       else delete entry.values[key];

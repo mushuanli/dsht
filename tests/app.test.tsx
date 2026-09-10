@@ -5,9 +5,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React, { act, useEffect } from 'react';
 import { render } from 'ink-testing-library';
-import { App, commonPrefix } from '../src/app.tsx';
+import { App, COMMAND_HINTS, commonPrefix } from '../src/app.tsx';
 import { Controller } from '../src/controller.ts';
-import { array, object } from '../src/wire.ts';
+import { array, object, type ObjectValue } from '../src/wire.ts';
 import { host, until } from './host.ts';
 import { StatusBar } from '../src/status.tsx';
 
@@ -69,14 +69,14 @@ test('startup requires workspace and session selection before showing the compos
   await press('\r');
   await until(() => controller.state.screen === 'sessions' && !controller.state.busy);
   await until(() => !ui.lastFrame()?.includes('/ws Project α'));
-  await press('/s s1');
-  await until(() => ui.lastFrame()?.includes('/s s1') === true);
+  await press('/resume s1');
+  await until(() => ui.lastFrame()?.includes('/resume s1') === true);
   await press('\r');
   await until(() => controller.state.screen === 'chat' && controller.state.sessionId === 's1')
     .catch(error => { throw new Error(`${error}\n${ui.lastFrame()}\n${controller.state.error}`); });
   await until(() => !controller.state.busy);
-  await press('/s all');
-  await until(() => ui.lastFrame()?.includes('/s all') === true);
+  await press('/resume all');
+  await until(() => ui.lastFrame()?.includes('/resume all') === true);
   await press('\r');
   await until(() => ui.lastFrame()?.includes('Choose session · All workspaces') === true);
   assert.equal(controller.visibleSessions.length, 2);
@@ -170,6 +170,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   const fixture = await host(); t.after(() => fixture.close());
   fixture.controlBaseline = { projections: { s1: { asOfSeq: 5, values: {
     modelSelection: { lastUsed: { provider: 'p', model: 'chat' }, next: { provider: 'p', model: 'chat' } },
+    sessionStats: { turns: 42 },
     contextPressure: { projectedTokens: 25, contextWindow: 100 },
     tokenUsage: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 300, cacheWriteTokens: 400 },
   } } }, queues: { s1: [1, 2] }, jobs: { s1: [{ status: 'running' }] } };
@@ -177,10 +178,11 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
-  await until(() => controller.state.transcript.ready && ui.lastFrame()?.includes('tok: 1K') === true);
-  const compact = ui.lastFrame()!.split('\n').find(line => line.includes('ctx:'))!;
-  assert.match(compact, /ws: Project α.*ctx: ~25%.*tok: 1K/);
+  await until(() => controller.state.transcript.ready && ui.lastFrame()?.includes('1K tok') === true);
+  const compact = ui.lastFrame()!.split('\n').find(line => line.includes('1K tok'))!;
+  assert.match(compact, /● Ready.*chat.*~25%.*1K tok/);
   assert.equal(ui.lastFrame()?.includes('Workspace:'), false);
+  assert.match(ui.lastFrame()!, /dsht · 127\.0\.0\.1.*First conversation.*● Connected/);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Tokens: 1,000 total') === true);
@@ -188,9 +190,12 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
     assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
   }
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
-  await until(() => ui.lastFrame()?.includes('Working 0m 1s') === true);
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Working · 1s') === true);
   fixture.control({ type: 'projection', sessionId: 's1', key: 'contextPressure', seq: 6, value: { projectedTokens: 50, contextWindow: 100 } });
   fixture.control({ type: 'queue', sessionId: 's1', items: [] });
+  await until(() => controller.telemetry.view('s1').queued === 0);
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Context: ~50%') === true && ui.lastFrame()?.includes('Queued: 0') === true);
   await pressKey(ui, '\u001b');
   await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
@@ -203,11 +208,13 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   fixture.disconnect();
   await until(() => !controller.state.online);
   await until(() => controller.state.transcript.ready && controller.state.online);
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Context: unknown') === true);
   assert.equal(ui.lastFrame()?.includes('Tokens: 1,000 total'), false);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('ctx: ?') === true);
+  await until(() => ui.lastFrame()?.includes('ctx ?') === true);
   assert.equal(ui.lastFrame()?.includes('Workspace:'), false);
 });
 
@@ -226,6 +233,10 @@ test('hosts without a control stream show unknown metrics and refresh catalog de
   assert.match(ui.lastFrame()!, /Tokens: \? total/);
   fixture.defaultModel = { provider: 'fixture', model: 'new-default' };
   fixture.emit({ type: 'emit', event: 'settings/document-updated', args: [] });
+  await until(() => controller.state.defaultModel?.model === 'new-default');
+  assert.match(ui.lastFrame()!, /Model: fixture\/chat/);
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Model: fixture/new-default') === true);
   assert.equal(controller.state.online, true);
 });
@@ -418,9 +429,9 @@ test('header follows session titles and Esc cancels despite a stale idle flag, r
   const ui = render(<App controller={controller} />);
   t.after(async () => { release?.(); ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
-  await until(() => ui.lastFrame()?.includes('Project α / First conversation') === true);
+  await until(() => ui.lastFrame()?.includes('First conversation') === true);
   fixture.control({ type: 'projection', sessionId: 's1', key: 'title', seq: 1, value: { title: 'Readable session title' } });
-  await until(() => ui.lastFrame()?.includes('Project α / Readable session title') === true);
+  await until(() => ui.lastFrame()?.includes('Readable session title') === true);
   assert.equal(controller.running, false);
   await pressKey(ui, '\x1b');
   await until(() => release !== undefined);
@@ -476,7 +487,7 @@ test('closing an idle client sends no cancellation', async t => {
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
-test('/think folds committed reasoning and expands it again', async t => {
+test('/think lists prompt summaries, expands the selected thought, and supports folding it again', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   const ui = render(<App controller={controller} />);
@@ -489,15 +500,18 @@ test('/think folds committed reasoning and expands it again', async t => {
   await until(() => ui.lastFrame()?.includes('Answer') === true);
   assert.equal(ui.lastFrame()?.includes('closing detail'), false);
   await pressKey(ui, '/think'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Reasoning: expanded') === true);
-  assert.equal(ui.lastFrame()?.includes('closing detail'), true);
-  await pressKey(ui, '/think'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Reasoning: folded') === true);
+  await until(() => ui.lastFrame()?.includes('Reasoning history · User prompts') === true);
+  assert.ok(ui.lastFrame()?.includes('#1 User · 你好'));
+  assert.equal(fixture.calls.some(call => call.method === 'session/page'), false);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Reasoning history · User prompts') === false && ui.lastFrame()?.includes('closing detail') === true);
+  await pressKey(ui, '/think 1'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('closing detail') === false);
   assert.equal(ui.lastFrame()?.includes('closing detail'), false);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
 });
 
-test('a slash-command panel closes on the next command or after its lifetime', async t => {
+test('a slash-command panel stays open for reading and closes on another command', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   const ui = render(<App controller={controller} panelLifetimeMs={150} />);
@@ -506,11 +520,19 @@ test('a slash-command panel closes on the next command or after its lifetime', a
   await until(() => controller.state.transcript.ready);
   await pressKey(ui, '/help'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('/ws [name or ID]') === true);
+  // Every advertised command shows its one-line description.
+  const helpFrame = ui.lastFrame()!;
+  for (const hint of COMMAND_HINTS) {
+    assert.ok(helpFrame.includes(hint.command) && helpFrame.includes(hint.description), `${hint.command}: ${helpFrame}`);
+  }
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Session ID: s1') === true);
   // The next command replaced the previous panel.
   assert.equal(ui.lastFrame()!.includes('/ws [name or ID]'), false);
-  // Without another command the panel closes on its own.
+  // Background timers do not dismiss a panel while the user is reading or copying.
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.match(ui.lastFrame()!, /Session ID: s1/);
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Session ID: s1') === false);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
 });
@@ -545,18 +567,18 @@ test('cost coverage warns through the status prefix instead of rewriting a subto
     return frame;
   };
   // With nothing cached the prefix warns, and no subtotal claims incompleteness of its own.
-  assert.match(bar(), /! Idle/);
-  assert.match(bar(), /S:\? D:~¥0\.0000(?!\*)/);
+  assert.match(bar(), /! ● Ready/);
+  assert.match(bar(), /\?\/~¥0\.00(?!\*)/);
   await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T10:00:00+08:00'),
     type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
       message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]));
   // Charges cached by an earlier run already cover the history, so the bar stops warning.
   const cached = bar();
-  assert.doesNotMatch(cached, /! Idle/);
-  assert.match(cached, /S:~¥2\.0000/);
+  assert.doesNotMatch(cached, /! ● Ready/);
+  assert.match(cached, /~¥2\.00\//);
   assert.match(bar(true), /Cost \(CNY estimate\): Session ~¥2\.0000/);
   ledger.error = 'scan failed';
-  assert.match(bar(), /! Idle/);
+  assert.match(bar(), /! ● Ready/);
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);
 });
 
@@ -574,4 +596,281 @@ test('Tab completes a slash command and stops at an ambiguous shared prefix', as
   await pressKey(ui, '\u0015');
   await pressKey(ui, '/he'); await pressKey(ui, '\t');
   await until(() => ui.lastFrame()?.includes('❯ /help') === true);
+});
+
+test('title and status fit terminal widths and keep model alignment when working completes', async t => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
+  Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', previous);
+    else Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
+  });
+  const controller = new Controller('http://x1:4096', undefined);
+  controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
+    sessions: [{ sessionId: 's1', running: true }], workspaceId: 'w1',
+    workspaces: [{ workspaceId: 'w1', title: 'Workspace 示例', path: '/workspace' }] };
+  controller.state.transcript.addPage({ records: [{ type: 'event', event: { seq: 0, type: 'turn/start', time: Date.now() - 8000, data: { turn: 42 } } }], hasMore: false });
+  controller.telemetry.accept({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
+    title: { title: '中文会话标题'.repeat(20) },
+    modelSelection: { next: { provider: 'p', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' } },
+    sessionStats: { turns: 42 }, contextPressure: { projectedTokens: 25, contextWindow: 100 },
+    tokenUsage: { uncachedInputTokens: 166_200_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  } } }, queues: {}, jobs: {} } });
+  let ui!: ReturnType<typeof render>;
+  await act(async () => { ui = render(<App controller={controller} />); });
+  t.after(() => { ui.unmount(); ui.cleanup(); });
+  let columns = 140;
+  Object.defineProperty(ui.stdout, 'columns', { get: () => columns });
+  const refresh = async () => { await act(async () => { ui.rerender(<App controller={controller} />); }); };
+  await refresh();
+  assert.match(ui.lastFrame()!.split('\n')[0]!, /dsht · x1.*Workspace 示例 · 中文会话标题.*● Connected/);
+  const working = ui.lastFrame()!.split('\n').find(line => line.includes('◐ Working'))!;
+  assert.match(working, /◐ Working · 8s · Ctrl\+C Stop.*v4.1-flash · high.*███░░░░░░░ ~25%.*42 turns · 166.2M tok/);
+  controller.state = { ...controller.state, version: 1, sessions: [{ sessionId: 's1', running: false }] };
+  await refresh();
+  const ready = ui.lastFrame()!.split('\n').find(line => line.includes('● Ready'))!;
+  assert.equal(ready.indexOf('v4.1-flash'), working.indexOf('v4.1-flash'));
+  assert.doesNotMatch(ready, /Working|Ctrl\+C Stop/);
+  for (columns of [80, 40, 24, 12]) {
+    await refresh();
+    const lines = ui.lastFrame()!.split('\n');
+    assert.match(lines[0]!, columns >= 24 ? /dsht.*● Connected/ : /● Connect/);
+    assert.equal(lines[1]!.trim(), '─'.repeat(Math.max(10, columns - 2)));
+  }
+});
+
+test('/think loads older summaries on demand and can open reasoning from the active attempt', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 5, hasMore: true, assistantStream: { revision: 0 }, records: [
+    { type: 'event', event: { seq: 5, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Current prompt' }] } } },
+  ] };
+  fixture.onPage = async (): Promise<ObjectValue> => ({ hasMore: false, records: [
+    { type: 'event', event: { seq: 0, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Older prompt' }] } } },
+    { type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'reasoning', text: 'Older thought detail' }] } } } },
+  ] });
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/think'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('No reasoning in loaded history') === true);
+  assert.equal(fixture.calls.some(call => call.method === 'session/page'), false);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('#1 User · Older prompt') === true);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, 1);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Reasoning history · User prompts') === false);
+  assert.ok(ui.lastFrame()?.includes('Older thought detail'));
+  fixture.follow({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  fixture.follow({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', index: 0, revision: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'Current thought detail' } } });
+  fixture.follow({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', index: 1, revision: 3, chunk: { type: 'text-delta', index: 1, text: 'Answer' } } });
+  await until(() => controller.state.transcript.liveParts(80).length === 2);
+  await pressKey(ui, '/think'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Now · User · Current prompt') === true);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Reasoning history · User prompts') === false);
+  assert.ok(ui.lastFrame()?.includes('Current thought detail'));
+});
+
+test('long conversations keep the header visible and show keyboard help only when requested', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  fixture.follow({ type: 'event', event: { seq: 10, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: Array.from({ length: 100 }, (_, i) => `Response line ${i}`).join('\n') }] } } } });
+  await until(() => ui.lastFrame()?.includes('Response line 99') === true);
+  const header = ui.lastFrame()!.split('\n')[0]!;
+  assert.match(header, /dsht.*First conversation.*● Connected/);
+  assert.ok(ui.lastFrame()!.split('\n').length <= 30);
+  assert.ok(!ui.lastFrame()?.includes('Enter send · Tab complete'));
+  await pressKey(ui, '\x1b[5~');
+  await until(() => ui.lastFrame()?.includes('Response line 99') === false);
+  assert.equal(ui.lastFrame()!.split('\n')[0], header);
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Enter send · Tab complete') === true);
+  assert.equal(ui.lastFrame()!.split('\n')[0], header);
+});
+
+test('search opens an isolated old page and /latest returns to new live messages', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 50, hasMore: true, assistantStream: { revision: 0 }, records: [
+    { type: 'event', event: { seq: 50, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Recent prompt' }] } } },
+  ] };
+  fixture.onPage = async (): Promise<ObjectValue> => ({ records: [
+    { type: 'event', event: { seq: 0, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'needle from an older page' }] } } },
+  ], hasMore: false });
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  const live = controller.state.transcript;
+  await pressKey(ui, '/search needle'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('#0 You · needle from an older page') === true);
+  assert.equal(live.retainedRecordCount, 1);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Earlier history · /latest') === true);
+  fixture.follow({ type: 'event', event: { seq: 51, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: 'New live answer' }] } } } });
+  await until(() => live.messages.some(message => message.seq === 51));
+  assert.ok(!ui.lastFrame()?.includes('New live answer'));
+  await pressKey(ui, '/latest'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('New live answer') === true);
+  assert.ok(!ui.lastFrame()?.includes('Earlier history · /latest'));
+  assert.equal(controller.state.transcript, live);
+});
+
+
+test('/model uses the host catalog and exact model/effort selection API', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.modelCatalog = { routableProviders: ['route'], failures: [{ id: 'broken', name: 'Broken provider', message: 'offline' }], groups: [
+    { id: 'route', name: 'Provider', models: [{ id: 'model-x', name: 'Model X', reasoning: { defaultEffort: 'high', efforts: [{ id: 'high', name: 'High' }] } }] },
+  ] };
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/model'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Choose model') === true);
+  assert.match(ui.lastFrame()!, /Broken provider: offline/);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Choose reasoning effort') === true);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\r');
+  await until(() => fixture.calls.some(call => call.method === 'session/selectModel'));
+  const request = object(object(object(fixture.calls.find(call => call.method === 'session/selectModel')!.payload).args).request);
+  assert.deepEqual({ ...request }, { sessionId: 's1', provider: 'route', model: 'model-x', reasoningEffort: 'high' });
+  await until(() => !controller.state.busy);
+  fixture.control({ type: 'projection', sessionId: 's1', key: 'modelSelection', seq: 2, value: { lastUsed: null, next: { provider: 'route', model: 'model-x', reasoningEffort: 'high' } } });
+  await until(() => ui.lastFrame()?.includes('model-x · high') === true);
+  fixture.presets = [...['standard', 'ptc', 'minimal', 'cordis'].map(id => ({ id, trust: 'system' })),
+    { id: 'custom', trust: 'user', name: 'My review mode' }];
+  let seq = 3;
+  for (const [id, name] of [['standard', 'Standard mode'], ['ptc', 'PTC mode'], ['minimal', 'Minimal mode'], ['cordis', 'Creator mode'], ['custom', 'My review mode'], ['missing', 'missing']]) {
+    fixture.control({ type: 'projection', sessionId: 's1', key: 'agentPreset', seq: seq++, value: id! });
+    await until(() => ui.lastFrame()?.split('\n')[0]?.includes(name!) === true);
+  }
+  assert.equal(fixture.calls.filter(call => call.method === 'agentPresets/list').length, 1);
+  fixture.control({ type: 'projection', sessionId: 's1', key: 'plan', seq: 10, value: { active: true, pending: false } });
+  assert.doesNotMatch(ui.lastFrame()!.split('\n')[0]!, /Plan|Execute/);
+  fixture.businessError = true;
+  await assert.rejects(controller.selectModel('route', 'missing'), /busy/);
+  assert.equal(object(controller.telemetry.view('s1').values.modelSelection).next !== null, true);
+  fixture.businessError = false;
+  fixture.modelCatalog = { routableProviders: ['route'], failures: [], groups: [
+    { id: 'route', name: 'Provider', models: [{ id: 'plain', name: 'Plain' }] },
+  ] };
+  await pressKey(ui, '/model'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Choose model') === true);
+  await pressKey(ui, '\r');
+  await until(() => fixture.calls.filter(call => call.method === 'session/selectModel').length === 3);
+  assert.deepEqual({ ...object(object(object(fixture.calls.filter(call => call.method === 'session/selectModel').at(-1)!.payload).args).request) },
+    { sessionId: 's1', provider: 'route', model: 'plain' });
+  await until(() => !controller.state.busy);
+  await pressKey(ui, '/model route model-x high'); await pressKey(ui, '\r');
+  await until(() => fixture.calls.filter(call => call.method === 'session/selectModel').length === 4);
+});
+
+
+test('workspace removal and session archival require confirmation and preserve host history', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  const command = async (value: string) => { await pressKey(ui, value); await pressKey(ui, '\r'); await until(() => !controller.state.busy); };
+  await command('/ws');
+  await pressKey(ui, '\x7f');
+  assert.doesNotMatch(ui.lastFrame()!, /Remove workspace registration/);
+  await pressKey(ui, 'd');
+  await until(() => ui.lastFrame()?.includes('Remove workspace registration?') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /❯ d/);
+  await pressKey(ui, '\x1b');
+  await pressKey(ui, '/d');
+  assert.doesNotMatch(ui.lastFrame()!, /Remove workspace registration/);
+  await pressKey(ui, '\x03');
+  await pressKey(ui, '\u001b[3~');
+  await until(() => ui.lastFrame()?.includes('Remove workspace registration?') === true);
+  assert.match(ui.lastFrame()!, /ID: w1/);
+  assert.match(ui.lastFrame()!, /Directory and sessions are kept/);
+  await pressKey(ui, '\r'); // Cancel is the default choice.
+  assert.equal(fixture.calls.some(call => call.method === 'workspace/delete'), false);
+  await command('/resume --delete s1');
+  await until(() => ui.lastFrame()?.includes('Archive session?') === true);
+  assert.equal(fixture.calls.some(call => call.method === 'workspace/archiveSession'), false);
+  const old = controller.state.transcript;
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\r');
+  await until(() => fixture.calls.some(call => call.method === 'workspace/archiveSession') && !controller.state.busy);
+  assert.equal(controller.visibleSessions.some(row => row.sessionId === 's1'), false);
+  assert.equal(old.retainedRecordCount, 0);
+  await command('/resume all');
+  assert.equal(controller.visibleSessions.some(row => row.sessionId === 's1'), false);
+  await command('/resume s1');
+  await until(() => controller.state.transcript.ready);
+  assert.equal(controller.state.sessionId, 's1');
+  await command('/ws --delete w1');
+  await until(() => ui.lastFrame()?.includes('Remove workspace registration?') === true);
+  fixture.businessError = true;
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\r');
+  await until(() => !controller.state.busy && controller.state.error.includes('busy'));
+  assert.equal(controller.state.workspaces.length, 1);
+  assert.match(ui.lastFrame()!, /Remove workspace registration/);
+  fixture.businessError = false;
+  await pressKey(ui, '\r');
+  await until(() => controller.state.workspaces.length === 0 && !controller.state.busy);
+  assert.equal(controller.state.sessionId, 's1');
+  assert.equal(controller.state.transcript.ready, true);
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+});
+
+
+test('empty sessions archive without confirmation after a fresh blank-state check', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.blank = true;
+  fixture.followSnapshot = { type: 'snapshot', cursor: 0, hasMore: false, header: { id: 's1' }, records: [], assistantStream: { revision: 0 } };
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/resume'); await pressKey(ui, '\r');
+  await until(() => controller.state.screen === 'sessions' && !controller.state.busy);
+  await pressKey(ui, '\u001b[B'); // Skip New session.
+  fixture.blank = false; // The picker is stale; the removal read must observe this change.
+  await pressKey(ui, 'd');
+  await until(() => ui.lastFrame()?.includes('Archive session?') === true);
+  assert.equal(fixture.calls.some(call => call.method === 'workspace/archiveSession'), false);
+  await pressKey(ui, '\x1b');
+  fixture.blank = true;
+  await pressKey(ui, '/resume --delete s1'); await pressKey(ui, '\r');
+  await until(() => fixture.calls.some(call => call.method === 'workspace/archiveSession') && !controller.state.busy);
+  assert.doesNotMatch(ui.lastFrame()!, /Archive session\?/);
+  assert.equal(controller.visibleSessions.some(row => row.sessionId === 's1'), false);
+});
+
+
+test('copy mode freezes streaming and clocks; dialogs freeze their background until closed', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => ui.lastFrame()?.includes('Working') === true);
+  await pressKey(ui, '/copy'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Copy mode') === true);
+  const frozen = ui.lastFrame();
+  fixture.follow({ type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Arrived during copy' }] } } });
+  await until(() => controller.state.transcript.messages.some(message => message.text.includes('Arrived during copy')));
+  await new Promise(resolve => setTimeout(resolve, 1150));
+  assert.equal(ui.lastFrame(), frozen);
+  await pressKey(ui, '\x1b');
+  await until(() => ui.lastFrame()?.includes('Arrived during copy') === true);
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+  await pressKey(ui, '/model'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Choose model') === true);
+  const dialog = ui.lastFrame();
+  fixture.control({ type: 'projection', sessionId: 's1', key: 'title', seq: 3, value: 'Background title changed' });
+  await new Promise(resolve => setTimeout(resolve, 1150));
+  assert.equal(ui.lastFrame(), dialog);
+  await pressKey(ui, '\x1b');
+  await until(() => ui.lastFrame()?.includes('Background title changed') === true);
 });

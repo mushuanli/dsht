@@ -49,9 +49,11 @@ export function editInput(state: EditState, input: string, key: Partial<Key>): E
 }
 
 /** Controlled composer with local cursor and kill buffer; Enter submission belongs to the caller. */
-export function TextInput({ value, onChange, onCursorChange, onSubmit, focus, placeholder }: {
+export function TextInput({ value, onChange, onCursorChange, onSubmit, focus, placeholder, reservedKeys }: {
   value: string; onChange(value: string): void; onCursorChange(cursor: number): void;
   onSubmit(): void; focus: boolean; placeholder: string;
+  /** Keys owned by the surrounding picker while the composer is empty. */
+  reservedKeys?: readonly string[];
 }) {
   const { internal_eventEmitter } = useStdin();
   const rawKey = useRef('');
@@ -67,6 +69,7 @@ export function TextInput({ value, onChange, onCursorChange, onSubmit, focus, pl
   if (current.current.text !== value) current.current = { ...current.current, text: value, cursor: value.length };
   useInput((input, key) => {
     if (key.eventType === 'release' || isMouseReport(rawKey.current)) return;
+    if (!current.current.text && !key.ctrl && !key.meta && reservedKeys?.includes(input)) return;
     if (key.return) { onSubmit(); return; }
     const before = current.current;
     const backspace = rawKey.current === '\x7f' || rawKey.current === '\x1b\x7f'

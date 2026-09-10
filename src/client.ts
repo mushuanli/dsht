@@ -156,6 +156,9 @@ export class Client {
     } };
   }
 
+  /** Archived session IDs from the latest authoritative workspace baseline. */
+  archivedSessionIds: ReadonlySet<string> = new Set();
+
   /** List workspaces by consuming and cancelling the authoritative opening baseline. */
   async listWorkspaces(): Promise<ObjectValue[]> {
     return new Promise((resolve, reject) => {
@@ -168,6 +171,7 @@ export class Client {
           try {
             const frame = object(value);
             if (frame.type !== 'baseline') throw new Error('Workspace stream omitted its baseline');
+            this.archivedSessionIds = new Set(array(object(frame.value).archivedSessionIds).map(string));
             resolve(array(object(frame.value).items).map(object));
           } catch (error) { reject(error); }
         },

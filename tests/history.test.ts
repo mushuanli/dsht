@@ -11,7 +11,7 @@ test('history offsets refer to visible messages', () => {
   const transcript = new Transcript(); transcript.accept(snapshot);
   const layout = historyLayout(transcript, 30);
   assert.equal(layout.offsets.get(0), 0);
-  assert.deepEqual(layout.lines, ['You', '你好', '']);
+  assert.deepEqual(layout.lines, ['❯ User', '你好', '']);
 });
 
 test('mouse decoding ignores buttons, motion, releases and horizontal wheels', () => {
@@ -50,4 +50,44 @@ test('paging stops on an unadvancing host page and respects cancellation', async
   await assert.rejects(controller.historyThrough('first', new AbortController().signal), /did not advance/);
   const abort = new AbortController(); abort.abort();
   await assert.rejects(controller.historyThrough('first', abort.signal), { name: 'AbortError' });
+});
+
+test('stream frames reuse the history index, bound row caching, and retrieve evicted rows on demand', () => {
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, records: Array.from({ length: 1500 }, (_, seq) => ({ type: 'event', event: {
+    seq, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: `Message ${seq}` }] } },
+  } })) });
+  const first = historyLayout(transcript, 80);
+  assert.equal(first.length, 4500);
+  assert.ok(first.cachedRowCount <= 2048);
+  const oldest = first.messages[0]!;
+  const parts = oldest.parts;
+  let oldReads = 0;
+  Object.defineProperty(oldest, 'parts', { get() { oldReads++; return parts; } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', index: 0, revision: 2,
+    chunk: { type: 'text-delta', index: 0, text: 'Live answer' } } });
+  const next = historyLayout(transcript, 80);
+  assert.equal(next.offsets, first.offsets);
+  assert.equal(next.viewport(next.length - 2, next.length).at(-1)?.text, 'Live answer');
+  assert.equal(oldReads, 0);
+  assert.equal(next.viewport(0, 3)[1]?.text, 'Message 0');
+  assert.equal(oldReads, 1);
+  assert.ok(next.cachedRowCount <= 2048);
+});
+
+test('individual reasoning folds preserve complete searchable text and other messages', () => {
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, records: [1, 2].map(seq => ({ type: 'event', event: {
+    seq, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [
+      { type: 'reasoning', text: 'Long thought '.repeat(30) + `needle-${seq}` }, { type: 'text', text: `Answer ${seq}` },
+    ] } },
+  } })) });
+  const folded = historyLayout(transcript, 40);
+  assert.ok(folded.lines.some(line => line.includes('/think 1')));
+  assert.ok(!folded.lines.some(line => line.includes('needle-1')));
+  const expanded = historyLayout(transcript, 40, 'row', new Set([1]));
+  assert.ok(expanded.lines.some(line => line.includes('needle-1')));
+  assert.ok(!expanded.lines.some(line => line.includes('needle-2')));
+  assert.ok(transcript.messages[1]!.text.includes('needle-2'));
 });
