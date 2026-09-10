@@ -8,7 +8,7 @@ import { render } from 'ink-testing-library';
 import { App, COMMAND_HINTS, commonPrefix } from '../src/app.tsx';
 import { Controller } from '../src/controller.ts';
 import { array, object, type ObjectValue } from '../src/wire.ts';
-import { host, until } from './host.ts';
+import { host, snapshot, until } from './host.ts';
 import { StatusBar } from '../src/status.tsx';
 
 test('startup requires workspace and session selection before showing the composer', async t => {
@@ -873,4 +873,129 @@ test('copy mode freezes streaming and clocks; dialogs freeze their background un
   assert.equal(ui.lastFrame(), dialog);
   await pressKey(ui, '\x1b');
   await until(() => ui.lastFrame()?.includes('Background title changed') === true);
+});
+
+test('question options support numbers, arrows, multi-selection and numeric custom answers', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'choices', agentId: 's1', request: { questions: [
+    { id: 'one', header: 'Destination', question: 'Choose a target', options: [{ label: 'First', description: 'First description' }, { label: 'Second' }] },
+    { id: 'many', question: 'Choose features', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] },
+    { id: 'custom', question: 'Choose a count', options: [{ label: 'Default' }] },
+  ] } }];
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => ui.lastFrame()?.includes('Choose a target') === true);
+  assert.match(ui.lastFrame()!, /Question 1\/3 · Destination/);
+  assert.match(ui.lastFrame()!, /First description/);
+  await pressKey(ui, '2');
+  assert.match(ui.lastFrame()!, /❯ 2\. Second/);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Choose features') === true);
+  await pressKey(ui, '1');
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, ' ');
+  assert.match(ui.lastFrame()!, /1\. \[x\] A/);
+  assert.match(ui.lastFrame()!, /2\. \[x\] B/);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Choose a count') === true);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Esc returns to options') === true);
+  await pressKey(ui, '2'); await pressKey(ui, '0'); await pressKey(ui, '2'); await pressKey(ui, '6');
+  fixture.businessError = true;
+  await pressKey(ui, '\r');
+  await until(() => controller.state.error.includes('busy') && !controller.state.busy);
+  assert.match(ui.lastFrame()!, /2026/);
+  assert.equal(controller.state.pending.length, 1);
+  fixture.businessError = false;
+  await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0);
+  const reply = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
+  assert.deepEqual(object(reply.outcome).value, { answers: [
+    { id: 'one', selected: ['Second'] }, { id: 'many', selected: ['A', 'B'] }, { id: 'custom', selected: [], custom: '2026' },
+  ] });
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt' || call.method === 'session/cancel'), false);
+});
+
+test('advancing questions preserves every option label beside descriptions in a long session', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 49, hasMore: false, header: { id: 's1' }, assistantStream: { revision: 0 },
+    records: Array.from({ length: 50 }, (_, seq) => ({ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: `Old prompt ${seq} ${'history '.repeat(30)}` }] } } })) };
+  fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'two-decisions', agentId: 's1', request: { questions: [
+    { id: 'first', question: 'Commit locally?', options: [{ label: 'Commit' }, { label: 'Wait' }] },
+    { id: 'second', header: 'After commit', question: 'After committing, how far should I go? (currently local only, version 0.2.2)', options: [
+      { label: 'Push only', description: 'Pushes da0e395 to origin/main without triggering npm publish.' },
+      { label: 'Publish release', description: 'Tag v0.2.2 triggers publish.yml and publishes to npm. Irreversible.' },
+      { label: 'Keep local', description: 'Keep the commit local until you confirm.' },
+    ] },
+  ] } }];
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  Object.defineProperty(ui.stdout, 'columns', { value: 180, configurable: true });
+  Object.defineProperty(ui.stdout, 'rows', { value: 28, configurable: true });
+  controller.start(); await until(() => controller.state.transcript.ready && ui.lastFrame()?.includes('Commit locally?') === true);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('After committing, how far') === true);
+  const frame = ui.lastFrame()!;
+  for (const text of ['Question 2/2 · After commit', '❯ 1. Push only', '2. Publish release', '3. Keep local', '4. Other answer', 'Irreversible.']) {
+    assert.ok(frame.includes(text), `${text}\n${frame}`);
+  }
+  await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ 2\. Publish release/);
+  Object.defineProperty(ui.stdout, 'rows', { value: 20, configurable: true });
+  ui.rerender(<App controller={controller} />);
+  await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ 3\. Keep local/);
+  assert.match(ui.lastFrame()!, /Enter confirm/);
+  await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ 4\. Other answer/);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+});
+
+test('composer recalls submitted prompts and commands while preserving its unsent draft', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  for (const text of ['first prompt', 'second prompt']) {
+    await pressKey(ui, text); await pressKey(ui, '\r');
+    await until(() => !controller.state.busy);
+  }
+  await pressKey(ui, 'unfinished draft');
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ second prompt/);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ first prompt/);
+  await pressKey(ui, '\u001b[B'); assert.match(ui.lastFrame()!, /❯ second prompt/);
+  await pressKey(ui, '\u001b[B'); assert.match(ui.lastFrame()!, /❯ unfinished draft/);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 2);
+  await pressKey(ui, '\x03');
+  await pressKey(ui, '/latest'); await pressKey(ui, '\r');
+  await until(() => !controller.state.busy);
+  await pressKey(ui, '\x10'); assert.match(ui.lastFrame()!, /❯ \/latest/);
+  await pressKey(ui, '\x0e'); assert.doesNotMatch(ui.lastFrame()!, /❯ \/latest/);
+  await pressKey(ui, '\u001b[A'); await pressKey(ui, ' edited');
+  await pressKey(ui, '\u001b[B'); assert.match(ui.lastFrame()!, /❯ \/latest edited/);
+});
+
+
+test('restored session prompts are available before any new submission', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { ...snapshot, records: [
+    ...snapshot.records,
+    { type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append', data: {
+      content: [{ type: 'text', text: 'latest saved prompt' }] } } },
+    { type: 'event', event: { seq: 2, type: 'user/message', surfaceOp: 'append', data: {
+      source: { kind: 'system' }, content: [{ type: 'text', text: 'injected context' }] } } },
+  ] };
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, 'unsent draft');
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ latest saved prompt/);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ 你好/);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ unsent draft/);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
 });

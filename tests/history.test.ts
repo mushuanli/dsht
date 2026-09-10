@@ -58,7 +58,7 @@ test('stream frames reuse the history index, bound row caching, and retrieve evi
     seq, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: `Message ${seq}` }] } },
   } })) });
   const first = historyLayout(transcript, 80);
-  assert.equal(first.length, 4500);
+  assert.equal(first.length, 3001);
   assert.ok(first.cachedRowCount <= 2048);
   const oldest = first.messages[0]!;
   const parts = oldest.parts;
@@ -90,4 +90,38 @@ test('individual reasoning folds preserve complete searchable text and other mes
   assert.ok(expanded.lines.some(line => line.includes('needle-1')));
   assert.ok(!expanded.lines.some(line => line.includes('needle-2')));
   assert.ok(transcript.messages[1]!.text.includes('needle-2'));
+});
+
+
+test('assistant headings group by user across tools, context, streaming and older pages', () => {
+  const assistant = (seq: number) => ({ type: 'event', event: { seq, type: 'assistant/message', surfaceOp: 'append',
+    data: { message: { content: [{ type: 'text', text: `Answer ${seq}` }] } } } });
+  const user = (seq: number) => ({ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: `Prompt ${seq}` }] } } });
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, records: [assistant(3), assistant(4)], hasMore: true });
+  const labels = () => historyLayout(transcript, 80).lines.filter(line => line.startsWith('✦ Assistant'));
+  assert.deepEqual(labels(), ['✦ Assistant']);
+  assert.deepEqual(historyLayout(transcript, 80).lines, ['✦ Assistant', 'Answer 3', '', 'Answer 4', '']);
+  transcript.accept({ type: 'event', event: { seq: 5, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [] } } } });
+  transcript.accept({ type: 'event', event: { ...user(6).event, data: { ...user(6).event.data, source: { kind: 'system' } } } });
+  transcript.accept(assistant(7));
+  assert.equal(labels().length, 1);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'text-delta', index: 0, text: 'Live answer' } } });
+  assert.equal(labels().length, 1);
+  transcript.accept({ type: 'assistant-stream', frame: { type: 'end', attemptId: 'a', revision: 3, index: 1 } });
+  transcript.accept(user(8)); transcript.accept(assistant(9));
+  assert.equal(labels().length, 2);
+  // Prepending and then evicting the group start must invalidate cached heading heights.
+  const messages = [user(1), assistant(2), assistant(3), assistant(4), user(8), assistant(9)];
+  transcript.addPage({ records: messages.slice(0, 2), hasMore: false });
+  let layout = historyLayout(transcript, 80);
+  assert.equal(labels().length, 2);
+  assert.equal(layout.viewport(layout.offsets.get(3)!, layout.offsets.get(3)! + 1)[0]?.text, 'Answer 3');
+  transcript.accept({ ...snapshot, records: messages.slice(2) });
+  layout = historyLayout(transcript, 80);
+  assert.equal(layout.viewport(0, 1)[0]?.text, '✦ Assistant');
+  assert.equal(labels().length, 2);
 });

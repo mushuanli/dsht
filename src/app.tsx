@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import { Box, Text, measureElement, useApp, useInput, useStdin, useStdout, type DOMElement } from 'ink';
 import { useMouseWheel } from './mouse.ts';
 import { TextInput } from './input.tsx';
+import { InputHistory } from './input-history.ts';
 import { historyLayout, releaseHistoryLayout, type Reasoning } from './history.ts';
 import { toolLine, type Transcript } from './transcript.ts';
 import { activeReference, fileMention, type FileReference } from './references.ts';
@@ -113,9 +114,22 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [copyMode, setCopyMode] = useState(false);
   const [input, updateInput] = useState('');
   const draft = useRef('');
+  const inputHistory = useRef(new InputHistory());
+  useLayoutEffect(() => {
+    const history = new InputHistory();
+    inputHistory.current = history;
+    if (!state.transcript.ready) return;
+    const messages = state.transcript.messagesForWidth(Math.max(20, (stdout.columns ?? 100) - 2));
+    // Seed once per loaded session, never scan historical messages on stream ticks or arrow presses.
+    const prompts = messages.filter(message => message.role === 'You').slice(-200);
+    for (const message of prompts) history.record(message.text.replace(/\r?\n/g, ' ').trim());
+  }, [state.sessionId, state.transcript, state.transcript.ready]);
   const [cursor, setCursor] = useState(0);
   // Input callbacks may run before Ink refreshes the controlled field's listener.
-  const setInput = (value: string) => { draft.current = value; updateInput(value); setCursor(value.length); };
+  const setInput = (value: string, recalled = false) => {
+    if (!recalled) inputHistory.current.reset();
+    draft.current = value; updateInput(value); setCursor(value.length);
+  };
   const [historyWindow, setHistoryWindow] = useState<Transcript>();
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyMatches, setHistoryMatches] = useState<HistorySearch>();
@@ -149,6 +163,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [notice, setNotice] = useState<string>();
   const [help, setHelp] = useState(false);
   const [answers, setAnswers] = useState<Record<string, ObjectValue[]>>({});
+  const [optionState, setOptionState] = useState<{ key: string; cursor: number; selected: string[]; custom: boolean }>();
   const [referenceIndex, setReferenceIndex] = useState(0);
   const [dismissedReference, dismissReference] = useState<string>();
   const [lookup, setLookup] = useState<{ draft: string; sessionId: string; items: FileReference[]; error?: string }>();
@@ -198,6 +213,26 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const eventId = pending ? string(pending.eventId) : '';
   const answered = answers[eventId] ?? [];
   const question = questions[answered.length];
+  const optionKey = `${eventId}:${answered.length}`;
+  const options = question ? array(question.options ?? []).map(object) : [];
+  const choiceState = optionState?.key === optionKey ? optionState : { key: optionKey, cursor: 0, selected: [], custom: false };
+  const optionCursor = Math.min(choiceState.cursor, options.length);
+  // Reserve the header, composer and question instructions; each choice may have a description.
+  const optionPageSize = Math.max(1, Math.min(6, Math.floor(((stdout.rows ?? 30) - 16) / 2)));
+  const optionStart = Math.max(0, optionCursor - optionPageSize + 1);
+  const questionKeysActive = !!question && options.length > 0 && !choiceState.custom && !copyMode
+    && !removal && !models && !thoughtList && historyQuery === undefined && !searchResults && !help && !costExpanded && !statusExpanded;
+  const answerQuestion = async (selected: string[], custom?: string) => {
+    if (controller.state.pending[0]?.eventId !== eventId) throw new Error('The pending question has changed');
+    const answer = { id: string(question!.id), selected, ...(custom ? { custom } : {}) };
+    const next = [...answered, answer];
+    if (next.length === questions.length) {
+      await controller.answer({ answers: next });
+      setAnswers(previous => { const rest = { ...previous }; delete rest[eventId]; return rest; });
+    } else setAnswers(previous => ({ ...previous, [eventId]: next }));
+    setOptionState(undefined);
+  };
+
   const operate = (fn: () => Promise<void>) => { void controller.perform(fn); };
   const requestRemoval = async (kind: 'workspace' | 'session', query: string) => {
     const target = await controller.removalTarget(kind, query);
@@ -205,12 +240,42 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     else setRemoval(target);
   };
   useInput((_value, key) => {
+    if (key.eventType === 'release') return;
     if (copyMode) {
       if (key.escape || key.ctrl && (_value === 's' || _value === 'c')) setCopyMode(false);
       return;
     }
     if (key.ctrl && _value === 's') { setCopyMode(true); return; }
     if ((key.escape || key.ctrl && _value === 'c') && historyAbort.current) { historyAbort.current.abort(); return; }
+    if ((key.escape || key.ctrl && _value === 'c') && controller.state.pending.length) {
+      if (key.ctrl && draft.current) setInput('');
+      if (key.escape) {
+        setOptionState({ ...choiceState, custom: false });
+        setRemoval(undefined); setModels(undefined); setThoughtList(false); setSearchResults(undefined);
+        setHistoryQuery(undefined); setHistoryMatches(undefined); setHelp(false); setCostExpanded(false); setStatusExpanded(false);
+      }
+      return;
+    }
+    if (questionKeysActive && !draft.current && !controller.state.busy && !key.ctrl && !key.meta) {
+      const digit = /^[1-9]$/.test(_value) ? Number(_value) - 1 : -1;
+      if (key.upArrow || key.downArrow) {
+        setOptionState({ ...choiceState, cursor: Math.max(0, Math.min(options.length, optionCursor + (key.upArrow ? -1 : 1))) }); return;
+      }
+      if (digit >= 0 && digit <= options.length || _value === ' ' && question!.multiSelect === true && optionCursor < options.length) {
+        const index = digit >= 0 ? digit : optionCursor;
+        const label = index < options.length ? string(options[index]!.label) : undefined;
+        const selected = question!.multiSelect === true && label
+          ? choiceState.selected.includes(label) ? choiceState.selected.filter(item => item !== label) : [...choiceState.selected, label]
+          : choiceState.selected;
+        setOptionState({ ...choiceState, cursor: index, selected }); return;
+      }
+      if (key.return) {
+        if (optionCursor === options.length) { setOptionState({ ...choiceState, custom: true }); return; }
+        const selected = question!.multiSelect === true ? choiceState.selected : [string(options[optionCursor]!.label)];
+        if (!selected.length) { setNotice('Select at least one option with Space or a number'); return; }
+        operate(() => answerQuestion(selected)); return;
+      }
+    }
     if (key.escape && removal) { setRemoval(undefined); return; }
     if (key.escape && models) { setModels(undefined); return; }
     if (key.escape && thoughtList) { setThoughtList(false); if (controller.running) void controller.interrupt(true); return; }
@@ -229,6 +294,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       else if (key.downArrow) setReferenceIndex(value => Math.max(0, Math.min((matches?.items.length ?? 1) - 1, value + 1)));
       return;
     }
+    const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
+    const recallNext = key.downArrow || key.ctrl && _value === 'n';
+    if ((recallPrevious || recallNext) && state.online && !controller.state.busy && !pending
+      && !removal && !models && !thoughtList && historyQuery === undefined && !searchResults && !help && !costExpanded && !statusExpanded
+      && (state.screen === 'chat' || draft.current !== '' || key.ctrl)) {
+      setInput(inputHistory.current.move(recallPrevious ? -1 : 1, draft.current), true); return;
+    }
     if (key.tab) { completeCommand(); return; }
     if (key.escape && (help || costExpanded || statusExpanded || notice !== undefined)) {
       setHelp(false); setCostExpanded(false); setStatusExpanded(false); setNotice(undefined);
@@ -245,6 +317,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (copyMode) return;
     const value = raw.trim();
     if (!value) return;
+    if (!pending) inputHistory.current.record(value);
     if (value === '/copy') { setInput(''); setCopyMode(true); return; }
     setRemoval(undefined);
     // Each panel belongs to the command that opened it, so any other command closes it.
@@ -329,12 +402,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       else if (value === '/allow') await controller.approve(true);
       else if (value === '/deny') await controller.approve(false);
       else if (value.startsWith('/steer ')) await controller.prompt(value.slice(7), 'steer');
-      else if (question) {
-        const answer = { id: string(question.id), selected: [], custom: value };
-        const next = [...answered, answer];
-        if (next.length === questions.length) await controller.answer({ answers: next });
-        setAnswers(previous => ({ ...previous, [eventId]: next }));
-      } else if (pending) throw new Error('Answer the approval with /allow or /deny');
+      else if (question) await answerQuestion(question.multiSelect === true ? choiceState.selected : [], value); else if (pending) throw new Error('Answer the approval with /allow or /deny');
       else if (value.startsWith('/')) throw new Error('Unknown command. Use /help.');
       else if (state.screen !== 'chat') throw new Error('Choose a session or type /ws or /resume');
       else { await controller.prompt(value); setHistoryWindow(undefined); setScroll(0); }
@@ -517,7 +585,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       <Picker key={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices} enabled={state.online && !state.busy && !input}
         canSelect={() => !draft.current && controller.state.online && !controller.state.busy} />
     </Box> : <>
-      {state.screen === 'chat' && historyQuery === undefined && !searchResults && !thoughtList && <Box ref={conversationBox} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden" marginY={1}>
+      {state.screen === 'chat' && historyQuery === undefined && !searchResults && !thoughtList && !pending && <Box ref={conversationBox} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden" marginY={1}>
         {visible.length ? <Frozen frozen={displayPaused} identity={`${width}:${state.sessionId}:${position}`}><HistoryViewport rows={visible} /></Frozen> : <Text color={theme.colors.muted}>Start a conversation with the host agent.</Text>}
         {(displayTranscript.hasMore || historyWindow) && <Text dimColor>{historyWindow ? 'Earlier history · /latest returns to live conversation' : 'Scroll up or /older to load earlier history'}</Text>}
       </Box>}
@@ -541,12 +609,20 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           { key: 'close', label: '← Back to conversation', action: () => { setHistoryQuery(undefined); setHistoryMatches(undefined); } },
         ]} enabled={!input && !state.busy} canSelect={() => !draft.current && !controller.state.busy} />
       </Box>}
-      {pending && <Box borderStyle="round" borderColor={theme.colors.context} paddingX={1} flexDirection="column">
-        <Text bold color={theme.colors.context}>{question ? 'Question' : 'Approval required'}</Text>
+      {pending && <Box flexShrink={0} borderStyle="round" borderColor={theme.colors.context} paddingX={1} flexDirection="column">
+        <Text bold color={theme.colors.context}>{question ? `Question ${answered.length + 1}/${questions.length}${question.header ? ` · ${safeText(string(question.header))}` : ''}` : 'Approval required'}</Text>
         <Text>{safeText(question ? string(question.question) : JSON.stringify(pending.request, null, 2))}</Text>
         {question?.detail && <Text>{safeText(string(question.detail))}</Text>}
-        {question?.options && <Text>{array(question.options).map(option => string(object(option).label)).join(' · ')}</Text>}
-        <Text dimColor>{question ? 'Type your answer below' : '/allow approves once · /deny rejects'}</Text>
+        {options.length > 0 && <Box flexDirection="column" flexShrink={0}>
+          {[...options, { label: 'Other answer — type below' }].map((option, index) => ({ option, index }))
+            .slice(optionStart, optionStart + optionPageSize).map(({ option, index }) => <Box key={index} flexDirection="column" flexShrink={0}>
+              <Text color={index === optionCursor ? theme.accent : undefined} wrap="truncate-end">{index === optionCursor ? '❯ ' : '  '}{index + 1}. {question?.multiSelect === true && index < options.length ? choiceState.selected.includes(string(option.label)) ? '[x] ' : '[ ] ' : ''}{safeText(string(option.label))}</Text>
+              {option.description && <Text dimColor wrap="truncate-end">{'     '}{safeText(string(option.description))}</Text>}
+            </Box>)}
+          <Text dimColor>{choiceState.custom ? 'Type your answer below · Esc returns to options' : question?.multiSelect === true
+            ? '↑ ↓ move · Space / 1–9 toggle · Enter confirm' : '↑ ↓ / 1–9 select · Enter confirm'}</Text>
+        </Box>}
+        <Text dimColor>{question ? 'Text answers supported · Ctrl+C clears · /cancel stops' : '/allow approves once · /deny rejects · /cancel stops'}</Text>
       </Box>}
     </>}
     </Box>
@@ -555,7 +631,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       <Box borderStyle="round" borderColor={state.online ? theme.accent : theme.border} paddingX={1}>
         <Text color={theme.accent}>❯ </Text>
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(draft.current); }}
-          reservedKeys={!removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
+          reservedKeys={questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
           focus={state.online && !state.busy && !copyMode} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       </Box>
       {referenceOpen && <Box flexDirection="column">
@@ -573,7 +649,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           <Text color={theme.accent}>{COMMAND_LABELS[index]!.padEnd(COMMAND_LABEL_WIDTH)}</Text>{hint.description}
         </Text>)}
         <Text dimColor>Enter send · Tab complete · Esc cancel · Wheel/PgUp/PgDn scroll · Ctrl+C clear / stop / exit</Text>
-        <Text dimColor>Editing: Ctrl+A/E start/end · Ctrl+K/U kill right/left · Ctrl+W kill word · Ctrl+Y restore</Text>
+        <Text dimColor>History: ↑/↓ or Ctrl+P/N recall · Editing: Ctrl+A/E start/end · Ctrl+K/U kill right/left · Ctrl+W kill word · Ctrl+Y restore</Text>
       </Box>}
       {costExpanded && <CostPanel controller={controller} />}
       <Frozen frozen={displayPaused || position > 0} identity={`${width}:${state.sessionId}:${statusExpanded}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} revision={state.version} paused={displayPaused || position > 0} /></Frozen>
