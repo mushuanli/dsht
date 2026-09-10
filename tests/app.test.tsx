@@ -11,6 +11,17 @@ import { array, object, type ObjectValue } from '../src/wire.ts';
 import { host, snapshot, until } from './host.ts';
 import { StatusBar } from '../src/status.tsx';
 
+function assertInsideComposer(frame: string, label: string) {
+  const lines = frame.split('\n');
+  const option = lines.findIndex(line => line.includes(label));
+  const input = lines.findIndex(line => line.includes('❯ Message, @host-file, or /help'));
+  const top = lines.findIndex(line => line.includes('╭'));
+  const bottom = lines.findIndex(line => line.includes('╰'));
+  assert.ok(top >= 0 && top < option && option < bottom, frame);
+  assert.ok(top < input && input < bottom, frame);
+  assert.equal(lines.filter(line => line.includes('╭')).length, 1, frame);
+}
+
 test('startup requires workspace and session selection before showing the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token');
@@ -20,6 +31,7 @@ test('startup requires workspace and session selection before showing the compos
   controller.start();
   await until(() => ui.lastFrame()?.includes('Project α') === true);
   assert.match(ui.lastFrame()!, /Choose workspace/);
+  assertInsideComposer(ui.lastFrame()!, 'Choose workspace');
   await press('\r');
   await until(() => ui.lastFrame()?.includes('Choose session') === true);
   await press('\u001b[B');
@@ -182,7 +194,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   const compact = ui.lastFrame()!.split('\n').find(line => line.includes('1K tok'))!;
   assert.match(compact, /● Ready.*chat.*~25%.*1K tok/);
   assert.equal(ui.lastFrame()?.includes('Workspace:'), false);
-  assert.match(ui.lastFrame()!, /dsht · 127\.0\.0\.1.*First conversation.*● Connected/);
+  assert.match(ui.lastFrame()!, /First conversation/);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Tokens: 1,000 total') === true);
@@ -625,7 +637,7 @@ test('title and status fit terminal widths and keep model alignment when working
   Object.defineProperty(ui.stdout, 'columns', { get: () => columns });
   const refresh = async () => { await act(async () => { ui.rerender(<App controller={controller} />); }); };
   await refresh();
-  assert.match(ui.lastFrame()!.split('\n')[0]!, /dsht · x1.*Workspace 示例 · 中文会话标题.*● Connected/);
+  assert.match(ui.lastFrame()!.split('\n')[0]!, /^\s*中文会话标题/);
   const working = ui.lastFrame()!.split('\n').find(line => line.includes('◐ Working'))!;
   assert.match(working, /◐ Working · 8s · Ctrl\+C Stop.*v4.1-flash · high.*███░░░░░░░ ~25%.*42 turns · 166.2M tok/);
   controller.state = { ...controller.state, version: 1, sessions: [{ sessionId: 's1', running: false }] };
@@ -636,7 +648,9 @@ test('title and status fit terminal widths and keep model alignment when working
   for (columns of [80, 40, 24, 12]) {
     await refresh();
     const lines = ui.lastFrame()!.split('\n');
-    assert.match(lines[0]!, columns >= 24 ? /dsht.*● Connected/ : /● Connect/);
+    assert.match(lines[0]!, /^\s*中文会话/);
+    assert.doesNotMatch(lines[0]!, /dsht|x1|Connected|Offline/);
+    if (columns < 62) assert.doesNotMatch(lines[0]!, /Workspace/);
     assert.equal(lines[1]!.trim(), '─'.repeat(Math.max(10, columns - 2)));
   }
 });
@@ -683,7 +697,7 @@ test('long conversations keep the header visible and show keyboard help only whe
   fixture.follow({ type: 'event', event: { seq: 10, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: Array.from({ length: 100 }, (_, i) => `Response line ${i}`).join('\n') }] } } } });
   await until(() => ui.lastFrame()?.includes('Response line 99') === true);
   const header = ui.lastFrame()!.split('\n')[0]!;
-  assert.match(header, /dsht.*First conversation.*● Connected/);
+  assert.match(header, /First conversation/);
   assert.ok(ui.lastFrame()!.split('\n').length <= 30);
   assert.ok(!ui.lastFrame()?.includes('Enter send · Tab complete'));
   await pressKey(ui, '\x1b[5~');
@@ -734,6 +748,7 @@ test('/model uses the host catalog and exact model/effort selection API', async 
   await until(() => controller.state.transcript.ready);
   await pressKey(ui, '/model'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Choose model') === true);
+  assertInsideComposer(ui.lastFrame()!, 'Choose model');
   assert.match(ui.lastFrame()!, /Broken provider: offline/);
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Choose reasoning effort') === true);
@@ -890,6 +905,7 @@ test('question options support numbers, arrows, multi-selection and numeric cust
   controller.start(); await until(() => ui.lastFrame()?.includes('Choose a target') === true);
   assert.match(ui.lastFrame()!, /Question 1\/3 · Destination/);
   assert.match(ui.lastFrame()!, /First description/);
+  assertInsideComposer(ui.lastFrame()!, 'First description');
   await pressKey(ui, '2');
   assert.match(ui.lastFrame()!, /❯ 2\. Second/);
   assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);

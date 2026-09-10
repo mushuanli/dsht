@@ -523,16 +523,15 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         ], [liveThought, thoughtChoices, displayTranscript, displayTranscript.hasMore, width, pageSize, reasoningOverrides]);
   const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
   const workspaceName = workspace ? string(workspace.title) || string(workspace.path) : state.workspaceId;
-  const headerTitle = [workspaceName && toolLine(workspaceName, Math.max(8, Math.min(24, Math.floor(width / 4)))), controller.sessionName]
-    .filter(Boolean).join(' · ') || 'All workspaces';
+  const headerTitle = controller.sessionName
+    ? [controller.sessionName, width >= 60 ? workspaceName : undefined].filter(Boolean).join(' · ')
+    : workspaceName || 'All workspaces';
   return <ThemeContext.Provider value={theme}><CopyMode.Provider value={copyMode}><Frozen frozen={copyMode} identity={`${width}:${stdout.rows}`}><Box flexDirection="column" paddingX={1} height={Math.max(1, (stdout.rows ?? 30) - 1)} overflowY="hidden">
     {copyMode && <Text color={theme.accent}>Copy mode · drag to select · Esc / Ctrl+S resumes</Text>}
     <Frozen frozen={displayPaused} identity={`${width}:${state.sessionId}`}><Box flexDirection="column" flexShrink={0}>
     <Box width={width}>
-      {width >= 22 && <><Box flexShrink={0}><Text bold color={theme.accent}>{toolLine(`dsht · ${new URL(controller.base).hostname}`, Math.max(4, Math.min(28, width - 16)))}</Text></Box>
-      <Box flexGrow={1} flexShrink={1} minWidth={0} marginX={2}><Text wrap="truncate-end">{toolLine(headerTitle, width)}</Text></Box></>}
-      {width >= 60 && controller.sessionMode && <Box flexShrink={0} marginRight={2}><Text color={theme.accent}>{toolLine(controller.sessionMode, Math.min(24, Math.floor(width / 3)))}</Text></Box>}
-      <Box flexShrink={0}><Text color={state.online ? theme.colors.success : theme.colors.context}>{toolLine(state.online ? '● Connected' : '○ Offline', width)}</Text></Box>
+      <Box flexGrow={1} flexShrink={1} minWidth={0}><Text bold color={theme.accent} wrap="truncate-end">{toolLine(headerTitle, width)}</Text></Box>
+      {width >= 60 && controller.sessionMode && <Box flexShrink={0} marginLeft={2}><Text color={theme.accent}>{toolLine(controller.sessionMode, Math.min(24, Math.floor(width / 3)))}</Text></Box>}
     </Box>
     <Text dimColor>{'─'.repeat(width)}</Text>
     </Box></Frozen>
@@ -540,6 +539,15 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     {historyLoading && <Text dimColor>Loading history… · Esc / Ctrl+C cancel</Text>}
     <Frozen frozen={displayPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
     {state.error && <Text color={theme.colors.error}>{state.error}</Text>}
+      {state.screen === 'chat' && !removal && !models && historyQuery === undefined && !searchResults && !thoughtList && !pending && <Box ref={conversationBox} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden" marginY={1}>
+        {visible.length ? <Frozen frozen={displayPaused} identity={`${width}:${state.sessionId}:${position}`}><HistoryViewport rows={visible} /></Frozen> : <Text color={theme.colors.muted}>Start a conversation with the host agent.</Text>}
+        {(displayTranscript.hasMore || historyWindow) && <Text dimColor>{historyWindow ? 'Earlier history · /latest returns to live conversation' : 'Scroll up or /older to load earlier history'}</Text>}
+      </Box>}
+    </Box>
+    <Box flexDirection="column" flexShrink={0}>
+      {notice && <Text dimColor>{notice}</Text>}
+      <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
+        <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
     {removal ? <Box flexDirection="column" marginY={1}>
       <Text bold color={theme.colors.context}>{removal.kind === 'workspace' ? 'Remove workspace registration?' : 'Archive session?'}</Text>
       <Text wrap="truncate-end">{safeText(removal.name)}</Text>
@@ -585,10 +593,6 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       <Picker key={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices} enabled={state.online && !state.busy && !input}
         canSelect={() => !draft.current && controller.state.online && !controller.state.busy} />
     </Box> : <>
-      {state.screen === 'chat' && historyQuery === undefined && !searchResults && !thoughtList && !pending && <Box ref={conversationBox} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden" marginY={1}>
-        {visible.length ? <Frozen frozen={displayPaused} identity={`${width}:${state.sessionId}:${position}`}><HistoryViewport rows={visible} /></Frozen> : <Text color={theme.colors.muted}>Start a conversation with the host agent.</Text>}
-        {(displayTranscript.hasMore || historyWindow) && <Text dimColor>{historyWindow ? 'Earlier history · /latest returns to live conversation' : 'Scroll up or /older to load earlier history'}</Text>}
-      </Box>}
       {thoughtList && <Box flexDirection="column" marginY={1}>
         <Text bold color={theme.colors.reasoning}>Reasoning history · User prompts · Esc close</Text>
         {!thoughtEntries?.length && !liveThought && <Text dimColor>No reasoning in loaded history</Text>}
@@ -609,7 +613,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           { key: 'close', label: '← Back to conversation', action: () => { setHistoryQuery(undefined); setHistoryMatches(undefined); } },
         ]} enabled={!input && !state.busy} canSelect={() => !draft.current && !controller.state.busy} />
       </Box>}
-      {pending && <Box flexShrink={0} borderStyle="round" borderColor={theme.colors.context} paddingX={1} flexDirection="column">
+      {pending && <Box flexShrink={0} flexDirection="column">
         <Text bold color={theme.colors.context}>{question ? `Question ${answered.length + 1}/${questions.length}${question.header ? ` · ${safeText(string(question.header))}` : ''}` : 'Approval required'}</Text>
         <Text>{safeText(question ? string(question.question) : JSON.stringify(pending.request, null, 2))}</Text>
         {question?.detail && <Text>{safeText(string(question.detail))}</Text>}
@@ -625,15 +629,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         <Text dimColor>{question ? 'Text answers supported · Ctrl+C clears · /cancel stops' : '/allow approves once · /deny rejects · /cancel stops'}</Text>
       </Box>}
     </>}
-    </Box>
-    <Box flexDirection="column" flexShrink={0}>
-      {notice && <Text dimColor>{notice}</Text>}
-      <Box borderStyle="round" borderColor={state.online ? theme.accent : theme.border} paddingX={1}>
+        </Box>
+        <Box flexShrink={0}>
         <Text color={theme.accent}>❯ </Text>
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(draft.current); }}
           reservedKeys={questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
           focus={state.online && !state.busy && !copyMode} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
-      </Box>
+        </Box>
       {referenceOpen && <Box flexDirection="column">
         <Text dimColor>Host files · ↑ ↓ select · Tab/Enter insert · Esc close</Text>
         {!matches ? <Text dimColor>Searching…</Text> : matches.error ? <Text color={theme.colors.error}>{matches.error}</Text>
@@ -643,6 +645,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
               {index + Math.max(0, referenceIndex - 5) === referenceIndex ? '❯ ' : '  '}{item.path}{item.kind === 'directory' ? '/' : ''}
             </Text>)}
       </Box>}
+      </Box>
       {input.startsWith('/') && !input.includes(' ') && <Text dimColor>{COMMANDS.filter(command => command.startsWith(input)).join('  ')}</Text>}
       {help && <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
         {COMMAND_HINTS.map((hint, index) => <Text key={hint.command} dimColor wrap="truncate-end">
