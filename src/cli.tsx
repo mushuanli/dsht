@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   process.once('SIGTERM', terminate);
   controller.start();
   try { await app.waitUntilExit(); }
-  finally { process.off('SIGTERM', terminate); await controller.stop(); }
+  finally { process.off('SIGTERM', terminate); await controller.shutdown(); }
 }
 
 main().catch(error => { process.stderr.write(`${errorText(error)}\n`); process.exitCode = 1; });

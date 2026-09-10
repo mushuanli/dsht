@@ -131,6 +131,14 @@ export class Controller {
     await this.costTask;
   }
 
+  /** Stop the selected turn and then close, so quitting does not leave host work running.
+   * An idle session stays untouched, and an in-flight cancellation is awaited rather than repeated.
+   */
+  async shutdown(): Promise<void> {
+    if (this.interruptTask || this.running || this.admission) await this.interrupt(true);
+    await this.stop();
+  }
+
   /** Run a UI operation and expose errors without destroying the current input. */
   async perform(operation: () => Promise<void>): Promise<boolean> {
     if (this.state.busy || !this.state.online) return false;

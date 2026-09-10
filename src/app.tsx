@@ -14,6 +14,8 @@ import { array, errorText, object, safeText, string, type ObjectValue } from './
 
 const COMMANDS = ['/ws', '/s', '/new', '/older', '/history', '/jump', '/search', '/ssearch', '/wsearch', '/cancel', '/steer', '/allow', '/deny', '/status', '/cost', '/help', '/quit'];
 const HELP = '/ws [name or ID] · /s [title or ID] · /s all · /new · /older · /history [text] · /jump <seq|first|last> · /search text · /ssearch text · /wsearch text · /cancel · /steer text · /allow · /deny · /status · /cost · /quit';
+/** A slash-command panel closes on the next command or after this long, whichever comes first. */
+const PANEL_LIFETIME_MS = 10_000;
 
 interface Choice { key: string; label: string; action(): void }
 
@@ -37,7 +39,7 @@ function Picker({ choices, enabled, canSelect }: { choices: Choice[]; enabled: b
 }
 
 /** The caller owns starting and stopping the controller around the Ink render lifetime. */
-export function App({ controller }: { controller: Controller }) {
+export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS }: { controller: Controller; panelLifetimeMs?: number }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -59,6 +61,12 @@ export function App({ controller }: { controller: Controller }) {
   const [referenceIndex, setReferenceIndex] = useState(0);
   const [dismissedReference, dismissReference] = useState<string>();
   const [lookup, setLookup] = useState<{ draft: string; sessionId: string; items: FileReference[]; error?: string }>();
+  // A slash-command panel is temporary: the next command or its lifetime closes it.
+  useEffect(() => {
+    if (!help && !costExpanded && !statusExpanded) return;
+    const timer = setTimeout(() => { setHelp(false); setCostExpanded(false); setStatusExpanded(false); }, panelLifetimeMs);
+    return () => clearTimeout(timer);
+  }, [help, costExpanded, statusExpanded, panelLifetimeMs]);
   const pending = state.pending[0];
   const token = state.screen === 'chat' && state.online && !state.busy && !pending
     && (!input.startsWith('/') || input.startsWith('/steer ')) && dismissedReference !== input && cursor === input.length
@@ -112,6 +120,10 @@ export function App({ controller }: { controller: Controller }) {
     if (referenceOpen) { pickReference(); return; }
     const value = raw.trim();
     if (!value) return;
+    // Each panel belongs to the command that opened it, so any other command closes it.
+    if (value !== '/help') setHelp(false);
+    if (value !== '/cost') setCostExpanded(false);
+    if (value !== '/status') setStatusExpanded(false);
     if (value === '/quit') { exit(); return; }
     if (value === '/cost') {
       setCostExpanded(value => !value); setInput('');

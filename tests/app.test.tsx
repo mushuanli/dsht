@@ -432,3 +432,52 @@ test('header follows session titles and Esc cancels despite a stale idle flag, r
   await until(() => fixture.calls.filter(call => call.method === 'session/cancel').length === 2);
   assert.equal(ui.lastFrame()?.includes('Host files'), false);
 });
+
+test('quitting cancels the selected running turn before the client closes', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  let exited = false;
+  function MountedApp() {
+    useEffect(() => () => { exited = true; }, []);
+    return <App controller={controller} />;
+  }
+  const ui = render(<MountedApp />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.running);
+  await pressKey(ui, '/quit'); await pressKey(ui, '\r');
+  await until(() => exited);
+  // Unmounting alone leaves host work running; the lifetime around the render cancels it.
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+  await controller.shutdown();
+  assert.equal(fixture.calls.filter(call => call.method === 'session/cancel').length, 1);
+});
+
+test('closing an idle client sends no cancellation', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  await controller.shutdown();
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+});
+
+test('a slash-command panel closes on the next command or after its lifetime', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} panelLifetimeMs={150} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('/ws [name or ID]') === true);
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Session ID: s1') === true);
+  // The next command replaced the previous panel.
+  assert.equal(ui.lastFrame()!.includes('/ws [name or ID]'), false);
+  // Without another command the panel closes on its own.
+  await until(() => ui.lastFrame()?.includes('Session ID: s1') === false);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
