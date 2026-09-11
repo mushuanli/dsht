@@ -1,7 +1,7 @@
 /** Atomic per-session persistence for the immutable charge ledger. */
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { ensureDirectory, listEntries, readText, removeFile, writePrivateFile } from '../storage/index.ts';
 import type { Charge, SavedCost } from './types.ts';
 
 /** Current on-disk ledger generation. Files of another generation are ignored, not migrated. */
@@ -17,12 +17,12 @@ const LEDGER_VERSION = 2;
 export async function loadLedgers(directory: string | undefined): Promise<Map<string, SavedCost>> {
   const sessions = new Map<string, SavedCost>();
   if (!directory) return sessions;
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  for (const name of await readdir(directory)) {
+  await ensureDirectory(directory);
+  for (const name of await listEntries(directory)) {
     if (!name.endsWith('.json')) continue;
-    let raw: string;
-    try { raw = await readFile(join(directory, name), 'utf8'); }
-    catch (error) { if (error instanceof Error && 'code' in error && error.code === 'ENOENT') continue; throw error; }
+    const raw = await readText(join(directory, name));
+    // A file removed between listing and reading is simply absent.
+    if (raw === undefined) continue;
     const saved = parseLedger(raw);
     if (saved === undefined) continue;
     if ((sessions.get(saved.sessionId)?.cut ?? -2) <= saved.cut) sessions.set(saved.sessionId, saved);
@@ -36,16 +36,10 @@ export async function loadLedgers(directory: string | undefined): Promise<Map<st
  */
 export async function saveLedger(directory: string, saved: SavedCost): Promise<void> {
   const prefix = createHash('sha256').update(saved.sessionId).digest('hex') + '-';
-  const temporary = join(directory, `${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, JSON.stringify(saved) + '\n', { mode: 0o600, flag: 'wx' });
-    await rename(temporary, join(directory, `${prefix}${saved.cut}.json`));
-  } finally {
-    await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
-  }
-  for (const name of await readdir(directory)) {
+  await writePrivateFile(join(directory, `${prefix}${saved.cut}.json`), JSON.stringify(saved) + '\n');
+  for (const name of await listEntries(directory)) {
     if (name.startsWith(prefix) && name.endsWith('.json') && Number(name.slice(prefix.length, -5)) < saved.cut) {
-      await unlink(join(directory, name)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      await removeFile(join(directory, name));
     }
   }
 }

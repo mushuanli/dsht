@@ -1,6 +1,6 @@
 /** Stream authenticated session archives to exclusive local files. */
-import { open, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { writeExclusiveStream } from '../storage/index.ts';
 import type { Client } from '../transport/client.ts';
 
 /** Save an archive without overwriting an existing file or retaining a partial download.
@@ -12,13 +12,11 @@ import type { Client } from '../transport/client.ts';
  */
 export async function saveSessionLog(client: Client, sessionId: string, destination: string | undefined, signal: AbortSignal): Promise<string> {
   const path = resolve(destination ?? `session-${sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')}-${Date.now()}.zip`);
-  const file = await open(path, 'wx', 0o600);
-  let complete = false;
-  try {
+  await writeExclusiveStream(path, async () => {
     const response = await client.sessionLog(sessionId, signal);
     if (!response.body) throw new Error('Session log export has no body');
     const reader = response.body.getReader();
-    async function* chunks() {
+    return (async function* chunks() {
       try {
         while (true) {
           const chunk = await reader.read();
@@ -26,12 +24,7 @@ export async function saveSessionLog(client: Client, sessionId: string, destinat
           yield chunk.value;
         }
       } finally { try { await reader.cancel(); } finally { reader.releaseLock(); } }
-    }
-    await file.writeFile(chunks(), { signal });
-    signal.throwIfAborted();
-    complete = true;
-    return path;
-  } finally {
-    try { await file.close(); } finally { if (!complete) await unlink(path); }
-  }
+    })();
+  }, signal);
+  return path;
 }

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /** Standalone executable entry; connects to an existing host and never launches Harness. */
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CostLedger, DEFAULT_PRICES, pricesFrom } from '../cost/index.ts';
 import { parseArgs } from 'node:util';
 import { mount } from '../ui/mount.tsx';
+import { createPrivateFile, ensureDirectory, readText } from '../storage/index.ts';
 import { sessionLabel } from '../session/navigation.ts';
 import { CookieStore, login } from '../transport/auth.ts';
 import { Client } from '../transport/client.ts';
@@ -71,11 +71,12 @@ async function main(): Promise<void> {
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
   const config = process.env.DSHT_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'dsht');
-  await mkdir(config, { recursive: true, mode: 0o700 });
+  await ensureDirectory(config);
   const pricePath = join(config, 'prices.json');
-  try { await writeFile(pricePath, JSON.stringify(DEFAULT_PRICES, null, 2) + '\n', { flag: 'wx', mode: 0o600 }); }
-  catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
-  const prices = pricesFrom(JSON.parse(await readFile(pricePath, 'utf8')));
+  await createPrivateFile(pricePath, JSON.stringify(DEFAULT_PRICES, null, 2) + '\n');
+  const raw = await readText(pricePath);
+  if (raw === undefined) throw new Error(`Price configuration disappeared: ${pricePath}`);
+  const prices = pricesFrom(JSON.parse(raw));
   const costDirectory = join(process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht'), 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory);
   await costs.load();

@@ -452,7 +452,7 @@ node dist/cli/index.js --help
 
 测试使用隔离的 HTTP/WebSocket 服务，驱动实际 Ink 选择器和输入框，在子进程中运行 CLI，并投影复制的 Harness v2 工作区编辑记录和 v0 压缩 chunk 记录。这些检查不需要模型凭据。记录和预期对话输出位于 `tests/`，不依赖父仓库。测试不覆盖真实模型供应商行为。
 
-源码在 `src/` 下按业务域组织：`transport/` 负责服务端 wire 协议与认证，`session/` 负责对话、历史与交互，`cost/` 负责不可重算的计费账本，`catalog/` 负责模型与 preset，`controller/` 是应用门面，`ui/` 承载全部 React 与 Ink，`cli/` 是组装入口。跨模块导入统一走各模块的 `index.ts`；`tests/architecture/dependencies.test.ts` 会拒绝禁止的依赖方向。
+源码在 `src/` 下按业务域组织：`transport/` 负责服务端 wire 协议与认证，`session/` 负责对话、历史与交互，`cost/` 负责不可重算的计费账本，`catalog/` 负责模型与 preset，`controller/` 是应用门面，`ui/` 承载全部 React 与 Ink，`storage/` 负责全部文件系统操作，`cli/` 是组装入口。跨模块导入统一走各模块的 `index.ts`；`tests/architecture/dependencies.test.ts` 会拒绝禁止的依赖方向。
 
 `npm test` 渲染不带样式的帧，因为断言和 `tests/expected/` 中的预期输出描述的是文本。从终端启动的测试运行器会向每个测试文件导出 `FORCE_COLOR=1`，使 Ink 在提示符与文本之间插入 SGR 转义序列；`npm run test:terminal` 在任何主机上复现该环境，`prepublishOnly` 也会运行它，因此从终端发布时验证的就是终端实际渲染的结果。 主题测试在独立子进程中分别渲染真彩色和纯文本，并隔离父进程中影响终端和 CI 颜色检测的环境设置。
 

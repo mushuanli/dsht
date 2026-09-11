@@ -9,19 +9,23 @@ const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
 
 /** Allowed target units per importing unit; a unit is a top-level directory or a root file. */
 const UNITS: Record<string, readonly string[]> = {
-  transport: ['transport'],
-  session: ['transport', 'session', 'state.ts'],
-  cost: ['transport', 'cost'],
+  storage: ['storage'],
+  transport: ['transport', 'storage'],
+  session: ['transport', 'session', 'state.ts', 'storage'],
+  cost: ['transport', 'cost', 'storage'],
   catalog: ['transport', 'catalog', 'state.ts'],
   controller: ['transport', 'session', 'cost', 'catalog', 'controller', 'state.ts'],
   ui: ['transport', 'session', 'cost', 'catalog', 'controller', 'ui', 'state.ts'],
-  cli: ['transport', 'session', 'cost', 'catalog', 'controller', 'ui', 'cli', 'state.ts'],
+  cli: ['transport', 'session', 'cost', 'catalog', 'controller', 'ui', 'cli', 'state.ts', 'storage'],
   'state.ts': ['transport', 'session'],
   'index.ts': ['transport'],
 };
 
-/** Modules that may only appear inside the ui layer. */
+/** Effect modules that may only appear inside the ui layer. */
 const RENDERER_MODULES = new Set(['react', 'ink', 'ink-testing-library']);
+
+/** Filesystem modules that may only appear inside the storage unit. */
+const FILESYSTEM_MODULES = new Set(['fs', 'node:fs', 'fs/promises', 'node:fs/promises']);
 
 interface SourceFile { path: string; source: string }
 
@@ -56,6 +60,8 @@ function violations(files: readonly SourceFile[]): string[] {
         const targetUnit = unitOf(target);
         if (!allowed.includes(targetUnit)) problems.push(`${file.path}: ${unit} must not import ${targetUnit} (${spec})`);
         if (unit === 'ui' && target === 'transport/client.ts') problems.push(`${file.path}: ui must not call the transport client directly`);
+      } else if (FILESYSTEM_MODULES.has(spec) && unit !== 'storage') {
+        problems.push(`${file.path}: filesystem operations belong to the storage unit (${spec})`);
       } else if (RENDERER_MODULES.has(spec.split('/')[0]!) && unit !== 'ui') {
         problems.push(`${file.path}: React/Ink belongs to the ui layer (${spec})`);
       }
@@ -88,6 +94,9 @@ test('the dependency check rejects each forbidden direction', () => {
     ['session/render.ts: React/Ink belongs to the ui layer (ink)']);
   assert.deepEqual(violations([{ path: 'ui/panel.ts', source: "import { Client } from '../transport/client.ts';" }]),
     ['ui/panel.ts: ui must not call the transport client directly']);
+  assert.deepEqual(violations([{ path: 'cost/files.ts', source: "import { readFile } from 'node:fs/promises';" }]),
+    ['cost/files.ts: filesystem operations belong to the storage unit (node:fs/promises)']);
+  assert.deepEqual(violations([{ path: 'storage/files.ts', source: "import { readFile } from 'node:fs/promises';\nimport { join } from 'node:path';" }]), []);
   assert.deepEqual(violations([{ path: 'ui/app.ts', source: "import { Box } from 'ink';\nimport { Client } from '../transport/client.ts';\nimport { Controller } from '../controller/index.ts';\nimport { safeText } from '../transport/wire.ts';" }]),
     ['ui/app.ts: ui must not call the transport client directly']);
 });
