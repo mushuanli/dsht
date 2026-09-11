@@ -163,9 +163,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const optionStart = Math.max(0, optionCursor - optionPageSize + 1);
   // One open panel owns the arrow and digit keys; the picker screens and the composer are not keyboard owners.
   const panelBlocksKeys = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || help || costExpanded || statusExpanded);
-  // Composer recall yields to a panel only when that panel needs the keys. A status panel that fits
-  // the screen has nothing to scroll, so the arrows stay with the history; Ctrl+P/N always reach it.
-  const recallBlocked = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || help || costExpanded || (statusExpanded && statusOverflow));
+  // Composer recall yields only to a surface that uses the arrows itself: the pickers, and a status
+  // panel with more lines than the view holds. The help and cost panels and a fitting status panel
+  // leave the arrows with the history, and Ctrl+P/N reach it from every surface.
+  const recallBlocked = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || (statusExpanded && statusOverflow));
   const questionKeysActive = !!question && options.length > 0 && !choiceState.custom && !copyMode && !panelBlocksKeys;
   const approvalKeysActive = pending?.event === 'approval/request' && !copyMode && !panelBlocksKeys;
   const approvalIndex = approvalSelection?.eventId === eventId ? approvalSelection.index : -1;
