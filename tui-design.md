@@ -2,7 +2,7 @@
 
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
-**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`e123063`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
+**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`fc378de`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -1257,7 +1257,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `775d8d8` `feat: select approvals with numbers and arrows` | 审批编号选择器、未选中起始与重置规则、共享面板谓词、专项测试与黄金输出、双语 README | typecheck + 133 项测试 + `test:terminal` |
 | `4599b18` `fix: refresh the connection status while a picker is open` | 状态冻结改为按界面区分，启动选择器保持连接提示实时；断线重连与复制模式保持的回归测试 | typecheck + 134 项测试 |
 | `a5c7944` `refactor: confine filesystem operations to a storage unit` | 新增 `src/storage/`、`cost/storage.ts` 更名为 `cost/ledger-files.ts`、依赖门禁新增 fs 限制 | typecheck + 134 项测试 + `test:terminal` |
-| `e123063` `feat: log runtime memory samples by default` | 有界内存日志、`--memory-log`／`--no-memory-log`／`DSHT_MEMORY_LOG`、存储新增追加写 | 未运行（按要求跳过验证） |
+| `e123063` `feat: log runtime memory samples by default` | 有界内存日志、`--memory-log`／`--no-memory-log`／`DSHT_MEMORY_LOG`、存储新增追加写 | typecheck + 137 项测试 |
+| `fc378de` `fix: write the memory-log header when the file is created` | 新文件首次写入即带格式表头；新增测试固定该行为 | typecheck + 137 项测试 |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
