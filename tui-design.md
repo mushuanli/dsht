@@ -2,7 +2,7 @@
 
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
-**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`775d8d8`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
+**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`a5c7944`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 50 个模块（7 个业务域 + 共享契约），约 4,897 行；`tests/` 18 个测试文件；134 项测试 |
+| 源码规模 | `src/` 53 个模块（8 个业务域 + 共享契约），约 4,980 行；`tests/` 18 个测试文件；134 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -174,6 +174,7 @@ C4Component
   title 业务域与依赖方向（自下而上，无反向依赖）
 
   Component(root, "共享契约", "src/state.ts", "State 与 ControllerStore")
+  Component(storage, "storage/", "3 文件 120 行", "全部文件系统操作：私有读写、原子替换、独占创建与流式写入")
   Component(transport, "transport/", "5 文件 384 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
   Component(session, "session/", "11 文件 1600 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "8 文件 602 行", "价格、记录折叠、存储、账本、扫描器与 CostController")
@@ -183,6 +184,9 @@ C4Component
   Component(cli, "cli/", "1 文件 91 行", "参数、目录准备与进程生命周期")
 
   Rel(root, transport, "被依赖")
+  Rel(storage, transport, "被依赖")
+  Rel(storage, cost, "被依赖")
+  Rel(storage, session, "被依赖")
   Rel(transport, session, "被依赖")
   Rel(transport, cost, "被依赖")
   Rel(transport, catalog, "被依赖")
@@ -195,9 +199,10 @@ C4Component
 
 | 域 | 允许导入 | 约束 |
 | --- | --- | --- |
-| `transport/` | `transport` | 不包含业务规则 |
-| `session/` | `transport`、`session`、`state.ts` | 纯 TypeScript，不含 React |
-| `cost/` | `transport`、`cost` | 不依赖 session 投影，也不依赖 ui；React 与 Ink 不进入该域 |
+| `storage/` | `storage` | 唯一允许导入 `node:fs` / `node:fs/promises` 的域；不导入任何其他业务域 |
+| `transport/` | `transport`、`storage` | 不包含业务规则 |
+| `session/` | `transport`、`session`、`state.ts`、`storage` | 纯 TypeScript，不含 React |
+| `cost/` | `transport`、`cost`、`storage` | 不依赖 session 投影，也不依赖 ui；React 与 Ink 不进入该域 |
 | `catalog/` | `transport`、`catalog`、`state.ts` | 独立的模型元数据域 |
 | `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`state.ts` | 应用门面与连接世代 |
 | `ui/` | `transport`（不含 `client.ts`）、`session`、`cost`、`catalog`、`controller`、`ui`、`state.ts` | 唯一允许 React 与 Ink 的域；不得直接调用传输层 client |
@@ -205,7 +210,7 @@ C4Component
 | `state.ts` | `transport`、`session` | 共享状态契约 |
 | `index.ts` | `transport` | 公开库门面 |
 
-这些规则由 `tests/architecture/dependencies.test.ts` 机械检查：它遍历 `src/` 的全部模块、解析导入说明符，并附带一个合成用例证明每个禁止方向都会被拒绝。
+这些规则由 `tests/architecture/dependencies.test.ts` 机械检查：它遍历 `src/` 的全部模块、解析导入说明符，拒绝 `storage/` 之外的任何 `node:fs` 导入，并附带合成用例证明每个禁止方向都会被拒绝。
 
 ### 2.5 状态与渲染模型
 
@@ -541,7 +546,7 @@ const DEFAULT_PRICES: PriceVersion[]
 | --- | --- |
 | `pricing.ts` | 价格版本校验、峰谷选择、`chargeFor` 决策 |
 | `records.ts` | 宿主事件 → 最小计费事件 → 每请求样本 |
-| `storage.ts` | 第 2 代 cut 文件的原子读写、代数与字段校验 |
+| `ledger-files.ts` | 第 2 代 cut 文件的命名、代数与字段校验、旧截点清理（读写本身走 `src/storage/`） |
 | `ledger.ts` | 内存账本、固化规则、合计与覆盖度 |
 | `scanner.ts` | `session/list` → `session/follow` → `session/page` 的读取与地址解析 |
 | `controller.ts` | 扫描时机、定时器、并发合并与 `publish` 回调 |
@@ -549,7 +554,32 @@ const DEFAULT_PRICES: PriceVersion[]
 
 跨模块消费者（UI、`cli/`、测试）通过 `src/cost/index.ts` 导入。
 
-#### 3.2.6 `auth`（`src/transport/auth.ts`，库入口 `./auth`）
+#### 3.2.6 存储模块（`src/storage/`）
+
+```ts
+// files.ts
+function readText(path: string): Promise<string | undefined>
+function readPrivateFile(path: string, label: string): Promise<string | undefined>
+function writePrivateFile(path: string, contents: string): Promise<void>
+function createPrivateFile(path: string, contents: string): Promise<boolean>
+function writeExclusiveStream(path: string, source: () => Promise<AsyncIterable<Uint8Array>>, signal?: AbortSignal): Promise<void>
+function removeFile(path: string): Promise<void>
+
+// directories.ts
+function ensureDirectory(path: string): Promise<void>
+function ensurePrivateDirectory(path: string, label: string): Promise<void>
+function listEntries(path: string): Promise<string[]>
+```
+
+| 文件 | 职责 |
+| --- | --- |
+| `files.ts` | 读取、私有读取（拒绝符号链接／非本人属主／组或其他权限）、原子替换写入、独占创建、独占流式写入与删除 |
+| `directories.ts` | 目录创建、私有目录校验与目录项列举 |
+| `index.ts` | 域 barrel；`transport/`、`session/`、`cost/`、`cli/` 通过它访问 |
+
+`readPrivateFile` 与 `ensurePrivateDirectory` 的错误信息带上调用方传入的 `label`，因此 Cookie 相关的文案与重构前完全一致。`writeExclusiveStream` 先以 `wx` 创建目标文件、之后才调用 `source`，所以目标已存在时不会先访问宿主，而来源失败或取消都会删除残留文件。
+
+#### 3.2.7 `auth`（`src/transport/auth.ts`，库入口 `./auth`）
 
 ```ts
 class AuthenticationRequired extends Error {}
@@ -561,7 +591,7 @@ class CookieStore {
 function login(client: Client, token: string | undefined, store: CookieStore): Promise<void>
 ```
 
-#### 3.2.7 其他库函数
+#### 3.2.8 其他库函数
 
 ```ts
 // wire.ts
@@ -963,6 +993,8 @@ C4Component
 
 ### 5.2 本地磁盘文件
 
+全部文件系统调用集中在 `src/storage/`：业务域只决定路径、格式与保留策略，`storage` 负责系统调用、0600 文件与 0700 目录要求、临时文件加 `rename` 的原子替换，以及残留文件清理。下表是这些调用落到的实际文件。
+
 | 文件 | 默认路径 | 覆盖变量 | 权限 | 何时写入 |
 | --- | --- | --- | --- | --- |
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 | 认证成功且服务端下发持久 Cookie 时 |
@@ -1119,7 +1151,7 @@ C4Component
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（14 篇）与 `feature/`（1 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（15 篇）与 `feature/`（1 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 | Agent Note | 主题 |
 | --- | --- |
@@ -1138,6 +1170,7 @@ C4Component
 | `architecture/2026-09-11-terminal-steering-commands` | 自动 steer/queue、排队项管理与宿主命令 |
 | `architecture/2026-09-11-modular-boundaries-immutable-ledger` | 按业务域重组目录、拆分 Controller/App、账本改为不可重算 |
 | `architecture/2026-09-11-terminal-approval-options` | 审批编号选择器、未选中起始、Esc 与重放重置 |
+| `architecture/2026-09-11-terminal-storage-unit` | 文件操作统一归属 `src/storage/`，由依赖门禁强制 |
 
 ### 7.3 文档配对
 
@@ -1201,7 +1234,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 3. 是否新增或改变用户可见行为？在 `README.md` 与 `README.zh.md` 同一行位置同步更新，并重新记录 `README.i18n.yaml` 哈希。
 4. 是否属于非平凡变更？在 `tui/.agents/notes/implemented/` 同一 PR 内新增 Agent Note（含中文与配对文件）。
 5. 是否影响发布集合？核对 `package.json` 的 `files` 与 `scripts/test/package.mjs` 的允许路径。
-6. 收尾运行 `npm run typecheck`、`npm test`、`npm run test:terminal`；涉及打包时再运行 `npm run test:package`。
+6. 是否新增文件读写？只允许通过 `src/storage/`；`storage/` 之外出现 `node:fs` 会被 `tests/architecture/dependencies.test.ts` 拒绝。
+7. 收尾运行 `npm run typecheck`、`npm test`、`npm run test:terminal`；涉及打包时再运行 `npm run test:package`。
 
 ### 7.8 重构提交序列
 
@@ -1217,6 +1251,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `483036b` `docs: record the modular boundaries and immutable ledger decision` | Agent Note 三件套（英文、中文、配对哈希） | 配对哈希一致 |
 | `775d8d8` `feat: select approvals with numbers and arrows` | 审批编号选择器、未选中起始与重置规则、共享面板谓词、专项测试与黄金输出、双语 README | typecheck + 133 项测试 + `test:terminal` |
 | `4599b18` `fix: refresh the connection status while a picker is open` | 状态冻结改为按界面区分，启动选择器保持连接提示实时；断线重连与复制模式保持的回归测试 | typecheck + 134 项测试 |
+| `a5c7944` `refactor: confine filesystem operations to a storage unit` | 新增 `src/storage/`、`cost/storage.ts` 更名为 `cost/ledger-files.ts`、依赖门禁新增 fs 限制 | typecheck + 134 项测试 + `test:terminal` |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
@@ -1224,15 +1259,18 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 50 个模块、4,897 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 53 个模块、4,980 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `index.ts`（公开门面） | 3 | `Client`、`HttpError`、`RemoteError`、`Subscription` |
+| `storage/files.ts` | 90 | `readText`、`readPrivateFile`、`writePrivateFile`、`createPrivateFile`、`writeExclusiveStream`、`removeFile` |
+| `storage/directories.ts` | 27 | `ensureDirectory`、`ensurePrivateDirectory`、`listEntries` |
+| `storage/index.ts` | 3 | 域 barrel |
 | `state.ts`（共享契约） | 48 | `State`、`ControllerStore`、`initialState` |
 | `transport/wire.ts` | 33 | `Json`、`ObjectValue`、`object`、`string`、`array`、`safeText`、`errorText` |
 | `transport/client.ts` | 235 | `Client`、`HttpError`、`RemoteError`、`Subscription` |
-| `transport/auth.ts` | 79 | `CookieStore`、`login`、`AuthenticationRequired` |
+| `transport/auth.ts` | 54 | `CookieStore`、`login`、`AuthenticationRequired` |
 | `transport/endpoint.ts` | 23 | `Endpoint`、`endpoint` |
 | `transport/host.ts` | 14 | `HostAccess` |
 | `session/controller.ts` | 570 | `SessionController` |
@@ -1242,13 +1280,13 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
 | `session/navigation.ts` | 33 | `navigationCommand`、`sessionLabel`、`resolveTarget` |
 | `session/references.ts` | 41 | `FileReference`、`activeReference`、`fileMention`、`fileReferences` |
-| `session/export.ts` | 37 | `saveSessionLog` |
+| `session/export.ts` | 30 | `saveSessionLog` |
 | `session/types.ts` | 10 | `RemovalTarget`、`HistorySearch` |
 | `session/connection-view.ts` | 19 | `ConnectionView` |
 | `session/index.ts` | 16 | 域 barrel |
 | `cost/pricing.ts` | 129 | `DEFAULT_PRICES`、`pricesFrom`、`priceAt`、`lowestPrice`、`chargeFor`、`costDay` |
 | `cost/records.ts` | 62 | `costRecords`、`foldSamples` |
-| `cost/storage.ts` | 84 | `loadLedgers`、`saveLedger` |
+| `cost/ledger-files.ts` | 78 | `loadLedgers`、`saveLedger` |
 | `cost/ledger.ts` | 114 | `CostLedger`、`costText` |
 | `cost/scanner.ts` | 74 | `costAddresses`、`sessionCostHistory` |
 | `cost/controller.ts` | 92 | `CostController`、`CostHost` |
@@ -1277,13 +1315,14 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
 | `ui/theme/index.ts` | 27 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
-| `cli/index.tsx` | 91 | 可执行入口（无导出） |
+| `cli/index.tsx` | 92 | 可执行入口（无导出） |
 
 ```mermaid
 C4Component
   title 源码索引（按业务域）
 
   Component(root, "根契约", "index.ts, state.ts", "公开库门面与共享状态")
+  Component(storage, "storage/", "files, directories, index", "3 文件 120 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "5 文件 384 行")
   Component(session, "session/", "controller, transcript, history, telemetry, memory, navigation, references, export, types, connection-view, index", "11 文件 1600 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, storage, types, index", "8 文件 602 行")
