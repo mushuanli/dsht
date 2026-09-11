@@ -10,6 +10,7 @@ import { useTheme } from '../theme/index.ts';
 export function HistoryViewport({ rows }: { rows: HistoryRow[] }) {
   const theme = useTheme();
   return <Text>{rows.map((row, index) => <Text key={index} color={theme.colors[row.kind]} bold={row.bold}>
-    {row.text}{index < rows.length - 1 ? '\n' : ''}
+    {row.spans ? row.spans.map((span, index) => <Text key={index} bold={span.bold} italic={span.italic}
+      underline={span.underline} strikethrough={span.strikethrough} inverse={span.inverse}>{span.text}</Text>) : row.text}{index < rows.length - 1 ? '\n' : ''}
   </Text>)}</Text>;
 }

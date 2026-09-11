@@ -4,12 +4,14 @@ import assert from 'node:assert/strict';
 import wrapAnsi from 'wrap-ansi';
 import { Transcript, toolLine } from '../../src/session/transcript.ts';
 import { historyLayout, releaseHistoryLayout } from '../../src/session/history.ts';
+import { markdownRows } from '../../src/session/markdown.ts';
 
 /** One-shot rendering of the live parts, as the layout computed it before wrapping incrementally. */
 function oneShot(transcript: Transcript, width: number, reasoning: 'row' | 'full'): string[] {
   const rows = transcript.liveParts(width).flatMap(part => {
     const fold = part.kind === 'reasoning' && reasoning === 'row' && (part.closed || width < 60);
     const text = fold ? toolLine(`◇ /think live · ${part.text.slice(2)}`, width) : part.text;
+    if (part.kind === 'text') return markdownRows(text, width).map(row => row.text);
     return wrapAnsi(text, width, { hard: true, trim: !['tool', 'success', 'error'].includes(part.kind) }).split('\n');
   });
   return transcript.liveToolOnly ? rows : ['✦ Assistant · streaming', ...rows];

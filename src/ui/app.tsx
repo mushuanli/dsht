@@ -365,6 +365,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         case 'export':
           await historyOperation(async signal => { setNotice(`Saved session log: ${await controller.exportLog(submission.destination, signal)}`); }, 'Exporting session log…');
           return;
+        case 'exportHtml':
+          await historyOperation(async signal => { setNotice(`Saved loaded conversation: ${await controller.exportHtml(submission.destination, signal)}`); }, 'Exporting loaded conversation…');
+          return;
         case 'answer': await answerQuestion(question!.multiSelect === true ? choiceState.selected : [], submission.text); return;
         case 'error': throw new Error(submission.message);
         case 'prompt': await controller.prompt(submission.text); setHistoryWindow(undefined); setScroll(0); return;

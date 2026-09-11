@@ -1350,6 +1350,21 @@ test('/export saves the session ZIP to the requested local path', async t => {
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
 });
 
+test('/export-html saves the loaded conversation locally without submitting a prompt', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const root = await mkdtemp(join(tmpdir(), 'dsht-export-html-ui-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'conversation view.html');
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, `/export-html "${path}"`); await pressKey(ui, '\r');
+  await until(() => !controller.state.busy && ui.lastFrame()?.includes('Saved loaded conversation:') === true);
+  assert.match(await readFile(path, 'utf8'), /你好/);
+  assert.equal(fixture.exportRequests, 0);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
 test('questions, approvals and model dialogs retain recent context above the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 12, hasMore: false, header: { id: 's1' }, assistantStream: { revision: 0 }, records: [

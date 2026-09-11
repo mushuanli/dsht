@@ -26,6 +26,7 @@ export type Submission =
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
   | { kind: 'export'; destination?: string }
+  | { kind: 'exportHtml'; destination?: string }
   | { kind: 'answer'; text: string }
   | { kind: 'error'; message: string }
   | { kind: 'prompt'; text: string };
@@ -116,6 +117,11 @@ export function classifySubmission(raw: string, context: SubmissionContext): Sub
     if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
     const destination = value.slice(7).trim().replace(/^(["'])(.*)\1$/, '$2');
     return { kind: 'export', ...(destination ? { destination } : {}) };
+  }
+  if (/^\/export-html(?:\s|$)/.test(value)) {
+    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
+    const destination = value.slice(12).trim().replace(/^(["'])(.*)\1$/, '$2');
+    return { kind: 'exportHtml', ...(destination ? { destination } : {}) };
   }
   if (context.question) return { kind: 'answer', text: value };
   if (context.pending) return { kind: 'error', message: 'Answer the approval with /allow or /deny' };

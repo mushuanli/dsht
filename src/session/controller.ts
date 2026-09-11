@@ -6,6 +6,7 @@ import type { HostAccess } from '../transport/host.ts';
 import { array, errorText, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { ControllerStore, State } from '../state.ts';
 import { saveSessionLog } from './export.ts';
+import { saveTranscriptHtml } from './export-html.ts';
 import { releaseHistoryLayout } from './history.ts';
 import type { HistoryLimits } from './memory.ts';
 import { resolveTarget, sessionLabel } from './navigation.ts';
@@ -401,6 +402,15 @@ export class SessionController {
    */
   async exportLog(path: string | undefined, signal: AbortSignal): Promise<string> {
     return saveSessionLog(this.host.require(), this.sessionId, path, signal);
+  }
+
+  /** Save the retained conversation with offline Markdown, diagrams and math.
+   * @param path - Optional destination; existing files are never overwritten.
+   * @param signal - Cancels the write.
+   * @returns Absolute saved filename.
+   */
+  async exportHtml(path: string | undefined, signal: AbortSignal): Promise<string> {
+    return saveTranscriptHtml(this.store.state.transcript, this.sessionId, path, signal);
   }
 
   /** Admit text once as steering while running, or a new turn while idle; a lost response can leave delivery uncertain.

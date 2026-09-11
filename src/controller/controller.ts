@@ -318,6 +318,13 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   async exportLog(path: string | undefined, signal: AbortSignal): Promise<string> { return this.session.exportLog(path, signal); }
 
+  /** Save loaded Markdown, diagrams and math as offline HTML.
+   * @param path - Optional filename; existing files are not replaced.
+   * @param signal - Cancels the write.
+   * @returns Absolute saved filename.
+   */
+  async exportHtml(path: string | undefined, signal: AbortSignal): Promise<string> { return this.session.exportHtml(path, signal); }
+
   /** Admit text once as steering while running, or a new turn while idle.
    * @param text - Composed prompt text.
    */

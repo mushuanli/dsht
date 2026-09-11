@@ -41,6 +41,22 @@ test('Mocha emits truecolor role colors and supports a plain terminal', () => {
   assert.ok(plain.includes('❯ User\n✦ Assistant'));
 });
 
+test('Markdown styles render through Ink without changing terminal row geometry', () => {
+  const source = `
+import { createElement } from 'react';
+import { renderToString } from 'ink';
+import { HistoryViewport } from './src/ui/chat/history-view.tsx';
+import { markdownRows } from './src/session/markdown.ts';
+const rows = markdownRows('**Bold** *italic* ~~gone~~ ' + String.fromCharCode(96) + 'code' + String.fromCharCode(96), 20).map(row => ({...row, kind:'text'}));
+process.stdout.write(renderToString(createElement(HistoryViewport,{rows}),{columns:20}));
+`;
+  const colored = renderFixture(source, '3');
+  const plain = renderFixture(source, '0');
+  assert.equal(stripVTControlCharacters(colored), plain);
+  for (const code of [1, 3, 7, 9]) assert.ok(colored.includes(`\x1b[${code}m`), colored);
+  assert.doesNotMatch(plain, /\*|~|`/);
+});
+
 test('status groups retain their colors and identical plain layout across terminal widths', () => {
   const statusScript = `
 import { createElement } from 'react';

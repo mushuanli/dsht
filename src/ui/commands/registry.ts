@@ -31,6 +31,7 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/permission', usage: '[preset]', description: 'View or switch the host permission preset' },
   { command: '/feedback', usage: 'text', description: 'Record feedback about the session' },
   { command: '/export', usage: '[local.zip]', description: 'Save the session log ZIP to a new local file' },
+  { command: '/export-html', usage: '[local.html]', description: 'Save loaded conversation with diagrams and math as offline HTML' },
   { command: '/allow', description: 'Approve the pending request once' },
   { command: '/deny', description: 'Reject the pending request' },
   { command: '/status', description: 'Show full session status details' },

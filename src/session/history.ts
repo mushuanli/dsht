@@ -1,13 +1,14 @@
 /** Indexed semantic history with bounded terminal-row caching and viewport-only materialization. */
 import wrapAnsi from 'wrap-ansi';
 import { toolLine, type Message, type MessagePart, type Transcript } from './transcript.ts';
+import { hasMarkdown, markdownRows, type MarkdownSpan } from './markdown.ts';
 
 /** Default fold mode; individual sequence overrides are view state, never stored content. */
 export type Reasoning = 'row' | 'full';
 /** Color semantics are independent of the selected terminal palette. */
 export type RowKind = MessagePart['kind'] | 'user' | 'assistant' | 'context' | 'muted';
 /** One visible terminal row; no remote ANSI is allowed into its text. */
-export interface HistoryRow { text: string; kind: RowKind; bold?: boolean; seq?: number }
+export interface HistoryRow { text: string; kind: RowKind; bold?: boolean; seq?: number; spans?: MarkdownSpan[] }
 interface Segment { message: Message; start: number; count: number; reasoning: Reasoning; heading: boolean; assistantSeen: boolean }
 interface CachedRows { width: number; reasoning: Reasoning; heading: boolean; rows: HistoryRow[] }
 
@@ -24,6 +25,7 @@ class LayoutIndex {
   private heights = new WeakMap<Message, { width: number; reasoning: Reasoning; heading: boolean; count: number }>();
   /** Incremental wrapping state for the growing live tail, keyed by each live part's identity. */
   readonly liveWraps = new Map<string, LiveWrap>();
+  readonly liveMarkdown = new Map<string, { length: number; rich: boolean }>();
   constructor(readonly width: number, readonly reasoning: Reasoning, readonly overrides: ReadonlySet<number>) {}
 
   rows(message: Message, reasoning: Reasoning, heading: boolean): HistoryRow[] {
@@ -48,6 +50,7 @@ class LayoutIndex {
     this.messages = []; this.segments = []; this.offsets.clear();
     this.cache.clear(); this.cacheSize = 0; this.length = 0; this.heights = new WeakMap();
     this.liveWraps.clear();
+    this.liveMarkdown.clear();
   }
 
   get cachedRowCount(): number { return this.cacheSize; }
@@ -214,7 +217,8 @@ function partRows(parts: MessagePart[], width: number, reasoning: Reasoning, seq
     if (cached?.width === width && cached.reasoning === reasoning) return cached.rows;
     const fold = part.kind === 'reasoning' && reasoning === 'row' && (seq !== undefined || part.closed || width < 60);
     const text = fold ? toolLine(`◇ /think${seq === undefined ? ' live' : ` ${seq}`} · ${part.text.slice(2)}`, width) : part.text;
-    const rows = wrapRows(text, width, part.kind, seq);
+    const rows = part.kind === 'text' ? markdownRows(text, width).map(row => ({ ...row, kind: part.kind, seq }))
+      : wrapRows(text, width, part.kind, seq);
     if (seq === undefined) liveRows.set(part, { width, reasoning, rows });
     return rows;
   });
@@ -255,9 +259,26 @@ export function historyLayout(transcript: Transcript, width: number, reasoning: 
   }
   index.update(transcript.messagesForWidth(width));
   const live = transcript.liveParts(width);
+  const keys = new Set(live.map(part => part.key));
+  for (const key of index.liveWraps.keys()) if (!keys.has(key)) index.liveWraps.delete(key);
+  for (const key of index.liveMarkdown.keys()) if (!keys.has(key)) index.liveMarkdown.delete(key);
   const streamed: HistoryRow[] = live.length ? [
     ...(transcript.liveToolOnly || index.assistantSeen ? [] : [{ text: '✦ Assistant · streaming', kind: 'assistant' as const, bold: true }]),
-    ...live.flatMap(part => livePartRows(part, index.liveWraps, width, liveReasoning)),
+    ...live.flatMap(part => {
+      if (part.kind === 'text') {
+        const previous = part.key === undefined ? undefined : index.liveMarkdown.get(part.key);
+        const extendsPrevious = previous && part.text.length >= previous.length;
+        // Include the preceding line so a split list marker or blank line can change Markdown parsing.
+        const start = extendsPrevious ? part.text.lastIndexOf('\n', Math.max(0, previous.length - 2)) + 1 : 0;
+        const rich = !!(extendsPrevious && previous.rich) || hasMarkdown(part.text.slice(start));
+        if (part.key !== undefined) index.liveMarkdown.set(part.key, { length: part.text.length, rich });
+        if (rich) {
+          if (part.key !== undefined) index.liveWraps.delete(part.key);
+          return partRows([part], width, liveReasoning);
+        }
+      }
+      return livePartRows(part, index.liveWraps, width, liveReasoning);
+    }),
   ] : [];
   const committed = index;
   const length = committed.length + streamed.length;
