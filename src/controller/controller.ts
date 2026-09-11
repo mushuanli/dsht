@@ -5,7 +5,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Client, HttpError, RemoteError, type Subscription } from '../transport/client.ts';
 import { AuthenticationRequired } from '../transport/auth.ts';
 import { resolveTarget, sessionLabel } from '../session/navigation.ts';
-import { CostLedger, costRecords } from '../cost/ledger.ts';
+import { CostController } from '../cost/controller.ts';
+import type { CostLedger } from '../cost/ledger.ts';
 import { Telemetry } from '../session/telemetry.ts';
 import { Transcript, toolLine } from '../session/transcript.ts';
 import { releaseHistoryLayout } from '../session/history.ts';
@@ -44,23 +45,6 @@ export interface HistorySearch {
   truncated: boolean;
 }
 
-/** Wire addresses for one `session/list` row, in the order the cost scan should try them.
- *
- * A subagent child is reachable only under its durable parent, and the list row omits the delivery
- * mode, so both modes are offered with the continuable form first.
- * @param session - One row from the host session list.
- * @returns One plain-session address, or both subagent forms when the row is a child.
- */
-export function costAddresses(session: ObjectValue): ObjectValue[] {
-  const sessionId = string(session.sessionId);
-  const parentSessionId = typeof session.parentSessionId === 'string' ? session.parentSessionId : '';
-  if (session.origin !== 'subagent' || parentSessionId === '') return [{ kind: 'session', sessionId }];
-  return [
-    { kind: 'subagent', parentSessionId, childSessionId: sessionId, mode: 'continuable' },
-    { kind: 'subagent', parentSessionId, childSessionId: sessionId, mode: 'one-shot' },
-  ];
-}
-
 /** Owns reconnects and subscriptions. User commands remain single-attempt operations. */
 export class Controller {
   state: State = { version: 0, online: false, busy: false, screen: 'workspaces', status: 'Connecting…',
@@ -84,10 +68,8 @@ export class Controller {
   private stoppingSession?: string;
   private interruptTask: Promise<boolean> | undefined;
   private admission: Promise<Json | undefined> | undefined;
-  private costUpdates = new Map<string, number>();
-  private costAbort?: AbortController;
-  private costTask: Promise<void> | undefined;
-  private costTimer: ReturnType<typeof setInterval> | undefined;
+  /** Background billing scan; present only when a ledger was supplied. */
+  readonly cost: CostController | undefined;
 
   /** Host running state covers model generation, tools, and waits between assistant attempts. */
   get running(): boolean {
@@ -192,7 +174,14 @@ export class Controller {
   }
   constructor(readonly base: string, token: string | undefined, readonly initialSession?: string,
     private makeClient: () => Client = () => new Client(base),
-    private authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS) {}
+    private authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS) {
+    if (costs) this.cost = new CostController(costs, {
+      client: () => this.client,
+      online: () => this.state.online,
+      signal: () => this.abort.signal,
+      publish: () => this.update({}),
+    });
+  }
 
   /** React-compatible state subscription. */
   subscribe = (listener: () => void): (() => void) => {
@@ -208,13 +197,12 @@ export class Controller {
   /** Cancel retries and HTTP, close the socket, and wait for the loop to settle. */
   async stop(): Promise<void> {
     this.abort.abort();
-    clearInterval(this.costTimer);
     this.generationFailed?.(new Error('Client stopped'));
     await this.client?.close();
     await this.runTask;
     await this.interruptTask;
     await Promise.all(this.catalogTasks);
-    await this.costTask;
+    await this.cost?.stop();
     this.releaseTranscript();
   }
 
@@ -259,93 +247,7 @@ export class Controller {
    * @param signal - Optional cancellation for an explicit /cost refresh.
    */
   async refreshCosts(signal: AbortSignal = this.abort.signal): Promise<void> {
-    if (!this.costs) return;
-    if (this.costTask) {
-      const cancel = () => this.costAbort?.abort();
-      signal.addEventListener('abort', cancel, { once: true });
-      try { await this.costTask; } finally { signal.removeEventListener('abort', cancel); }
-      return;
-    }
-    this.costAbort = new AbortController();
-    signal = AbortSignal.any([signal, this.abort.signal, this.costAbort.signal]);
-    const ledger = this.costs; const client = this.host;
-    ledger.scanning = true; ledger.error = ''; this.update({});
-    const task = (async () => {
-      try {
-        const sessions = array(object(await client.call('session/list', { _request: {} }, signal)).items).map(object);
-        signal.throwIfAborted();
-        const failures: string[] = [];
-        for (const session of sessions) {
-          signal.throwIfAborted();
-          const sessionId = string(session.sessionId);
-          if (!session.running && typeof session.updatedAt === 'number' && this.costUpdates.get(sessionId) === session.updatedAt) continue;
-          try {
-            const history = await this.sessionCostHistory(session, signal);
-            await ledger.replace(sessionId, history.cursor, history.events);
-            if (!session.running && typeof session.updatedAt === 'number') this.costUpdates.set(sessionId, session.updatedAt);
-            this.update({});
-          } catch (error) {
-            // One unreachable or rejected session must not freeze every other session's rates.
-            signal.throwIfAborted();
-            failures.push(`${sessionId}: ${errorText(error)}`);
-          }
-        }
-        ledger.error = failures.length === 0 ? '' : `${failures.length} of ${sessions.length} sessions failed: ${failures[0]}`;
-        ledger.scannedAt = Date.now();
-      } catch (error) { ledger.error = errorText(error); }
-      finally { ledger.scanning = false; this.update({}); }
-    })();
-    this.costTask = task;
-    try { await task; } finally { this.costTask = undefined; }
-  }
-
-  /** Read one session's complete cost history, retrying a subagent child with its other delivery mode. */
-  private async sessionCostHistory(session: ObjectValue, signal: AbortSignal): Promise<{ cursor: number; events: ObjectValue[] }> {
-    let lastError: unknown;
-    for (const address of costAddresses(session)) {
-      try { return await this.readCostHistory(address, signal); }
-      catch (error) {
-        lastError = error;
-        // Only a delivery-mode mismatch justifies the other form; every other failure is final here.
-        if (!(error instanceof RemoteError && error.code === 'subagent/unauthorized')) throw error;
-      }
-    }
-    throw lastError;
-  }
-
-  /** Page one addressed session's history into the billing events the ledger folds. */
-  private async readCostHistory(address: ObjectValue, signal: AbortSignal): Promise<{ cursor: number; events: ObjectValue[] }> {
-    const client = this.host;
-    const snapshot = await new Promise<ObjectValue>((resolve, reject) => {
-      let sub: Subscription | undefined;
-      const timeout = setTimeout(() => finish(new Error('Cost history snapshot timed out')), client.timeoutMs);
-      const onAbort = () => finish(new Error('Cost refresh cancelled'));
-      const finish = (error?: Error, frame?: ObjectValue) => {
-        clearTimeout(timeout); signal.removeEventListener('abort', onAbort); sub?.cancel();
-        if (error) reject(error); else resolve(frame!);
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      try { sub = client.subscribe('session/follow', { request: { address, maxMessages: 80, assistantStream: true } }, {
-        item: value => { const frame = object(value); if (frame.type === 'snapshot') finish(undefined, frame); },
-        end: error => finish(error ?? new Error('Cost history stream ended')),
-      }); } catch (error) { finish(error instanceof Error ? error : new Error(errorText(error))); }
-    });
-    const cursor = snapshot.cursor;
-    if (typeof cursor !== 'number' || !Number.isSafeInteger(cursor)) throw new Error('Invalid cost history cursor');
-    let page = snapshot; const events: ObjectValue[] = [];
-    while (true) {
-      signal.throwIfAborted();
-      const records = array(page.records);
-      events.push(...costRecords(records));
-      if (!page.hasMore) break;
-      const seqs = records.map(r => object(object(r).event).seq);
-      if (!seqs.length || seqs.some(n => typeof n !== 'number' || !Number.isSafeInteger(n))) throw new Error('Invalid cost history page');
-      const beforeSeq = Math.min(...seqs as number[]);
-      page = object(await client.call('session/page', { request: { address, throughSeq: cursor, beforeSeq, maxMessages: 80 } }, signal));
-      if (page.hasMore && array(page.records).every(r => Number(object(object(r).event).seq) >= beforeSeq)) throw new Error('Cost history page did not advance');
-    }
-    if (object(snapshot.header).isSeeded === true && !events.some(e => e.type === 'session/end-seed' && object(e.data).inherited === true)) throw new Error('Cannot attribute inherited session usage');
-    return { cursor, events };
+    await this.cost?.refresh(signal);
   }
 
   /** Refresh both lists from the host, then show the requested picker. */
@@ -785,7 +687,7 @@ export class Controller {
                 this.runningUpdates.set(sessionId, args[1]);
                 this.update({ sessions: this.state.sessions.map(row => row.sessionId === sessionId ? { ...row, running: args[1]! } : row),
                   ...(sessionId === this.state.sessionId ? { status: args[1] ? 'Running…' : 'Idle' } : {}) });
-                if (!args[1] && this.costs && this.state.online) void this.refreshCosts();
+                if (!args[1] && this.cost) this.cost.onTurnIdle();
               } else if (frame.type === 'emit' && ['llm/adapters-updated', 'settings/document-updated', 'credentials/reference-updated'].includes(String(frame.event))) {
                 this.refreshCatalog(client);
               } else if (frame.type === 'emit' && frame.event === 'api-session/error') {
@@ -822,11 +724,7 @@ export class Controller {
         const sessionId = this.state.sessionId ?? this.initialSession;
         if (sessionId && (screen === 'chat' || this.initialSession && !this.state.sessionId)) await this.selectSession(sessionId);
         attempt = 0;
-        if (this.costs) {
-          void this.refreshCosts();
-          clearInterval(this.costTimer);
-          this.costTimer = setInterval(() => { if (this.state.online) void this.refreshCosts(); }, 60_000);
-        }
+        this.cost?.start();
         const error = await disconnected;
         if (!this.abort.signal.aborted) throw error;
       } catch (error) {
@@ -836,14 +734,13 @@ export class Controller {
         }
         if (!this.abort.signal.aborted) this.update({ error: errorText(error), status: 'Reconnecting…' });
       } finally {
-        clearInterval(this.costTimer);
         this.generationFailed = undefined;
         this.selection++;
         this.state.transcript.ready = false;
         this.interactions.clear();
         this.update({ online: false, pending: [] });
         await client.close();
-        await this.costTask;
+        await this.cost?.stop();
       }
       if (!this.abort.signal.aborted) {
         try { await delay(Math.min(500 * 2 ** attempt++, 10_000) * (0.8 + Math.random() * 0.4), undefined,

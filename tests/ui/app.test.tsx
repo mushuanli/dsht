@@ -419,7 +419,7 @@ test('search loads old messages, opens cross-session matches and cancels local p
 });
 
 test('/cost displays cached session, daily and three-day estimates without submitting a prompt', async t => {
-  const { CostLedger, costRecords } = await import('../../src/cost/ledger.ts');
+  const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
   const fixture = await host(); t.after(() => fixture.close());
   const ledger = new CostLedger();
   const recording = (await readFile(new URL('../fixtures/workspace-edit.session.jsonl', import.meta.url), 'utf8')).trim().split('\n').map(line => object(JSON.parse(line)));
@@ -572,7 +572,7 @@ test('Esc closes an open command panel and keeps the draft beside it', async t =
 });
 
 test('cost coverage warns through the status prefix instead of rewriting a subtotal', async t => {
-  const { CostLedger, costRecords } = await import('../../src/cost/ledger.ts');
+  const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
   const fixture = await host(); t.after(() => fixture.close());
   const ledger = new CostLedger();
   const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);

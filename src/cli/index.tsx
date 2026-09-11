@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, pricesFrom } from '../cost/ledger.ts';
+import { CostLedger, DEFAULT_PRICES, pricesFrom } from '../cost/index.ts';
 import { parseArgs } from 'node:util';
 import { render } from 'ink';
 import { App } from '../ui/app.tsx';

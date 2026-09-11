@@ -3,7 +3,7 @@ import { useTheme } from '../theme/index.ts';
 import { memo, useEffect, useState } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import wrapAnsi from 'wrap-ansi';
-import { costText, type CostTotal } from '../../cost/ledger.ts';
+import { costText, type CostTotal } from '../../cost/index.ts';
 import { toolLine } from '../../session/transcript.ts';
 import type { Controller } from '../../controller/controller.ts';
 import { safeText, type Json, type ObjectValue } from '../../transport/wire.ts';

@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, pricesFrom, priceAt, lowestPrice, costRecords, costDay, costText, type CostTotal } from '../../src/cost/ledger.ts';
-import { Controller, costAddresses } from '../../src/controller/controller.ts';
+import { CostLedger, DEFAULT_PRICES, pricesFrom, priceAt, lowestPrice, costRecords, costAddresses, costDay, costText, type CostTotal } from '../../src/cost/index.ts';
+import { Controller } from '../../src/controller/controller.ts';
 import { host, until } from '../support/host.ts';
 import type { ObjectValue } from '../../src/transport/wire.ts';
 
@@ -111,24 +111,28 @@ test('fork seed records are excluded while inherited request routes remain usabl
   assert.deepEqual(summary(ledger.total('fork')), { amount: 5.02, unknown: 0, estimated: 0, records: 1 });
 });
 
-test('every scan reprices stored requests from the current table and stores no conversation text', async t => {
+test('a decided charge keeps its amount when the price table changes and stores no conversation text', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-cost-')); t.after(() => rm(directory, { recursive: true, force: true }));
   const ledger = new CostLedger(DEFAULT_PRICES, directory); await ledger.load();
   const events = costRecords([record(0, at('2026-09-10T10:00:00'))]);
   await ledger.replace('s1', 0, events);
   assert.equal(summary(ledger.total('s1')).amount, 10.04);
+  // Editing prices.json cannot move an amount an earlier scan already decided.
   const changed = DEFAULT_PRICES.map(p => ({ ...p, peak: { ...p.peak, input: 999 } }));
   const restarted = new CostLedger(changed, directory); await restarted.load();
   await restarted.replace('s1', 1, events);
-  assert.equal(summary(restarted.total('s1')).amount, 1007.04);
+  assert.equal(summary(restarted.total('s1')).amount, 10.04);
+  // A request first seen after the change is priced from the table loaded then.
+  await restarted.replace('s1', 2, costRecords([record(0, at('2026-09-10T10:00:00')), record(1, at('2026-09-10T11:00:00'), 1)]));
+  assert.equal(summary(restarted.total('s1')).amount, 1017.08);
   const files = await readdir(directory); assert.equal(files.length, 1);
   assert.doesNotMatch(await readFile(join(directory, files[0]!), 'utf8'), /PRIVATE PROMPT|content/);
 });
 
-test('a renamed table reprices charges an earlier scan already priced', async t => {
+test('a renamed table leaves an already decided charge at its recorded amount', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-cost-')); t.after(() => rm(directory, { recursive: true, force: true }));
-  // The 2026-09-10 correction renamed the Flash model and lowered its rates, which left stored
-  // charges matching neither the recorded alias nor the new family name.
+  // The 2026-09-10 correction renamed the Flash model and lowered its rates. The amount decided
+  // before that correction is a historical fact, so the new table cannot move it.
   const legacy = { ...DEFAULT_PRICES[0]!, id: 'deepseek-2026-09-10-deepseek-v4-flash', model: 'deepseek-v4-flash',
     peak: { input: 3, cacheRead: 0.1, cacheWrite: 3, output: 9 },
     offPeak: { input: 1.5, cacheRead: 0.05, cacheWrite: 1.5, output: 4.5 } };
@@ -137,8 +141,30 @@ test('a renamed table reprices charges an earlier scan already priced', async t 
   await before.replace('s1', 0, events);
   assert.equal(summary(before.total('s1')).amount, 12.1);
   const after = new CostLedger(DEFAULT_PRICES, directory); await after.load();
+  assert.equal(summary(after.total('s1')).amount, 12.1);
   await after.replace('s1', 1, events);
-  assert.equal(summary(after.total('s1')).amount, 10.04);
+  assert.equal(summary(after.total('s1')).amount, 12.1);
+});
+
+test('a charge no price version covered stays unpriced when the table later gains one', async () => {
+  const ledger = new CostLedger([]);
+  const events = costRecords([record(0, at('2026-09-10T10:00:00'), 0, 'unlisted-model', 'unlisted-provider')]);
+  await ledger.replace('s1', 0, events);
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 0, unknown: 1, estimated: 0, records: 1 });
+  ledger.prices.push(...DEFAULT_PRICES.map(price => ({ ...price, provider: 'unlisted-provider', model: 'unlisted-model' })));
+  await ledger.replace('s1', 1, events);
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 0, unknown: 1, estimated: 0, records: 1 });
+});
+
+test('a sample without usage stays open until the host reports tokens', async () => {
+  const ledger = new CostLedger();
+  const attempt = { type: 'event', event: { seq: 0, type: 'assistant/attempt', data: { turn: 1, step: 0,
+    message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } };
+  await ledger.replace('s1', 0, costRecords([attempt]));
+  assert.equal(ledger.total('s1').unknown, 1);
+  await ledger.replace('s1', 1, costRecords([attempt, record(1, at('2026-09-10T10:00:00'), 0)]));
+  assert.equal(summary(ledger.total('s1')).amount, 10.04);
+  assert.equal(ledger.total('s1').unknown, 0);
 });
 
 test('billing scans all HTTP sessions without changing the selected session', async t => {
@@ -219,7 +245,7 @@ test('a subagent session is read under its parent address and its other delivery
   assert.equal(ledger.error, '');
 });
 
-test('one failing session does not stop the others from being repriced', async t => {
+test('one failing session does not stop the others from being scanned', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 1, hasMore: false, header: { id: 's1' }, records: [record(0, at('2026-09-10T10:00:00'))] };
   fixture.failFollow = new Set(['s2']);
