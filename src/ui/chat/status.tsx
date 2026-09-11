@@ -37,15 +37,15 @@ export function metricLines(values: ObjectValue, defaultModel: ObjectValue | und
   const used = numeric(pressure.projectedTokens) ?? numeric(pressure.pressureTokens);
   const capacity = numeric(pressure.contextWindow);
   const context = used !== undefined && capacity !== undefined && capacity > 0
-    ? `~${Math.min(100, Math.round(used / capacity * 100))}% (${count(used)} / ${count(capacity)})`
+    ? `~${Math.min(100, Math.round(used / capacity * 100))}% (${count(used)}/${count(capacity)})`
     : 'unknown';
   const usage = record(values.tokenUsage);
   const buckets = [usage.uncachedInputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].map(numeric);
   const total = buckets.every(value => value !== undefined) ? (buckets as number[]).reduce((a, b) => a + b, 0) : undefined;
   return [
     `Model: ${model}${running && next !== 'unknown' && next !== model ? ` · Next: ${next}` : ''}`,
-    `Context: ${context} · Tokens: ${count(total)} total`,
-    `In (uncached): ${count(buckets[0])} · Out: ${count(buckets[1])} · Cache read/write: ${count(buckets[2])}/${count(buckets[3])}`,
+    `Context ${context} · ${count(total)} tok`,
+    `In ${count(buckets[0])} · Out ${count(buckets[1])} · Cache ${count(buckets[2])}/${count(buckets[3])}`,
   ];
 }
 
@@ -163,20 +163,23 @@ const StatusDetails = memo(function StatusDetails({ controller, theme, width, no
   const label = workspace ? `${workspace.title} · ${workspace.path}` : 'none selected';
   // Every detail row wraps to the terminal width, so a narrow terminal loses nothing; lines that
   // still do not fit are scrolled rather than dropped, because the panel shares the screen height.
+  // Rows are merged and labelled compactly so a normal terminal shows every detail on one screen;
+  // the wrap and the scroll offset remain the fallback for a short or very narrow terminal.
+  const turns = count(numeric(record(view.values.sessionStats).turns));
+  const duration = since === undefined ? 'unknown duration' : elapsedTime(now - since);
   const detail: StatusDetail[] = [
     { key: 'activity', color: running ? theme.colors.context : theme.colors.muted, text: running
-      ? `◐ Working · ${since === undefined ? 'unknown duration' : elapsedTime(now - since)}${state.transcript.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
-      : `● Ready · Ctrl+C exit${!state.online ? ' · disconnected, last known status' : ''}` },
-    { key: 'host', text: `Host: ${safeText(controller.base)} · ${safeText(state.status)}` },
-    ...state.sessionId ? [{ key: 'session', text: `Session ID: ${safeText(state.sessionId)}` }] : [],
-    ...controller.sessionMode ? [{ key: 'mode', text: `Mode: ${safeText(controller.sessionMode)}` }] : [],
-    { key: 'workspace', text: `Workspace: ${safeText(label)}` },
+      ? `◐ Working · ${duration}${state.transcript.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
+      : '● Ready · Ctrl+C exit' },
+    { key: 'host', text: `${safeText(controller.base)} · ${safeText(state.status)}${!state.online ? ' · offline, last known status' : ''}` },
+    ...state.sessionId
+      ? [{ key: 'session', text: `Session ${safeText(state.sessionId)}${controller.sessionMode ? ` · ${safeText(controller.sessionMode)}` : ''}` }] : [],
+    { key: 'workspace', text: `Workspace ${safeText(label)}` },
     ...metricLines(view.values, state.defaultModel, running).map((line, index) => ({ key: `metric-${index}`, text: safeText(line), dim: true })),
-    ...costs ? [{ key: 'cost', text: `Cost (CNY estimate): Session ${sessionCost} · Today ${todayCost}`, dim: true }] : [],
+    ...costs ? [{ key: 'cost', text: `Cost ${sessionCost} session · ${todayCost} today · ${turns} turns`, dim: true }] : [],
+    { key: 'queued', text: `Queued ${count(view.queued)} · Jobs ${count(view.jobs)}${costs ? '' : ` · ${turns} turns`}`, dim: true },
     ...costs && coverage === 'partial'
       ? [{ key: 'coverage', color: theme.colors.context, text: `Cost coverage incomplete: ${costs.error ? safeText(costs.error) : 'no complete scan yet'}` }] : [],
-    { key: 'turns', text: `Turns: ${count(numeric(record(view.values.sessionStats).turns))}`, dim: true },
-    { key: 'queued', text: `Queued: ${count(view.queued)} · Active jobs: ${count(view.jobs)}`, dim: true },
     ...state.controlError ? [{ key: 'control-error', color: theme.colors.context, text: safeText(state.controlError) }] : [],
     ...state.presetError ? [{ key: 'preset-error', color: theme.colors.context, text: `Preset names unavailable: ${safeText(state.presetError)}` }] : [],
     ...state.modelError ? [{ key: 'model-error', color: theme.colors.context, text: `Model catalog unavailable: ${safeText(state.modelError)}` }] : [],

@@ -238,7 +238,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   assert.match(ui.lastFrame()!, /First conversation/);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Tokens: 1,000 total') === true);
+  await until(() => ui.lastFrame()?.includes('1,000 tok') === true);
   for (const line of (await readFile(new URL('../expected/status-bar.txt', import.meta.url), 'utf8')).trimEnd().split('\n')) {
     assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
   }
@@ -249,22 +249,22 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   fixture.control({ type: 'queue', sessionId: 's1', items: [] });
   await until(() => controller.telemetry.view('s1').queued === 0);
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Context: ~50%') === true && ui.lastFrame()?.includes('Queued: 0') === true);
+  await until(() => ui.lastFrame()?.includes('Context ~50%') === true && ui.lastFrame()?.includes('Queued 0') === true);
   await pressKey(ui, '\u001b');
   await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
   // Esc closed the details panel; reopen it to watch the metrics across a reconnect.
-  assert.equal(ui.lastFrame()?.includes('Tokens: 1,000 total'), false);
+  assert.equal(ui.lastFrame()?.includes('1,000 tok'), false);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Tokens: 1,000 total') === true);
+  await until(() => ui.lastFrame()?.includes('1,000 tok') === true);
   fixture.controlBaseline = { projections: {}, queues: {}, jobs: {} };
   fixture.disconnect();
   await until(() => !controller.state.online);
   await until(() => controller.state.transcript.ready && controller.state.online);
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Context: unknown') === true);
-  assert.equal(ui.lastFrame()?.includes('Tokens: 1,000 total'), false);
+  await until(() => ui.lastFrame()?.includes('Context unknown') === true);
+  assert.equal(ui.lastFrame()?.includes('1,000 tok'), false);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('ctx ?') === true);
@@ -283,7 +283,7 @@ test('hosts without a control stream show unknown metrics and refresh catalog de
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Model: fixture/chat') === true);
   assert.match(ui.lastFrame()!, /Live metrics unavailable/);
-  assert.match(ui.lastFrame()!, /Tokens: \? total/);
+  assert.match(ui.lastFrame()!, /\? tok/);
   fixture.defaultModel = { provider: 'fixture', model: 'new-default' };
   fixture.emit({ type: 'emit', event: 'settings/document-updated', args: [] });
   await until(() => controller.state.defaultModel?.model === 'new-default');
@@ -547,7 +547,7 @@ test('header follows session titles and Esc cancels despite a stale idle flag, r
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', false] });
   await until(() => controller.state.status === 'Idle');
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Session ID: s1') === true);
+  await until(() => ui.lastFrame()?.includes('Session s1') === true);
   fixture.onCancel = undefined;
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
   await until(() => controller.running);
@@ -629,14 +629,14 @@ test('a slash-command panel stays open for reading and closes on another command
     assert.ok(helpFrame.includes(hint.command) && helpFrame.includes(hint.description), `${hint.command}: ${helpFrame}`);
   }
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Session ID: s1') === true);
+  await until(() => ui.lastFrame()?.includes('Session s1') === true);
   // The next command replaced the previous panel.
   assert.equal(ui.lastFrame()!.includes('/ws [name or ID]'), false);
   // Background timers do not dismiss a panel while the user is reading or copying.
   await new Promise(resolve => setTimeout(resolve, 200));
-  assert.match(ui.lastFrame()!, /Session ID: s1/);
+  assert.match(ui.lastFrame()!, /Session s1/);
   await pressKey(ui, '/help'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Session ID: s1') === false);
+  await until(() => ui.lastFrame()?.includes('Session s1') === false);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
 });
 
@@ -679,7 +679,7 @@ test('cost coverage warns through the status prefix instead of rewriting a subto
   const cached = bar();
   assert.doesNotMatch(cached, /! ● Ready/);
   assert.match(cached, /~¥2\.00\//);
-  assert.match(bar(true), /Cost \(CNY estimate\): Session ~¥2\.0000/);
+  assert.match(bar(true), /Cost ~¥2\.0000 session/);
   ledger.error = 'scan failed';
   assert.match(bar(), /! ● Ready/);
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);

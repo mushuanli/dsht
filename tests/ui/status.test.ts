@@ -14,13 +14,13 @@ test('shows current and pending models, approximate occupancy and disjoint usage
   };
   assert.deepEqual(metricLines(values, undefined, true), [
     'Model: p/current · Next: p/next (high)',
-    'Context: ~25% (25 / 100) · Tokens: 1,000 total',
-    'In (uncached): 100 · Out: 200 · Cache read/write: 300/400',
+    'Context ~25% (25/100) · 1,000 tok',
+    'In 100 · Out 200 · Cache 300/400',
   ]);
   assert.equal(metricLines(values, undefined, false)[0], 'Model: p/next (high)');
   assert.equal(metricLines({}, { provider: 'default', model: 'chat' }, false)[0], 'Model: default/chat');
   assert.deepEqual(metricLines({}, undefined, false).slice(1), [
-    'Context: unknown · Tokens: ? total', 'In (uncached): ? · Out: ? · Cache read/write: ?/?',
+    'Context unknown · ? tok', 'In ? · Out ? · Cache ?/?',
   ]);
   assert.match(metricLines({ contextPressure: { pressureTokens: 200, contextWindow: 100 } }, undefined, false)[1]!, /~100%/);
   assert.match(metricLines({ contextPressure: { pressureTokens: 200, contextWindow: 0 } }, undefined, false)[1]!, /unknown/);

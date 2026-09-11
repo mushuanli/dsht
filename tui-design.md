@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,803 行；`tests/` 23 个测试文件；159 项测试 |
+| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,806 行；`tests/` 23 个测试文件；159 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -693,7 +693,7 @@ dsht [options] [list workspaces|list sessions]
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
 | `/allow` | — | 一次性批准待答请求 |
 | `/deny` | — | 拒绝待答请求 |
-| `/status` | — | 展开完整状态详情；窄屏按面板宽度换行，`↑`/`↓` 逐行滚动、`PgUp`/`PgDn` 翻屏 |
+| `/status` | — | 展开完整状态详情；相关值合并成行（46 列约 14 行、一屏可显示），窄屏按宽度换行，`↑`/`↓` 逐行滚动、`PgUp`/`PgDn` 翻屏 |
 | `/cost` | — | 显示费用估算并刷新用量 |
 | `/think` | `[seq or live]` | 查看带用户提示摘要的推理 |
 | `/help` | — | 列出全部命令 |
@@ -1057,6 +1057,8 @@ C4Component
 
 粘贴与状态面板：终端把整段粘贴作为一次输入投递，输入框把换行与制表符折叠为空格并丢弃控制字符，因此多行片段会安全地变成单行且不会误发送。展开的 `/status` 持有行偏移而非页号：`↑`/`↓` 逐行、`PgUp`/`PgDn` 翻屏、滚轮在面板打开时滚动面板本身；页脚报出可见区间并在越界时由面板通过 `onScroll` 回报收敛后的偏移。
 
+展开的 `/status` 面板把相关值合并成行并采用短标签（连接／活动、会话与模式、工作区、三行指标、费用与回合、排队与任务各一行），因此 46 列下约 14 行、24 行终端一屏可显示；错误各自占行。换行与滚动仍作为小终端的兜底。
+
 内存样本字段：除进程计数器、保留窗口与账本外，样本还记录布局行缓存（行数、记账字节、span 个数与字符数）、增量实时尾部状态、数学与图表缓存的条目/字符/命中/未命中、实时字符数、推理条目数，以及最近一次成本扫描的会话数、页数与事件数；`--expose-gc` 下额外记录一次强制回收后的堆与耗时，用于区分"真正保留"与"V8 尚未回收"。
 
 ### 5.3 进程内内存状态
@@ -1290,7 +1292,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 57 个模块、5,803 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 57 个模块、5,806 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1344,7 +1346,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 16 | `HistoryViewport` |
-| `ui/chat/status.tsx` | 218 | `StatusBar`、`elapsedTime`、`metricLines`、`compactStatus` |
+| `ui/chat/status.tsx` | 221 | `StatusBar`、`elapsedTime`、`metricLines`、`compactStatus` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
 | `ui/input/history.ts` | 38 | `InputHistory` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |

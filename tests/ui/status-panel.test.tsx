@@ -66,8 +66,8 @@ test('every detail line survives scrolling, and the footer names the visible ran
   assert.match(frames[0]!, /Status 1-\d+\/\d+ · ↑↓ scroll · Esc close/);
   // Content is compared without whitespace, because a view boundary can fall inside any phrase.
   const union = flat(frames.join('\n'));
-  for (const detail of ['● Ready · Ctrl+C exit', 'Host: http://127.0.0.1:1234', 'Session ID: s1', 'Workspace: Project α with a long workspace title',
-    `Model:`, 'Context:', 'In (uncached):', 'Cost (CNY estimate):', 'Turns:', 'Queued:',
+  for (const detail of ['● Ready · Ctrl+C exit', 'http://127.0.0.1:1234', 'Session s1', 'Workspace Project α with a long workspace title',
+    `Model:`, 'Context', 'In ', 'Cost ', 'Queued ',
     'session/follow rejected: remote error 429 too many requests, retry after 30 seconds',
     'Preset names unavailable: preset catalog unavailable because the host returned an unexpected payload',
     'Model catalog unavailable: model catalog unavailable: connection reset by peer while listing providers']) {
