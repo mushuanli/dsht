@@ -2,7 +2,7 @@
 
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
-**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`b634d4f`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
+**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`f22352b`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 54 个模块（8 个业务域 + 共享契约），约 5,245 行；`tests/` 20 个测试文件；140 项测试 |
+| 源码规模 | `src/` 54 个模块（8 个业务域 + 共享契约），约 5,275 行；`tests/` 21 个测试文件；144 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -177,7 +177,7 @@ C4Component
   Component(storage, "storage/", "3 文件 132 行", "全部文件系统操作：私有读写、原子替换、独占创建与流式写入")
   Component(transport, "transport/", "5 文件 359 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
   Component(session, "session/", "11 文件 1707 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
-  Component(cost, "cost/", "8 文件 608 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
+  Component(cost, "cost/", "8 文件 638 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
   Component(controller, "controller/", "4 文件 659 行", "Controller 门面、ConnectionController 与内存日志")
   Component(ui, "ui/", "18 文件 1531 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
@@ -1037,9 +1037,9 @@ C4Component
     "priceId": "deepseek-2026-09-10-flash", "amount": 0.0123 } ] }
 ```
 
-- **命名与保留**：文件名前缀为 `sha256(sessionId)`，后缀是该次扫描的 opening `cut`（`session/follow` 的 `cursor`）。写入新 cut 后，同一前缀且 `cut` 更小的文件会被删除，因此每个会话只保留最新 cut。
-- **写入**（`CostLedger.replace`）：若内存中已有 `cut >=` 新值则整次跳过，保证陈旧扫描不会覆盖较新结果；否则先写 `<uuid>.tmp`（`wx`，0600）再 `rename`，随后清理同会话的旧 cut。
-- **读取**（`CostLedger.load`）：启动时枚举目录内 `*.json`，逐字段校验 `key`/`provider`/`model`/`usage`/`time`/`amount`/`estimated`/`reason`/`priceId`；同一会话保留 `cut` 最大者，`ENOENT` 跳过。代数不是 2 的文件会被忽略而由下一次扫描重建，不做迁移。
+- **命名与保留**：每个会话一个固定文件 `<sha256(sessionId)>.json`，`cut` 存在文件内容里，因此一个会话在磁盘上只有一份切片。旧命名 `<sha256(sessionId)>-<cut>.json` 仍可读入，并在加载时迁移到固定名字。
+- **写入**（`CostLedger.replace`）：若内存中已有 `cut >=` 新值则整次跳过；否则先读现有文件，仅当其中记录的 `cut` 不高于待写值时才落盘——先写 `<uuid>.tmp`（`wx`，0600）再 `rename`——并由 `saveLedger` 返回是否写入。未写入时 `replace` 不改动内存切片，使内存与磁盘停在同一切片上。
+- **读取**（`CostLedger.load`）：启动时枚举目录内 `*.json`，逐字段校验 `key`/`provider`/`model`/`usage`/`time`/`amount`/`estimated`/`reason`/`priceId`；同一会话保留 `cut` 最大者（两种命名一起比较），`ENOENT` 跳过。代数不是 2 的文件、内容读不出的文件、以及旧命名下已被取代的文件都属于"下一次扫描会重建"的残片，加载时删除；旧命名里最新的一份先按固定名字重写再删除。不属于本单元的文件名不动。
 - **固化规则**：`priceId` 与 `amount` 是首次计价时写下的决定。后续扫描重放同样的样本时直接复用该决定；只有 `reason === 'missing usage'` 的样本保持开放，等待宿主报告 token。已计价、已估算与未计价的其余情况一律终局。
 - **内存镜像**：`sessions: Map<sessionId, SavedCost>` 是读取路径的实际数据源，`totals: Map<cacheKey, CostTotal>` 在每次 `replace` 时清空并惰性重建；`CostController` 另外在内存中记录 `(sessionId, updatedAt)` 以跳过未变化的空闲会话。磁盘只用于跨进程存活，不参与每次查询。
 - **访问事件流**：`CostController.refresh` 以 `session/list` 枚举会话，经 `scanner.sessionCostHistory` 用 `session/follow` 取 snapshot 与 `cursor`、用 `session/page` 逐页向更早回退，最后由 `ledger.replace` 落盘。跳过标记只存在内存中，因此每次重启都会重新读取全部会话，但只为其后新出现的请求决定金额。
@@ -1213,7 +1213,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 20 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 140 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致。
+- 21 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 144 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1266,6 +1266,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `11e04ca` `docs: refresh the source index and describe the incremental live wrap` | 附录 A 逐行重新核对行数并补上缺失文件；2.5／2.6／3.2.3／4.2／5.3／6 描述增量换行 | 14 个 Mermaid 块解析通过；附录合计 5,245 行与源码一致 |
 | `0aea3aa` `test: measure whole-text and incremental live wrapping` | `bench:history` 增加长单段流的整段换行与增量布局对比 | `npm run bench:history` |
 | `b634d4f` `docs: cite the wrapping benchmark in the live-wrap note` | Agent Note 引用已提交的基准数据并刷新配对哈希 | 配对哈希一致 |
+| `ec22b19` `docs: record the live-wrap benchmark commits in the design baseline` | 事实基线与 7.8 记录增量换行的提交序列 | 文档改动 |
+| `f22352b` `fix: keep one fixed ledger file per session` | 账本文件名固定为 `<sha256(sessionId)>.json`、cut 移入内容、写入前比较、加载时清理旧代数与旧命名残片 | typecheck + 144 项测试 + `test:terminal`；现网目录 49→46 文件、3.10→2.14 MB，切片逐字节不变 |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
@@ -1273,7 +1275,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 54 个模块、5,245 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 54 个模块、5,275 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1300,8 +1302,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/index.ts` | 16 | 域 barrel |
 | `cost/pricing.ts` | 129 | `DEFAULT_PRICES`、`pricesFrom`、`priceAt`、`lowestPrice`、`chargeFor`、`costDay` |
 | `cost/records.ts` | 62 | `costRecords`、`foldSamples` |
-| `cost/ledger-files.ts` | 78 | `loadLedgers`、`saveLedger` |
-| `cost/ledger.ts` | 126 | `CostLedger`、`costText` |
+| `cost/ledger-files.ts` | 107 | `loadLedgers`、`saveLedger` |
+| `cost/ledger.ts` | 127 | `CostLedger`、`costText` |
 | `cost/scanner.ts` | 74 | `costAddresses`、`sessionCostHistory` |
 | `cost/controller.ts` | 92 | `CostController`、`CostHost` |
 | `cost/types.ts` | 38 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
@@ -1340,7 +1342,7 @@ C4Component
   Component(storage, "storage/", "files, directories, index", "3 文件 132 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "5 文件 359 行")
   Component(session, "session/", "controller, transcript, history, telemetry, memory, navigation, references, export, types, connection-view, index", "11 文件 1707 行")
-  Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "8 文件 608 行")
+  Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "8 文件 638 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
   Component(controller, "controller/", "controller, connection, memory-log, index", "3 文件 551 行")
   Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 1531 行")
