@@ -3,6 +3,7 @@ import { useTheme, type Theme } from '../theme/index.ts';
 import { memo, useEffect, useState } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import wrapAnsi from 'wrap-ansi';
+import stringWidth from 'string-width';
 import { costText, type CostTotal } from '../../cost/index.ts';
 import { toolLine } from '../../session/transcript.ts';
 import type { Controller } from '../../controller/controller.ts';
@@ -56,41 +57,151 @@ export function metricLines(values: ObjectValue, defaultModel: ObjectValue | und
   ];
 }
 
-/** Fit the status summary to one terminal row; details remain available through /status.
- * @param fields - Activity, model, cost, context, and cumulative usage groups in display order.
- * @param width - Available terminal columns.
- * @returns A terminal-safe single line, shortened by display width.
- */
-export function compactStatus(fields: string[], width: number): string {
-  return compactStatusFields(fields, width).filter(Boolean).join('   ');
+/** The stripe of work the live attempt is in, as the status bar shows it. */
+export interface StatusSegment { text: string; color?: string }
+
+/** Every group the single-row bar can show, in the order the packer keeps them. */
+export interface StatusGroups {
+  /** Always shown: the running clock, Ready, a freeze reason, or the offline/error takeover. */
+  state: StatusSegment;
+  /** What the live attempt is doing now, e.g. `bash 1:08` or `think 28s`. */
+  phase?: StatusSegment;
+  /** How to stop the running turn. */
+  stop?: StatusSegment;
+  /** This session's cost, scope-labelled so it cannot read as a share of the day total. */
+  session?: StatusSegment;
+  /** Context share, labelled because a bare percentage next to money reads as a budget. */
+  context?: StatusSegment;
+  /** Today's cost across sessions; shown only where the width allows it. */
+  day?: StatusSegment;
+  /** Model name without its reasoning effort, which is dropped first. */
+  model?: StatusSegment;
+  /** Reasoning effort, kept only while the model name still fits beside it. */
+  effort?: StatusSegment;
+  /** Completed turns. */
+  turns?: StatusSegment;
+  /** Cumulative tokens. */
+  tokens?: StatusSegment;
 }
 
-/** Keep group identities while fitting plain text; ANSI styling is applied only after layout. */
-function compactStatusFields(fields: string[], width: number): string[] {
+/** Elapsed time as `m:ss`, adding hours only when they exist.
+ * @param milliseconds - Duration to format.
+ * @returns Clock text without a leading zero on minutes.
+ */
+export function clockText(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/** Age of a phase, in seconds while it is short and as a clock afterwards.
+ * @param milliseconds - Phase duration to format.
+ * @returns `28s` below a minute, otherwise `1:08`.
+ */
+export function phaseText(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return seconds < 60 ? `${seconds}s` : clockText(milliseconds);
+}
+
+/** Fit the status groups into one row, or two when the state and the cost cannot share one.
+ *
+ * Groups are kept by value, not by column: the least valuable group is dropped first, so any width
+ * degrades continuously instead of snapping to a fixed layout. The cost is never dropped, only
+ * moved to the second row, because it is one of the few answers this bar exists to give.
+ * @param groups - Group texts, each already formatted for display.
+ * @param width - Available terminal columns.
+ * @returns One or two rows of segments; separators carry no colour of their own.
+ */
+export function compactStatusRows(groups: StatusGroups, width: number): StatusSegment[][] {
   if (width <= 0) return [];
-  const clean = fields.map(value => safeText(value).replace(/[\r\n\t]/g, ' '));
-  const join = () => clean.filter(Boolean).join('   ');
-  const fits = () => !wrapAnsi(join(), width, { hard: true, wordWrap: false, trim: false }).includes('\n');
-  if (fits()) return clean;
-  // Keep the stable activity column while it fits; reclaim it on narrow terminals.
-  clean[0] = clean[0]?.trimEnd() ?? '';
-  if (fits()) return clean;
-  clean[3] = (clean[3] ?? '').replace(/[█░]+ /u, '');
-  if (fits()) return clean;
-  clean[1] = toolLine(clean[1] ?? '', Math.max(8, Math.min(24, Math.floor(width / 4))));
-  if (fits()) return clean;
-  for (const index of [4, 2, 1, 3]) {
-    clean[index] = '';
-    if (fits()) return clean;
+  // Remote text reaches this bar, so every group is stripped of control characters before packing.
+  const clean = (group: StatusSegment | undefined): StatusSegment | undefined =>
+    group === undefined ? undefined : { ...group, text: safeText(group.text).replace(/[\r\n\t]+/g, ' ') };
+  groups = { state: clean(groups.state)!, phase: clean(groups.phase), stop: clean(groups.stop), session: clean(groups.session),
+    context: clean(groups.context), day: clean(groups.day), model: clean(groups.model), effort: clean(groups.effort),
+    turns: clean(groups.turns), tokens: clean(groups.tokens) };
+  const cluster = [groups.state, groups.phase, groups.stop].filter(Boolean) as StatusSegment[];
+  const rest = [groups.session, groups.context, groups.day, groups.model, groups.effort, groups.turns, groups.tokens].filter(Boolean) as StatusSegment[];
+  // One row while enough of the sequence fits; each step drops the least valuable group first.
+  // The cost is never dropped, only moved to the second row, so the search stops above it.
+  const floor = groups.session === undefined ? 0 : 1;
+  for (let keep = rest.length; keep >= floor; keep--) {
+    const row = pack(cluster, rest.slice(0, keep));
+    if (measure(row) <= width) return [row];
   }
-  return [toolLine(join(), width)];
+  if (groups.session === undefined && measure(pack(cluster, [])) > width) return [fitCluster(cluster, width)];
+  // Not even the state cluster and the cost share a row, so the cost opens the second one.
+  return [fitCluster(cluster, width), packGreedy(rest, width)];
+}
+
+/** Fit the state cluster, dropping the phase and then the stop hint before truncating the state.
+ * @param cluster - State, phase and stop hint in that order.
+ * @param width - Available terminal columns.
+ * @returns The cluster as far as it fits.
+ */
+function fitCluster(cluster: StatusSegment[], width: number): StatusSegment[] {
+  for (let keep = cluster.length; keep >= 1; keep--) {
+    const row = pack(cluster.slice(0, keep), []);
+    if (measure(row) <= width) return row;
+  }
+  const [first] = cluster;
+  return first === undefined ? [] : [{ ...first, text: toolLine(first.text, width) }];
+}
+
+/** Join the state cluster and the groups that follow it with their boundary separator.
+ * @param cluster - State, phase and stop hint, separated by middots.
+ * @param rest - Remaining groups, separated from the cluster by a bar.
+ * @returns The packed row.
+ */
+function pack(cluster: StatusSegment[], rest: StatusSegment[]): StatusSegment[] {
+  return [...cluster, ...rest].flatMap((group, index) => index === 0 ? [group]
+    : [{ text: index === cluster.length ? ' │ ' : ' · ' }, group]);
+}
+
+/** Add leading groups while they fit, stopping at the first that does not.
+ * @param groups - Groups in keep order.
+ * @param width - Available terminal columns.
+ * @returns The groups that fit.
+ */
+function packGreedy(groups: StatusSegment[], width: number): StatusSegment[] {
+  let row: StatusSegment[] = [];
+  for (const group of groups) {
+    const next = row.length === 0 ? [group] : [...row, { text: ' · ' }, group];
+    if (measure(next) > width) break;
+    row = next;
+  }
+  return row;
+}
+
+/** Join groups with a separator, keeping the separator uncoloured.
+ * @param groups - Groups to join.
+ * @param separator - Separator text between them.
+ * @returns The groups with separators interleaved.
+ */
+function joinSegments(groups: StatusSegment[], separator: string): StatusSegment[] {
+  return groups.flatMap((group, index) => index === 0 ? [group] : [{ text: separator }, group]);
+}
+
+/** Display width of one packed row, so wide characters count as two columns.
+ * @param row - Segments already joined with their separators.
+ * @returns Columns the row occupies.
+ */
+function measure(row: StatusSegment[]): number {
+  return row.reduce((sum, segment) => sum + stringWidth(segment.text), 0);
 }
 
 /** Render a live clock and selected-session metadata; the timer belongs to this mounted bar. */
-export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, scroll = 0, pageSize, onScroll, onOverflow, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number; onScroll?(next: number): void; onOverflow?(overflow: boolean): void; paused?: boolean }) {
+export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, scroll = 0, pageSize, onScroll, onOverflow, onRows, pauseReason }:
+{ controller: Controller; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number;
+  onScroll?(next: number): void; onOverflow?(overflow: boolean): void; onRows?(rows: number): void;
+  /** Why the display is paused, so a frozen clock can say so instead of looking stalled. */
+  pauseReason?: 'copy' | 'dialog' | 'history' }) {
+  const paused = pauseReason !== undefined;
   const theme = useTheme();
   const { stdout } = useStdout();
   const [now, setNow] = useState(Date.now);
+  const [reported, setReported] = useState(1);
   const running = controller.running;
   const since = controller.workingSince;
   useEffect(() => {
@@ -111,37 +222,53 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
   if (!expanded) {
     const selection = record(view.values.modelSelection);
     const route = record(running ? selection.lastUsed ?? selection.next ?? state.defaultModel : selection.next ?? selection.lastUsed ?? state.defaultModel);
-    const model = typeof route.model === 'string' ? `${route.model.replace(/^deepseek-/, '')}${typeof route.reasoningEffort === 'string' ? ` · ${route.reasoningEffort}` : ''}` : 'model ?';
+    const model = typeof route.model === 'string' ? route.model.replace(/^deepseek-/, '') : undefined;
+    const effort = typeof route.reasoningEffort === 'string' ? route.reasoningEffort : undefined;
     const pressure = record(view.values.contextPressure);
     const used = numeric(pressure.projectedTokens) ?? numeric(pressure.pressureTokens);
     const capacity = numeric(pressure.contextWindow);
     const percent = used !== undefined && capacity !== undefined && capacity > 0 ? Math.min(100, Math.round(used / capacity * 100)) : undefined;
-    const filled = percent === undefined ? 0 : Math.round(percent / 10);
-    const context = percent === undefined ? 'ctx ?' : `${'█'.repeat(filled)}${'░'.repeat(10 - filled)} ~${percent}%`;
     const usage = record(view.values.tokenUsage);
     const buckets = [usage.uncachedInputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].map(numeric);
     const total = buckets.every(value => value !== undefined) ? (buckets as number[]).reduce((a, b) => a + b, 0) : undefined;
     const compactCount = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
-    const activity = running ? `◐ Working · ${since === undefined ? '?' : elapsedTime(now - since)}${state.transcript.activeTurnStartedAt === undefined ? '~' : ''} · Ctrl+C Stop` : '● Ready';
-    const warning = state.controlError || state.modelError || coverage === 'partial' ? '! ' : '';
-    const fields = [
-      `${warning}${!state.online ? 'Offline · ' : ''}${activity}`.padEnd(31),
-      model,
-      costs ? `${costs.hasSession(state.sessionId) ? compactCost(costs.total(state.sessionId)) : '?'}/${compactCost(costs.total(undefined, 1, Date.now()))}` : '?/?',
-      context,
-      `${count(numeric(record(view.values.sessionStats).turns))} turns · ${compactCount(total)} tok`,
-    ];
-    const fitted = compactStatusFields(fields, width ?? Math.max(1, (stdout.columns ?? 80) - 2));
-    const colors = [
-      !state.online ? theme.status.offline : warning ? theme.status.warning : running ? theme.status.working : theme.status.ready,
-      theme.status.model, costs ? theme.status.cost : theme.status.usage,
-      percent === undefined ? theme.status.usage : percent >= 95 ? theme.status.critical : percent >= 80 ? theme.status.warning : theme.status.context,
-      theme.status.usage,
-    ];
-    return <Text wrap="truncate-end">{fitted.map((text, index) => text ? <Text key={index}>
-      {fitted.slice(0, index).some(Boolean) && <Text color={theme.colors.muted}>{'   '}</Text>}
-      <Text color={colors[index]} bold={index === 0}>{text}</Text>
-    </Text> : null)}</Text>;
+    const phase = state.transcript.livePhase;
+    const clock = running && since !== undefined ? ` ${clockText(now - since)}` : '';
+    const phaseLabel = phase === undefined ? undefined
+      : phase.kind === 'tool' ? `${phase.name ?? 'tool'} ${phaseText(now - phase.startedAt)}`
+      : `${phase.kind === 'thinking' ? 'think' : 'write'} ${phaseText(now - phase.startedAt)}`;
+    // The state token reports a fact and never guesses: a paused clock is named, offline and errors
+    // take the token over, and an unknown phase simply leaves the phase group empty.
+    const stateToken: StatusSegment = !state.online
+      ? { text: '! Offline', color: theme.status.offline }
+      : state.controlError || state.modelError
+        ? { text: '⚠ Error', color: theme.status.warning }
+        : pauseReason !== undefined
+          ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
+          : running ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
+    // The marker names the scope it belongs to: a subtotal is inexact when a record could not be
+    // priced, when it is only estimated, or when the scan has not covered every session yet.
+    const inexact = coverage !== 'complete';
+    const money = (value: CostTotal): string => `¥${value.amount.toFixed(2)}${value.unknown || value.estimated || inexact ? '*' : ''}`;
+    const sessionTotal = costs !== undefined && costs.hasSession(state.sessionId) ? costs.total(state.sessionId) : undefined;
+    const groups: StatusGroups = {
+      state: stateToken,
+      ...(phaseLabel === undefined || pauseReason !== undefined ? {} : { phase: { text: phaseLabel } }),
+      ...(running && pauseReason === undefined ? { stop: { text: '^C' } } : {}),
+      ...(sessionTotal === undefined ? {} : { session: { text: `S${money(sessionTotal)}`, color: theme.status.cost } }),
+      ...(percent === undefined ? {} : { context: { text: `ctx ${percent}%`,
+        color: percent >= 95 ? theme.status.critical : percent >= 80 ? theme.status.warning : theme.status.context } }),
+      ...(costs === undefined ? {} : { day: { text: `D${money(costs.total(undefined, 1, Date.now()))}`, color: theme.status.cost } }),
+      ...(model === undefined ? {} : { model: { text: model, color: theme.status.model } }),
+      ...(model === undefined || effort === undefined ? {} : { effort: { text: effort, color: theme.status.model } }),
+      ...(numeric(record(view.values.sessionStats).turns) === undefined ? {} : { turns: { text: `${count(numeric(record(view.values.sessionStats).turns))} turns`, color: theme.status.usage } }),
+      ...(total === undefined ? {} : { tokens: { text: `${compactCount(total)} tok`, color: theme.status.usage } }),
+    };
+    const rows = compactStatusRows(groups, width ?? Math.max(1, (stdout.columns ?? 80) - 2));
+    if (rows.length !== reported) { setReported(rows.length); onRows?.(rows.length); }
+    return <Box flexDirection="column">{rows.map((row, index) => <Text key={index} wrap="truncate-end">
+      {row.map((segment, position) => <Text key={position} color={segment.color ?? theme.colors.muted}
+        bold={index === 0 && position === 0}>{segment.text}</Text>)}</Text>)}</Box>;
   }
   return <StatusDetails controller={controller} theme={theme} width={width} now={now} scroll={scroll} pageSize={pageSize} onScroll={onScroll} onOverflow={onOverflow} />;
 });

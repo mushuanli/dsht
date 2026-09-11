@@ -233,7 +233,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   controller.start();
   await until(() => controller.state.transcript.ready && ui.lastFrame()?.includes('1K tok') === true);
   const compact = ui.lastFrame()!.split('\n').find(line => line.includes('1K tok'))!;
-  assert.match(compact, /● Ready.*chat.*~25%.*1K tok/);
+  assert.match(compact, /● Ready │ ctx 25% · chat · 42 turns · 1K tok/);
   assert.equal(ui.lastFrame()?.includes('Workspace:'), false);
   assert.match(ui.lastFrame()!, /First conversation/);
   await pressKey(ui, '/status');
@@ -244,7 +244,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   }
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Working · 1s') === true);
+  await until(() => /◐ 0:0\d/.test(ui.lastFrame() ?? ''));
   fixture.control({ type: 'projection', sessionId: 's1', key: 'contextPressure', seq: 6, value: { projectedTokens: 50, contextWindow: 100 } });
   fixture.control({ type: 'queue', sessionId: 's1', items: [] });
   await until(() => controller.telemetry.view('s1').queued === 0);
@@ -268,7 +268,10 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   assert.equal(ui.lastFrame()?.includes('1K tok'), false);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('ctx ?') === true);
+  // The compact bar drops the context group entirely while the projection is missing, so nothing
+  // on screen still claims the metrics the reconnect cleared. The panel render above proves the
+  // frame settled, and the bar may legitimately be naming a freeze reason instead of a clock.
+  assert.equal(ui.lastFrame()?.includes('ctx '), false);
   assert.equal(ui.lastFrame()?.includes('Workspace:'), false);
 });
 
@@ -538,6 +541,8 @@ test('/cost displays cached session, daily and three-day estimates without submi
   await until(() => ui.lastFrame()?.includes('Cost · CNY estimate') === true);
   const expected = await readFile(new URL('../expected/cost.txt', import.meta.url), 'utf8');
   for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()?.includes(line), ui.lastFrame());
+  // The open panel pauses the clock, and the bar names that reason instead of freezing silently.
+  assert.match(ui.lastFrame()!, /⏸ dialog │ S¥0\.00\* · D¥0\.00\*/);
   assert.equal(fixture.calls.some(c => c.method === 'session/prompt'), false);
 });
 
@@ -675,7 +680,7 @@ test('Esc closes an open command panel and keeps the draft beside it', async t =
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
-test('cost coverage warns through the status prefix instead of rewriting a subtotal', async t => {
+test('cost coverage marks the subtotals it cannot confirm instead of rewriting them', async t => {
   const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
   const fixture = await host(); t.after(() => fixture.close());
   const ledger = new CostLedger();
@@ -687,19 +692,19 @@ test('cost coverage warns through the status prefix instead of rewriting a subto
     ui.unmount(); ui.cleanup();
     return frame;
   };
-  // With nothing cached the prefix warns, and no subtotal claims incompleteness of its own.
-  assert.match(bar(), /! ● Ready/);
-  assert.match(bar(), /\?\/~¥0\.00(?!\*)/);
+  // With nothing cached the day subtotal exists and is marked incomplete; no session slice does.
+  assert.match(bar(), /● Ready/);
+  assert.match(bar(), /D¥0\.00\*/);
+  assert.doesNotMatch(bar(), /S¥/);
   await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T10:00:00+08:00'),
     type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
       message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]));
   // Charges cached by an earlier run already cover the history, so the bar stops warning.
   const cached = bar();
-  assert.doesNotMatch(cached, /! ● Ready/);
-  assert.match(cached, /~¥2\.00\//);
+  assert.match(cached, /S¥2\.00(?!\*)/);
   assert.match(bar(true), /Cost ~¥2\.0000 session/);
   ledger.error = 'scan failed';
-  assert.match(bar(), /! ● Ready/);
+  assert.match(bar(), /S¥2\.00\*/);
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);
 });
 
@@ -745,13 +750,13 @@ test('title and status fit terminal widths and keep model alignment when working
   const refresh = async () => { await act(async () => { ui.rerender(<App controller={controller} />); }); };
   await refresh();
   assert.match(ui.lastFrame()!.split('\n')[0]!, /^\s*中文会话标题/);
-  const working = ui.lastFrame()!.split('\n').find(line => line.includes('◐ Working'))!;
-  assert.match(working, /◐ Working · 8s · Ctrl\+C Stop.*v4.1-flash · high.*███░░░░░░░ ~25%.*42 turns · 166.2M tok/);
+  const working = ui.lastFrame()!.split('\n').find(line => line.includes('◐ '))!;
+  assert.match(working, /◐ 0:0\d · \^C │ ctx 25% · v4\.1-flash · high · 42 turns · 166\.2M tok/);
   controller.state = { ...controller.state, version: 1, sessions: [{ sessionId: 's1', running: false }] };
   await refresh();
   const ready = ui.lastFrame()!.split('\n').find(line => line.includes('● Ready'))!;
-  assert.equal(ready.indexOf('v4.1-flash'), working.indexOf('v4.1-flash'));
-  assert.doesNotMatch(ready, /Working|Ctrl\+C Stop/);
+  assert.match(ready, /● Ready │ ctx 25% · v4\.1-flash · high · 42 turns · 166\.2M tok/);
+  assert.doesNotMatch(ready, /\^C/);
   for (columns of [80, 40, 24, 12]) {
     await refresh();
     const lines = ui.lastFrame()!.split('\n');
@@ -978,9 +983,10 @@ test('copy mode freezes streaming and clocks; dialogs freeze their background un
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.state.transcript.ready);
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
-  await until(() => ui.lastFrame()?.includes('Working') === true);
+  await until(() => /◐ 0:0\d/.test(ui.lastFrame() ?? ''));
   await pressKey(ui, '/copy'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Copy mode') === true);
+  // Copy mode names itself in the bar, because the clock it freezes would otherwise look stalled.
+  await until(() => ui.lastFrame()?.includes('⏸ copy') === true);
   const frozen = ui.lastFrame();
   fixture.follow({ type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Arrived during copy' }] } } });
   await until(() => controller.state.transcript.messages.some(message => message.text.includes('Arrived during copy')));
@@ -1134,12 +1140,13 @@ test('left click freezes the display for native selection until explicit resume'
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.state.transcript.ready);
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
-  await until(() => ui.lastFrame()?.includes('Working') === true);
+  await until(() => /◐ 0:0\d/.test(ui.lastFrame() ?? ''));
   for (const report of ['\x1b[<2;3;4M', '\x1b[<0;3;4m', '\x1b[<32;3;4M']) {
     await pressKey(ui, report); assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
   }
   await pressKey(ui, '\x1b[<0;3;4M');
   assert.match(ui.lastFrame()!, /Copy mode/);
+  await until(() => ui.lastFrame()?.includes('⏸ copy') === true);
   const frozen = ui.lastFrame();
   fixture.follow({ type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append',
     data: { content: [{ type: 'text', text: 'Received while selecting' }] } } });

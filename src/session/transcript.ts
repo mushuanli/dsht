@@ -74,6 +74,16 @@ export interface MessagePart {
   key?: string;
 }
 
+/** The stripe of live work the unfinished attempt is in. */
+export interface LivePhase {
+  /** Which kind of delta last moved the attempt forward. */
+  kind: 'thinking' | 'tool' | 'output';
+  /** Tool name when `kind` is `tool`, so the bar can name what is running. */
+  name?: string;
+  /** Epoch milliseconds when this phase began. */
+  startedAt: number;
+}
+
 /** A displayed message retains the durable sequence for stable reconciliation. */
 export interface Message {
   seq: number;
@@ -106,6 +116,7 @@ export class Transcript {
   private oldestSeq: number | undefined;
   private turnMarker: { seq: number; start?: number } | undefined;
   private attempt: string | undefined;
+  private phase: (LivePhase & { key: string }) | undefined;
   private nextIndex = 0;
   private revision = 0;
   private legacyStream = false;
@@ -140,7 +151,7 @@ export class Transcript {
         this.closedBlocks.clear();
         this.oldestSeq = undefined;
         this.turnMarker = undefined;
-        this.blocks.clear();
+        this.clearBlocks();
         this.keysDirty = true;
         this.projectionRevision++;
         this.legacyDirty = true;
@@ -178,8 +189,7 @@ export class Transcript {
         if (number(live.revision) !== this.revision + 1) throw new Error('Assistant stream revision gap');
         this.revision = number(live.revision);
         if (live.type === 'start') {
-          this.blocks.clear();
-          this.closedBlocks.clear();
+          this.clearBlocks();
           this.attempt = string(live.attemptId);
           this.nextIndex = 0;
         } else {
@@ -187,7 +197,7 @@ export class Transcript {
             throw new Error('Assistant stream chunk gap');
           }
           if (live.type === 'chunk') { this.chunk(object(live.chunk)); this.nextIndex++; }
-          else if (live.type === 'end') { this.attempt = undefined; this.blocks.clear(); }
+          else if (live.type === 'end') { this.attempt = undefined; this.clearBlocks(); }
           else throw new Error('Unknown assistant stream frame');
         }
         break;
@@ -261,7 +271,7 @@ export class Transcript {
   dispose(): void {
     this.disposed = true;
     this.events.clear(); this.sizes.clear(); this.storedBytes = 0;
-    this.blocks.clear(); this.closedBlocks.clear(); this.transientSeqs.clear();
+    this.clearBlocks(); this.transientSeqs.clear();
     this.sortedSeqs = []; this.displayed = []; this.promptBeforeWindow = undefined;
     this.oldestSeq = undefined; this.turnMarker = undefined; this.attempt = undefined; this.legacyPosition = '';
     this.cursor = -1; this.throughSeq = -1; this.hasMore = false; this.ready = false;
@@ -283,6 +293,17 @@ export class Transcript {
   private deleteEvent(seq: number): void {
     this.storedBytes -= this.sizes.get(seq) ?? 0;
     this.sizes.delete(seq); this.events.delete(seq);
+  }
+
+  /** The stripe of work the live attempt is in: the phase of the block that last took a delta.
+   *
+   * Its age answers "what is it doing, and for how long" without inferring anything from silence.
+   * @returns Phase kind, the tool name when the phase is a tool call, and when the phase began.
+   */
+  get livePhase(): LivePhase | undefined {
+    if (this.phase === undefined || this.blocks.size === 0) return undefined;
+    const { kind, name, startedAt } = this.phase;
+    return { kind, ...(name === undefined ? {} : { name }), startedAt };
   }
 
   /** Start of the open durable turn, when its timestamp is present in the retained window. */
@@ -493,8 +514,7 @@ export class Transcript {
   private foldLegacy(added: ObjectValue[]): void {
     let events: ObjectValue[];
     if (this.legacyDirty) {
-      this.blocks.clear();
-      this.closedBlocks.clear();
+      this.clearBlocks();
       this.legacyPosition = '';
       this.legacySeq = -1;
       this.legacyDirty = false;
@@ -505,13 +525,12 @@ export class Transcript {
     for (const event of events) {
       this.legacySeq = Math.max(this.legacySeq, number(event.seq));
       if (['step/start', 'step/end', 'turn/end', 'assistant/message', 'assistant/attempt'].includes(string(event.type))) {
-        this.blocks.clear();
-        this.closedBlocks.clear();
+        this.clearBlocks();
         this.legacyPosition = '';
       } else if (event.type === 'assistant/chunk' || string(event.type).startsWith('chunkrow/')) {
         const data = object(event.data);
         const nextPosition = `${number(data.turn)}:${number(data.step)}`;
-        if (this.legacyPosition !== nextPosition) { this.blocks.clear(); this.closedBlocks.clear(); }
+        if (this.legacyPosition !== nextPosition) this.clearBlocks();
         this.legacyPosition = nextPosition;
         switch (event.type) {
           case 'assistant/chunk': this.chunk(object(data.chunk)); break;
@@ -538,6 +557,16 @@ export class Transcript {
   private validatePackedTiming(data: ObjectValue, count: number): void {
     if (count === 0 || array(data.dt).length !== count - 1) throw new Error('Invalid packed history member count');
   }
+  /** Drop the live attempt's blocks and the phase derived from them. */
+  private clearBlocks(): void { this.blocks.clear(); this.closedBlocks.clear(); this.phase = undefined; }
+
+  /** Record the phase a delta moved the attempt into; the status bar shows its age. */
+  private notePhase(kind: LivePhase['kind'], name?: string): void {
+    const key = kind === 'tool' ? `tool:${name ?? ''}` : kind;
+    if (this.phase?.key === key) return;
+    this.phase = { key, kind, ...(name === undefined ? {} : { name }), startedAt: Date.now() };
+  }
+
   private chunk(chunk: ObjectValue): void {
     if (chunk.type === 'text-delta' || chunk.type === 'tool-call-delta') {
       for (const [index, block] of this.blocks) if (block.type === 'reasoning' && index !== chunk.index) this.closedBlocks.add(index);
@@ -547,12 +576,13 @@ export class Transcript {
       const block = this.blocks.get(index);
       this.blocks.set(index, { type: chunk.type === 'text-delta' ? 'text' : 'reasoning',
         text: (block ? string(block.text) : '') + string(chunk.text) });
+      this.notePhase(chunk.type === 'text-delta' ? 'output' : 'thinking');
     } else if (chunk.type === 'tool-call-delta') {
       const index = number(chunk.index);
       const block = this.blocks.get(index);
-      this.blocks.set(index, { type: 'tool-call', id: string(chunk.id),
-        name: typeof chunk.name === 'string' ? chunk.name : block?.name ?? '',
-        arguments: '' });
+      const name = typeof chunk.name === 'string' ? chunk.name : typeof block?.name === 'string' ? block.name : '';
+      this.blocks.set(index, { type: 'tool-call', id: string(chunk.id), name, arguments: '' });
+      this.notePhase('tool', name === '' ? undefined : name);
     } else if (chunk.type === 'block-end') {
       this.blocks.set(number(chunk.index), object(chunk.block));
       this.closedBlocks.add(number(chunk.index));

@@ -2,8 +2,9 @@
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
-import { compactStatus, metricLines, elapsedTime } from '../../src/ui/chat/status.tsx';
+import { clockText, compactStatusRows, metricLines, elapsedTime, phaseText, type StatusGroups } from '../../src/ui/chat/status.tsx';
 import wrapAnsi from 'wrap-ansi';
+import stringWidth from 'string-width';
 import { Telemetry } from '../../src/session/telemetry.ts';
 
 test('shows current and pending models, approximate occupancy and disjoint usage totals', () => {
@@ -57,20 +58,52 @@ test('working duration handles minutes, hours and clock skew', () => {
   assert.equal(elapsedTime(3_661_000), '1h 1m 1s');
 });
 
-test('single-row status keeps grouped metrics and prioritizes the stop hint on narrow terminals', () => {
-  const fields = ['◐ Working · 8s · Ctrl+C Stop'.padEnd(31), 'v4.1-flash · high', '~¥1.23/~¥5.00', '███░░░░░░░ ~25%', '42 turns · 166.2M tok'];
-  assert.equal(compactStatus(fields, 140), fields.join('   '));
-  const ready = compactStatus(['● Ready'.padEnd(31), ...fields.slice(1)], 140);
-  assert.equal([compactStatus(fields, 140), ready].join('\n') + '\n', readFileSync(new URL('../expected/status-compact.txt', import.meta.url), 'utf8'));
-  assert.equal(ready.indexOf('v4.1'), compactStatus(fields, 140).indexOf('v4.1'));
-  for (const width of [1, 10, 24, 40, 60, 80, 100]) {
-    const row = compactStatus(fields, width);
-    assert.equal(wrapAnsi(row, width, { hard: true, wordWrap: false }).includes('\n'), false);
-    if (width >= 40) assert.match(row, /Ctrl\+C Stop/);
+/** The bar's groups as the component builds them, so the ladder can be asserted on its own. */
+function groups(overrides: Partial<StatusGroups> = {}): StatusGroups {
+  const segment = (text: string) => ({ text });
+  return {
+    state: segment('◐ 0:08'), phase: segment('bash 12s'), stop: segment('^C'), session: segment('S¥1.23*'),
+    context: segment('ctx 25%'), day: segment('D¥5.00*'), model: segment('v4.1-flash'), effort: segment('high'),
+    turns: segment('42 turns'), tokens: segment('166.2M tok'), ...overrides,
+  };
+}
+
+/** Flatten packed rows to their visible text. */
+const text = (rows: { text: string }[][]): string => rows.map(row => row.map(segment => segment.text).join('')).join('\n');
+
+test('the status bar drops its least valuable group first and never drops the cost', () => {
+  const full = groups();
+  // The golden is the widest form of both states; every narrower width is asserted below.
+  const ready = groups({ state: { text: '● Ready' }, phase: undefined, stop: undefined });
+  assert.equal([text(compactStatusRows(full, 140)), text(compactStatusRows(ready, 140))].join('\n') + '\n',
+    readFileSync(new URL('../expected/status-compact.txt', import.meta.url), 'utf8'));
+  // Dropping order: tokens, turns, effort, model, day, context — the cost stays to the last.
+  assert.equal(text(compactStatusRows(full, 80)), '◐ 0:08 · bash 12s · ^C │ S¥1.23* · ctx 25% · D¥5.00* · v4.1-flash · high');
+  assert.equal(text(compactStatusRows(full, 60)), '◐ 0:08 · bash 12s · ^C │ S¥1.23* · ctx 25% · D¥5.00*');
+  assert.equal(text(compactStatusRows(full, 46)), '◐ 0:08 · bash 12s · ^C │ S¥1.23* · ctx 25%');
+  assert.equal(text(compactStatusRows(full, 40)), '◐ 0:08 · bash 12s · ^C │ S¥1.23*');
+  // Below the widest one-row form the cost opens a second row instead of being dropped.
+  assert.equal(text(compactStatusRows(full, 24)), '◐ 0:08 · bash 12s · ^C\nS¥1.23* · ctx 25%');
+  assert.equal(text(compactStatusRows(full, 12)), '◐ 0:08\nS¥1.23*');
+  // Below the width of the state cluster itself, the phase and the stop hint give way first.
+  assert.equal(text(compactStatusRows(full, 8)), '◐ 0:08\nS¥1.23*');
+  // Nothing overflows, at any width, including a wide-character model name.
+  for (const width of [1, 10, 18, 24, 35, 40, 46, 60, 80, 100, 140]) {
+    const rows = compactStatusRows(groups({ model: { text: '中文模型名称很长很长' } }), width);
+    for (const row of rows) assert.ok(stringWidth(row.map(segment => segment.text).join('')) <= width, `width ${width} overflowed`);
   }
-  const names = [fields[0]!, '中文模型名称很长很长 · high', ...fields.slice(2)];
-  assert.equal(wrapAnsi(compactStatus(names, 60), 60, { hard: true, wordWrap: false }).includes('\n'), false);
-  assert.equal(compactStatus(['name\nnewline\tvalue'], 100), 'name newline value');
-  assert.equal(compactStatus(fields, 1), '…');
-  assert.equal(compactStatus(fields, 0), '');
+  // Remote text cannot smuggle a control character or a line break into the bar.
+  assert.equal(text(compactStatusRows(groups({ model: { text: 'name\nnewline\tvalue' } }), 140)).includes('name newline value'), true);
+  assert.equal(text(compactStatusRows(full, 0)), '');
+});
+
+test('the working clock and the phase age use the compact forms the bar shows', () => {
+  assert.equal(clockText(0), '0:00');
+  assert.equal(clockText(18_000), '0:18');
+  assert.equal(clockText(378_000), '6:18');
+  assert.equal(clockText(3_978_000), '1:06:18');
+  assert.equal(clockText(-1000), '0:00');
+  assert.equal(phaseText(28_000), '28s');
+  assert.equal(phaseText(59_999), '59s');
+  assert.equal(phaseText(68_000), '1:08');
 });

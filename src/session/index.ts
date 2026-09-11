@@ -1,7 +1,7 @@
 /** Session domain: the selected session, its transcript, layout, telemetry and navigation. */
 export { SessionController } from './controller.ts';
 export { contentText, toolLine, Transcript } from './transcript.ts';
-export type { Message, MessagePart, ThoughtEntry } from './transcript.ts';
+export type { LivePhase, Message, MessagePart, ThoughtEntry } from './transcript.ts';
 export { historyLayout, layoutStats, releaseHistoryLayout } from './history.ts';
 export { markdownCacheStats } from './markdown.ts';
 export type { HistoryRow, Reasoning, RowKind } from './history.ts';

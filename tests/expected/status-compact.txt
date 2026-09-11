@@ -1,2 +1,2 @@
-◐ Working · 8s · Ctrl+C Stop      v4.1-flash · high   ~¥1.23/~¥5.00   ███░░░░░░░ ~25%   42 turns · 166.2M tok
-● Ready                           v4.1-flash · high   ~¥1.23/~¥5.00   ███░░░░░░░ ~25%   42 turns · 166.2M tok
+◐ 0:08 · bash 12s · ^C │ S¥1.23* · ctx 25% · D¥5.00* · v4.1-flash · high · 42 turns · 166.2M tok
+● Ready │ S¥1.23* · ctx 25% · D¥5.00* · v4.1-flash · high · 42 turns · 166.2M tok

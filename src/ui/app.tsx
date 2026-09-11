@@ -99,7 +99,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [statusOverflow, setStatusOverflow] = useState(false);
   // The panel owns two border rows and a one-row footer, and the two header rows and the
   // three-row composer above it never shrink, so only the remainder of the screen height shows rows.
-  const statusViewRows = Math.max(1, (stdout.rows ?? 30) - 9);
+  const [statusBarRows, setStatusBarRows] = useState(1);
+  const statusViewRows = Math.max(1, (stdout.rows ?? 30) - 9 - (statusBarRows - 1));
   const [answers, setAnswers] = useState<Record<string, ObjectValue[]>>({});
   const [optionState, setOptionState] = useState<{ key: string; cursor: number; selected: string[]; custom: boolean }>();
   const [approvalSelection, setApprovalSelection] = useState<{ eventId: string; index: number }>();
@@ -507,7 +508,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     : workspaceName || 'All workspaces';
   const commandSuggestions = input.startsWith('/') && !input.includes(' ') ? suggestedCommands(input) : undefined;
   // Reading older history pauses the clock without freezing the connection state on picker screens.
-  const statusFrozen = statusPaused || (state.screen === 'chat' && position > 0);
+  // A paused clock is named rather than left frozen: a stopped number looks like a stall.
+  const pauseReason: 'copy' | 'dialog' | 'history' | undefined = copyMode ? 'copy'
+    : state.screen === 'chat' && dialogOpen ? 'dialog'
+    : state.screen === 'chat' && position > 0 ? 'history'
+    : undefined;
+  const statusFrozen = pauseReason !== undefined;
   return <ThemeContext.Provider value={theme}><CopyMode.Provider value={copyMode}><Frozen frozen={copyMode} identity={`${width}:${stdout.rows}`}><Box flexDirection="column" paddingX={1} height={Math.max(1, (stdout.rows ?? 30) - 1)} overflowY="hidden">
     {copyMode && <Text color={theme.accent}>Copy mode · drag to select · Esc / Ctrl+S resumes</Text>}
     <ChatHeader title={headerTitle} mode={controller.sessionMode} width={width} frozen={displayPaused} identity={`${width}:${state.sessionId}`} />
@@ -588,7 +594,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
       {costExpanded && <CostPanel controller={controller} />}
-      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} revision={state.version} paused={statusFrozen} /></Frozen>
+      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}:${pauseReason ?? ''}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} onRows={setStatusBarRows} pauseReason={pauseReason} revision={state.version} /></Frozen>
     </Box>
   </Box></Frozen></CopyMode.Provider></ThemeContext.Provider>;
 }
