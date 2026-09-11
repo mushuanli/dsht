@@ -70,6 +70,8 @@ export interface MessagePart {
   text: string;
   /** Closed live reasoning can fold before the assistant message is committed. */
   closed?: boolean;
+  /** Stable identity of a live part, so its rows can be wrapped incrementally as it grows. */
+  key?: string;
 }
 
 /** A displayed message retains the durable sequence for stable reconciliation. */
@@ -431,6 +433,7 @@ export class Transcript {
    * @returns Ordered blocks without terminal style escapes.
    */
   liveParts(width: number): MessagePart[] {
+    const attempt = this.liveAttemptKey ?? 'live';
     return [...this.blocks].sort(([a], [b]) => a - b).map(([index, block]) => {
       const closed = this.closedBlocks.has(index);
       const cached = this.liveProjection.get(block);
@@ -438,6 +441,7 @@ export class Transcript {
       const part: MessagePart = {
         kind: block.type === 'reasoning' ? 'reasoning' : block.type === 'tool-call' ? 'tool' : 'text',
         text: cached?.width === width ? cached.part.text : contentText([block], undefined, width), closed,
+        key: `${attempt}:${index}`,
       };
       this.liveProjection.set(block, { width, part }); return part;
     });

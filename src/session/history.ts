@@ -22,6 +22,8 @@ class LayoutIndex {
   // Bound both row objects and long rows. Full semantic content remains available for search.
   private readonly maxRows = 2048;
   private heights = new WeakMap<Message, { width: number; reasoning: Reasoning; heading: boolean; count: number }>();
+  /** Incremental wrapping state for the growing live tail, keyed by each live part's identity. */
+  readonly liveWraps = new Map<string, LiveWrap>();
   constructor(readonly width: number, readonly reasoning: Reasoning, readonly overrides: ReadonlySet<number>) {}
 
   rows(message: Message, reasoning: Reasoning, heading: boolean): HistoryRow[] {
@@ -45,6 +47,7 @@ class LayoutIndex {
   dispose(): void {
     this.messages = []; this.segments = []; this.offsets.clear();
     this.cache.clear(); this.cacheSize = 0; this.length = 0; this.heights = new WeakMap();
+    this.liveWraps.clear();
   }
 
   get cachedRowCount(): number { return this.cacheSize; }
@@ -101,13 +104,117 @@ class LayoutIndex {
 
 const liveRows = new WeakMap<MessagePart, { width: number; reasoning: Reasoning; rows: HistoryRow[] }>();
 
+/** Incremental wrap state for one growing live part. */
+interface LiveWrap {
+  width: number;
+  reasoning: Reasoning;
+  kind: MessagePart['kind'];
+  /** Source length already folded into `rows` and `carry`. */
+  length: number;
+  /** Rows whose text can no longer change as more arrives. */
+  rows: HistoryRow[];
+  /** Raw source of the one row that can still change. */
+  carry: string;
+}
+
+/** Wrap text into rows with the per-kind trimming rule.
+ * @param text - Text to wrap.
+ * @param width - Available terminal columns.
+ * @param kind - Part kind, which decides whether wrapped lines are trimmed.
+ * @param seq - Durable sequence, for committed parts.
+ * @returns The wrapped rows.
+ */
+function wrapRows(text: string, width: number, kind: MessagePart['kind'], seq?: number): HistoryRow[] {
+  return wrapAnsi(text, width, { hard: true, trim: !['tool', 'success', 'error'].includes(kind) })
+    .split('\n').map(text => ({ text, kind, seq }));
+}
+
+/** Bound the source inspected for a folded row, which renders only the first `width` columns.
+ * @param text - Complete live text.
+ * @param width - Available terminal columns.
+ * @returns A prefix that cannot change the folded row.
+ */
+function foldedSource(text: string, width: number): string {
+  let limit = width * 4 + 64;
+  while (limit < text.length && toolLine(text.slice(0, limit), width).length < width) limit *= 2;
+  return limit >= text.length ? text : text.slice(0, limit);
+}
+
+/** Locate the start of one rendered row inside the source it was wrapped from.
+ *
+ * Trim removes the whitespace runs at both ends of a row, so a rendered row is not a contiguous
+ * slice; matching it backwards while skipping source whitespace recovers where it began. The scan
+ * gives up once it would have to skip more than `limit` characters, which sends the caller back to
+ * a whole-text wrap instead of scanning an unbounded whitespace run.
+ * @param pending - Source text the row was wrapped from.
+ * @param row - One rendered row from that wrap.
+ * @param limit - Maximum characters the backward scan may skip.
+ * @returns The row's start offset, or undefined when it cannot be located.
+ */
+function rawStart(pending: string, row: string, limit: number): number | undefined {
+  let source = pending.length - 1;
+  let target = row.length - 1;
+  const floor = pending.length - limit;
+  while (target >= 0 && source >= floor) {
+    if (pending[source] === row[target]) { source--; target--; continue; }
+    if (/\s/u.test(pending[source]!)) { source--; continue; }
+    return undefined;
+  }
+  return target < 0 ? source + 1 : undefined;
+}
+
+/** Wrap one live part incrementally, re-wrapping only rows that can still change plus the new delta.
+ *
+ * A streaming part only grows, so every row before its last non-empty one is final. The state keeps
+ * those rows plus the raw source of the unfinished remainder, and re-anchors from the whole text
+ * only when that remainder cannot be located or outgrows a few widths.
+ * @param part - One live part carrying a stable `key`.
+ * @param state - Per-layout state keyed by that identity.
+ * @param width - Available terminal columns.
+ * @param reasoning - Fold mode for completed live reasoning.
+ * @returns The part's rows.
+ */
+function livePartRows(part: MessagePart, state: Map<string, LiveWrap>, width: number, reasoning: Reasoning): HistoryRow[] {
+  const key = part.key;
+  if (key === undefined) return partRows([part], width, reasoning);
+  if (part.kind === 'reasoning' && reasoning === 'row' && (part.closed || width < 60)) {
+    state.delete(key);
+    return wrapRows(toolLine(`◇ /think live · ${foldedSource(part.text, width).slice(2)}`, width), width, 'reasoning');
+  }
+  const previous = state.get(key);
+  const extend = previous !== undefined && previous.width === width && previous.reasoning === reasoning
+    && previous.kind === part.kind && part.text.length >= previous.length;
+  const trim = !['tool', 'success', 'error'].includes(part.kind);
+  const limit = width * 8 + 512;
+  const attempt = (source: string, prior: HistoryRow[]): { rows: HistoryRow[]; tail: string[]; carry: string } | undefined => {
+    const wrapped = wrapAnsi(source, width, { hard: true, trim }).split('\n');
+    const filled = wrapped.reduce((found, text, index) => text === '' ? found : index, -1);
+    if (filled < 0) return { rows: [], tail: wrapped, carry: source };
+    const start = rawStart(source, wrapped[filled]!, limit);
+    if (start === undefined) return undefined;
+    return {
+      rows: [...prior, ...wrapped.slice(0, filled).map(text => ({ text, kind: part.kind }))],
+      tail: wrapped.slice(filled),
+      // The last non-empty row and everything after it, including trailing empty rows, stay unfinished.
+      carry: source.slice(start),
+    };
+  };
+  let result = attempt(extend ? previous.carry + part.text.slice(previous.length) : part.text, extend ? previous.rows : []);
+  if (result === undefined || result.carry.length > width * 4 + 64) result = attempt(part.text, []);
+  // Recovery can fail on text whose last row cannot be located; the plain one-shot wrap is the fallback.
+  if (result === undefined) { state.delete(key); return partRows([part], width, reasoning); }
+  const rows = [...result.rows, ...result.tail.map(text => ({ text, kind: part.kind }))];
+  state.set(key, { width, reasoning, kind: part.kind, length: part.text.length, rows: result.rows, carry: result.carry });
+  return rows;
+}
+
 function partRows(parts: MessagePart[], width: number, reasoning: Reasoning, seq?: number): HistoryRow[] {
   return parts.flatMap(part => {
     const cached = seq === undefined ? liveRows.get(part) : undefined;
     if (cached?.width === width && cached.reasoning === reasoning) return cached.rows;
     const fold = part.kind === 'reasoning' && reasoning === 'row' && (seq !== undefined || part.closed || width < 60);
     const text = fold ? toolLine(`◇ /think${seq === undefined ? ' live' : ` ${seq}`} · ${part.text.slice(2)}`, width) : part.text;
-    const rows = wrapAnsi(text, width, { hard: true, trim: !['tool', 'success', 'error'].includes(part.kind) }).split('\n').map(text => ({ text, kind: part.kind, seq }));
+    const rows = wrapRows(text, width, part.kind, seq);
     if (seq === undefined) liveRows.set(part, { width, reasoning, rows });
     return rows;
   });
@@ -150,7 +257,7 @@ export function historyLayout(transcript: Transcript, width: number, reasoning: 
   const live = transcript.liveParts(width);
   const streamed: HistoryRow[] = live.length ? [
     ...(transcript.liveToolOnly || index.assistantSeen ? [] : [{ text: '✦ Assistant · streaming', kind: 'assistant' as const, bold: true }]),
-    ...partRows(live, width, liveReasoning),
+    ...live.flatMap(part => livePartRows(part, index.liveWraps, width, liveReasoning)),
   ] : [];
   const committed = index;
   const length = committed.length + streamed.length;
