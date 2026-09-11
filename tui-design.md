@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,777 行；`tests/` 23 个测试文件；158 项测试 |
+| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,803 行；`tests/` 23 个测试文件；159 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -693,7 +693,7 @@ dsht [options] [list workspaces|list sessions]
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
 | `/allow` | — | 一次性批准待答请求 |
 | `/deny` | — | 拒绝待答请求 |
-| `/status` | — | 展开完整状态详情；窄屏按面板宽度换行，`PgUp`/`PgDn` 翻页 |
+| `/status` | — | 展开完整状态详情；窄屏按面板宽度换行，`↑`/`↓` 逐行滚动、`PgUp`/`PgDn` 翻屏 |
 | `/cost` | — | 显示费用估算并刷新用量 |
 | `/think` | `[seq or live]` | 查看带用户提示摘要的推理 |
 | `/help` | — | 列出全部命令 |
@@ -1055,6 +1055,8 @@ C4Component
 
 草稿与视口位置：输入从空变为非空、且首字符不是 `/` 时，视口回到实时末端（等价于 `setScroll(0)`），因此开始写消息不必先滚到底；以 `/` 开头的命令不改变视口，草稿已存在时继续编辑或在其中向上滚动同样保留读者当前位置。
 
+粘贴与状态面板：终端把整段粘贴作为一次输入投递，输入框把换行与制表符折叠为空格并丢弃控制字符，因此多行片段会安全地变成单行且不会误发送。展开的 `/status` 持有行偏移而非页号：`↑`/`↓` 逐行、`PgUp`/`PgDn` 翻屏、滚轮在面板打开时滚动面板本身；页脚报出可见区间并在越界时由面板通过 `onScroll` 回报收敛后的偏移。
+
 内存样本字段：除进程计数器、保留窗口与账本外，样本还记录布局行缓存（行数、记账字节、span 个数与字符数）、增量实时尾部状态、数学与图表缓存的条目/字符/命中/未命中、实时字符数、推理条目数，以及最近一次成本扫描的会话数、页数与事件数；`--expose-gc` 下额外记录一次强制回收后的堆与耗时，用于区分"真正保留"与"V8 尚未回收"。
 
 ### 5.3 进程内内存状态
@@ -1218,7 +1220,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 23 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 158 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
+- 23 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 159 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1288,7 +1290,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 57 个模块、5,777 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 57 个模块、5,803 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1330,7 +1332,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 586 | `App` |
+| `ui/app.tsx` | 589 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
@@ -1342,7 +1344,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 16 | `HistoryViewport` |
-| `ui/chat/status.tsx` | 195 | `StatusBar`、`elapsedTime`、`metricLines`、`compactStatus` |
+| `ui/chat/status.tsx` | 218 | `StatusBar`、`elapsedTime`、`metricLines`、`compactStatus` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
 | `ui/input/history.ts` | 38 | `InputHistory` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |

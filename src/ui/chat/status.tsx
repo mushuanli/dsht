@@ -1,5 +1,5 @@
 /** Terminal status from host projections; cumulative usage and estimated context stay distinct. */
-import { useTheme } from '../theme/index.ts';
+import { useTheme, type Theme } from '../theme/index.ts';
 import { memo, useEffect, useState } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import wrapAnsi from 'wrap-ansi';
@@ -83,7 +83,7 @@ function compactStatusFields(fields: string[], width: number): string[] {
 const compactNumber = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 /** Render a live clock and selected-session metadata; the timer belongs to this mounted bar. */
-export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, page = 0, pageSize, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; page?: number; pageSize?: number; paused?: boolean }) {
+export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, scroll = 0, pageSize, onScroll, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number; onScroll?(next: number): void; paused?: boolean }) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const [now, setNow] = useState(Date.now);
@@ -139,8 +139,30 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
       <Text color={colors[index]} bold={index === 0}>{text}</Text>
     </Text> : null)}</Text>;
   }
+  return <StatusDetails controller={controller} theme={theme} width={width} now={now} scroll={scroll} pageSize={pageSize} onScroll={onScroll} />;
+});
+
+/** Expanded detail panel.
+ *
+ * It is a separate component because it is the only branch that scrolls, and a hook behind the
+ * collapsed branch's early return would change the hook order between the two states.
+ */
+const StatusDetails = memo(function StatusDetails({ controller, theme, width, now, scroll, pageSize, onScroll }:
+{ controller: Controller; theme: Theme; width?: number; now: number; scroll: number; pageSize?: number; onScroll?(next: number): void }) {
+  const { stdout } = useStdout();
+  const state = controller.state;
+  const running = controller.running;
+  const since = controller.workingSince;
+  const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
+  const view = controller.telemetry.view(state.sessionId);
+  const costs = controller.costs;
+  const sessionCost = costs?.hasSession(state.sessionId) ? costText(costs.total(state.sessionId)) : '?';
+  const todayCost = costs ? costText(costs.total(undefined, 1, Date.now())) : '?';
+  // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
+  const coverage = costs?.coverage ?? 'complete';
+  const label = workspace ? `${workspace.title} · ${workspace.path}` : 'none selected';
   // Every detail row wraps to the terminal width, so a narrow terminal loses nothing; lines that
-  // still do not fit are paged rather than dropped, because the panel shares the screen height.
+  // still do not fit are scrolled rather than dropped, because the panel shares the screen height.
   const detail: StatusDetail[] = [
     { key: 'activity', color: running ? theme.colors.context : theme.colors.muted, text: running
       ? `◐ Working · ${since === undefined ? 'unknown duration' : elapsedTime(now - since)}${state.transcript.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
@@ -165,15 +187,16 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
   const lines = detail.flatMap(row => wrapAnsi(row.text, inner, { trim: false, hard: true }).split('\n')
     .map((text, index) => ({ ...row, key: `${row.key}:${index}`, text })));
   const budget = Math.max(1, pageSize ?? lines.length);
-  const hint = (count: number, index: number) => `Status ${index + 1}/${count} · PgUp/PgDn pages · Esc close`;
-  // A footer that wraps takes rows from the page, so its height is reserved before dividing them.
-  const bare = Math.max(1, Math.ceil(lines.length / budget));
-  const size = Math.max(1, budget - (bare > 1 ? measured(hint(bare, 0)) : 0));
-  const pages = Math.max(1, Math.ceil(lines.length / size));
-  const current = Math.min(Math.max(0, page), pages - 1);
+  const hint = (first: number, last: number, total: number) => `Status ${first}-${last}/${total} · ↑↓ scroll · Esc close`;
+  // A footer that wraps takes rows from the view, so its height is reserved before sizing it.
+  const size = Math.max(1, budget - (lines.length > budget ? measured(hint(0, 0, lines.length)) : 0));
+  const start = Math.max(0, Math.min(scroll, Math.max(0, lines.length - size)));
+  // Arrows and the wheel can ask for a line past either end; report the settled position back.
+  useEffect(() => { if (start !== scroll) onScroll?.(start); }, [start, scroll, onScroll]);
+  const visible = lines.slice(start, start + size);
   return <Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
-    {lines.slice(current * size, (current + 1) * size).map(line => <Text key={line.key} color={line.color} dimColor={line.dim}>{line.text}</Text>)}
-    {pages > 1 && <Text dimColor>{hint(pages, current)}</Text>}
+    {visible.map(line => <Text key={line.key} color={line.color} dimColor={line.dim}>{line.text}</Text>)}
+    {lines.length > size && <Text dimColor>{hint(start + 1, start + visible.length, lines.length)}</Text>}
   </Box>;
 });
 

@@ -46,36 +46,40 @@ test('a narrow panel wraps long values instead of truncating them', () => {
   }
 });
 
-test('every detail line survives paging, and the footer names the pages', () => {
+test('every detail line survives scrolling, and the footer names the visible range', () => {
   const controller = panelController();
-  const page = (index: number) => {
-    const ui = render(<Box width={44}><StatusBar controller={controller} expanded width={44} page={index} pageSize={6} /></Box>);
+  const settled: number[] = [];
+  const view = (scroll: number) => {
+    const ui = render(<Box width={44}><StatusBar controller={controller} expanded width={44} scroll={scroll} pageSize={6}
+      onScroll={next => settled.push(next)} /></Box>);
     const frame = ui.lastFrame()!;
     ui.unmount(); ui.cleanup();
     return frame;
   };
-  const first = page(0);
-  const total = Number(/Status 1\/(\d+)/.exec(first)?.[1]);
-  assert.ok(total > 1, `expected more than one page, got:\n${first}`);
-  const frames = Array.from({ length: total }, (_, index) => page(index));
-  for (const [index, frame] of frames.entries()) {
-    assert.match(frame, new RegExp(`Status ${index + 1}/${total} · PgUp/PgDn pages`));
-    assert.doesNotMatch(frame, /…/u);
-  }
-  // Content is compared without whitespace, because a page break can fall inside any phrase.
+  const first = view(0);
+  const total = Number(/Status 1-\d+\/(\d+)/.exec(first)?.[1]);
+  const shown = Number(/Status 1-(\d+)\//.exec(first)?.[1]);
+  assert.ok(total > shown, `expected a scrollable panel, got:\n${first}`);
+  // One line at a time reaches every line, whatever view height the panel settles on.
+  const frames = Array.from({ length: total }, (_, scroll) => view(scroll));
+  for (const frame of frames) assert.doesNotMatch(frame, /…/u);
+  assert.match(frames[0]!, /Status 1-\d+\/\d+ · ↑↓ scroll · Esc close/);
+  // Content is compared without whitespace, because a view boundary can fall inside any phrase.
   const union = flat(frames.join('\n'));
   for (const detail of ['● Ready · Ctrl+C exit', 'Host: http://127.0.0.1:1234', 'Session ID: s1', 'Workspace: Project α with a long workspace title',
     `Model:`, 'Context:', 'In (uncached):', 'Cost (CNY estimate):', 'Turns:', 'Queued:',
     'session/follow rejected: remote error 429 too many requests, retry after 30 seconds',
     'Preset names unavailable: preset catalog unavailable because the host returned an unexpected payload',
     'Model catalog unavailable: model catalog unavailable: connection reset by peer while listing providers']) {
-    assert.ok(union.includes(flat(detail)), `paging dropped ${detail}`);
+    assert.ok(union.includes(flat(detail)), `scrolling dropped ${detail}`);
   }
-  // A page past the last one stays on the last one instead of rendering nothing.
-  assert.equal(page(99), frames.at(-1));
+  // A scroll past either end settles on the nearest view instead of rendering nothing.
+  assert.equal(view(999), frames.at(-1));
+  assert.deepEqual(settled.at(-1), total - shown);
+  assert.equal(view(0), first);
 });
 
-test('PgUp and PgDn page the open panel through the running application', async t => {
+test('arrows and PgUp/PgDn scroll the open panel through the running application', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.baseline = [{ workspaceId: 'w1', title: 'Project α', path: LONG_PATH, sessionIds: ['s1'] }];
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
@@ -92,21 +96,27 @@ test('PgUp and PgDn page the open panel through the running application', async 
       else Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
     }
   };
-  assert.equal(ui.lastFrame()?.includes('Status 1/'), false);
+  assert.equal(ui.lastFrame()?.includes('· ↑↓ scroll ·'), false);
   await press('/status'); await press('\r');
-  await until(() => ui.lastFrame()?.includes('Status 1/') === true);
+  await until(() => ui.lastFrame()?.includes('· ↑↓ scroll ·') === true);
   const first = ui.lastFrame()!;
+  assert.match(first, /Status 1-/);
+  // A phone keyboard has arrows but no PgUp/PgDn, so a line must move the view on its own.
+  await press('\u001b[B');
+  await until(() => ui.lastFrame() !== first);
+  assert.match(ui.lastFrame()!, /Status 2-/);
+  await press('\u001b[A');
+  await until(() => ui.lastFrame()?.includes('Status 1-') === true);
   await press('\u001b[6~');
-  await until(() => ui.lastFrame()?.includes('Status 2/') === true);
-  assert.notEqual(ui.lastFrame(), first);
+  await until(() => /Status \d+-/.test(ui.lastFrame()!) && ui.lastFrame() !== first);
   await press('\u001b[5~');
-  await until(() => ui.lastFrame()?.includes('Status 1/') === true);
-  // Reopening starts at the first page rather than the page that was left behind.
-  await press('\u001b[6~');
-  await until(() => ui.lastFrame()?.includes('Status 2/') === true);
+  await until(() => ui.lastFrame()?.includes('Status 1-') === true);
+  // Reopening starts at the first view rather than the position that was left behind.
+  await press('\u001b[B');
+  await until(() => ui.lastFrame()?.includes('Status 2-') === true);
   await press('\u001b');
-  await until(() => ui.lastFrame()?.includes('Status 2/') === false);
+  await until(() => ui.lastFrame()?.includes('· ↑↓ scroll ·') === false);
   await press('/status'); await press('\r');
-  await until(() => ui.lastFrame()?.includes('Status 1/') === true);
+  await until(() => ui.lastFrame()?.includes('Status 1-') === true);
   await press('\u001b');
 });

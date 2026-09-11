@@ -95,10 +95,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const helpPageSize = Math.max(1, (stdout.rows ?? 30) - 12);
   const helpPages = Math.ceil(COMMAND_HINTS.length / helpPageSize);
   const currentHelpPage = Math.min(helpPage, helpPages - 1);
-  const [statusPage, setStatusPage] = useState(0);
-  // The panel owns two border rows and a one-row page footer, and the two header rows and the
-  // three-row composer above it never shrink, so only the remainder of the screen height holds rows.
-  const statusPageSize = Math.max(1, (stdout.rows ?? 30) - 9);
+  const [statusScroll, setStatusScroll] = useState(0);
+  // The panel owns two border rows and a one-row footer, and the two header rows and the
+  // three-row composer above it never shrink, so only the remainder of the screen height shows rows.
+  const statusViewRows = Math.max(1, (stdout.rows ?? 30) - 9);
   const [answers, setAnswers] = useState<Record<string, ObjectValue[]>>({});
   const [optionState, setOptionState] = useState<{ key: string; cursor: number; selected: string[]; custom: boolean }>();
   const [approvalSelection, setApprovalSelection] = useState<{ eventId: string; index: number }>();
@@ -238,8 +238,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (help && (key.pageUp || key.pageDown)) {
       setHelpPage(Math.max(0, Math.min(helpPages - 1, currentHelpPage + (key.pageUp ? -1 : 1)))); return;
     }
+    if (statusExpanded && (key.upArrow || key.downArrow)) {
+      setStatusScroll(value => Math.max(0, value + (key.upArrow ? -1 : 1))); return;
+    }
     if (statusExpanded && (key.pageUp || key.pageDown)) {
-      setStatusPage(value => Math.max(0, value + (key.pageUp ? -1 : 1))); return;
+      setStatusScroll(value => Math.max(0, value + (key.pageUp ? -statusViewRows : statusViewRows))); return;
     }
     if (key.pageUp || key.pageDown) { scrollHistory(key.pageUp ? 10 : -10); return; }
     if (key.escape && queueOpen) { setQueueOpen(false); return; }
@@ -270,7 +273,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
     if (key.tab) { completeCommand(); return; }
     if (key.escape && (help || costExpanded || statusExpanded || notice !== undefined)) {
-      setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusPage(0); setNotice(undefined);
+      setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusScroll(0); setNotice(undefined);
       if (controller.running) void controller.interrupt(true);
       return;
     }
@@ -299,7 +302,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       if (submission.panel === 'cost') {
         setCostExpanded(value => !value); setInput('');
         if (!costExpanded) void controller.perform(() => historyOperation(signal => controller.refreshCosts(signal)));
-      } else if (submission.panel === 'status') { setStatusExpanded(value => !value); setStatusPage(0); setInput(''); }
+      } else if (submission.panel === 'status') { setStatusExpanded(value => !value); setStatusScroll(0); setInput(''); }
       else { setHelp(value => !value); setHelpPage(0); setInput(''); }
       return;
     }
@@ -475,7 +478,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setScroll(Math.max(0, current.length - pageSize - row));
     } finally { if (historyAbort.current === abort) historyAbort.current = undefined; }
   }
-  useMouseWheel(direction => scrollHistory(direction * 3), !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
+  useMouseWheel(direction => { if (statusExpanded) setStatusScroll(value => Math.max(0, value - direction * 3)); else scrollHistory(direction * 3); }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
   const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
   const end = Math.max(pageSize, length - position - trailingGap);
   const visible = useMemo(() => layout.viewport(Math.max(0, end - pageSize), end), [layout, end, pageSize]);
@@ -580,7 +583,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
       {costExpanded && <CostPanel controller={controller} />}
-      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusPage}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} page={statusPage} pageSize={statusPageSize} revision={state.version} paused={statusFrozen} /></Frozen>
+      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} revision={state.version} paused={statusFrozen} /></Frozen>
     </Box>
   </Box></Frozen></CopyMode.Provider></ThemeContext.Provider>;
 }

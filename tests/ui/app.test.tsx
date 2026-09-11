@@ -448,6 +448,21 @@ test('a new message draft returns the view to the live end, but a slash command 
   await pressKey(ui, '\u0003');
 });
 
+test('a pasted multi-line snippet becomes one composer line without sending it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  // A phone paste arrives as one burst; tabs and newlines would otherwise break a single-row field.
+  await pressKey(ui, 'first line\nsecond line\twith tab');
+  await until(() => ui.lastFrame()?.includes('❯ first line second line with tab') === true);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+  assert.equal(controller.state.busy, false);
+  await pressKey(ui, '\u0003');
+});
+
 test('search loads old messages, opens cross-session matches and cancels local paging', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 10, hasMore: true, header: { id: 's1' }, records: [
