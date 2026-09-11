@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,980 行；`tests/` 24 个测试文件；165 项测试 |
+| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,985 行；`tests/` 25 个测试文件；166 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -1294,7 +1294,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 57 个模块、5,980 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 57 个模块、5,985 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1347,7 +1347,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/dialogs/cost.tsx` | 32 | `CostPanel` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
-| `ui/chat/history-view.tsx` | 16 | `HistoryViewport` |
+| `ui/chat/history-view.tsx` | 21 | `HistoryViewport` |
 | `ui/chat/status.tsx` | 354 | `StatusBar`、`elapsedTime`、`metricLines`、`compactStatus` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
 | `ui/input/history.ts` | 38 | `InputHistory` |
