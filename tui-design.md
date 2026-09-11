@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 50 个模块（7 个业务域 + 共享契约），约 4,893 行；`tests/` 18 个测试文件；133 项测试 |
+| 源码规模 | `src/` 50 个模块（7 个业务域 + 共享契约），约 4,897 行；`tests/` 18 个测试文件；134 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -179,7 +179,7 @@ C4Component
   Component(cost, "cost/", "8 文件 602 行", "价格、记录折叠、存储、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
   Component(controller, "controller/", "3 文件 551 行", "Controller 门面与 ConnectionController")
-  Component(ui, "ui/", "18 文件 1527 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
+  Component(ui, "ui/", "18 文件 1531 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
   Component(cli, "cli/", "1 文件 91 行", "参数、目录准备与进程生命周期")
 
   Rel(root, transport, "被依赖")
@@ -218,7 +218,7 @@ C4Component
 
 `Controller` 是唯一的状态发布者：`State` 通过 `update(patch)` 整体替换并递增 `version`，React 18 的 `useSyncExternalStore(controller.subscribe, controller.snapshot)` 读取它。`State` 与 `ControllerStore` 契约位于 `src/state.ts`，由 `ConnectionController`、`SessionController`、`CatalogController` 与 `CostController` 共同写入；`pending`（待答问题/审批）由 `SessionController` 的 `interactions` 映射在每次 `update` 时按当前会话推导，因此**可见对话框与帧到达顺序无关**。选择器世代同样由 store 持有，会话与 catalog 域据此丢弃跨越切换的在途响应。
 
-阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装；`displayPaused = copyMode || dialogOpen` 时冻结标题、对话与状态栏子树。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
+阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话；状态另用 `statusPaused = copyMode || (screen === 'chat' && dialogOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 对话框与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
 ### 2.6 关键架构决策
 
@@ -1173,7 +1173,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 18 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`ui/`、`cli/`、`architecture/`），共 133 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放。
+- 18 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`ui/`、`cli/`、`architecture/`），共 134 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1216,6 +1216,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `63cacdb` `refactor: enforce module boundaries and decouple the public API` | 域 barrel、依赖门禁测试、`ui/mount.tsx`、费用面板移入 `ui/`、构建前清理 `dist`、双语 README | typecheck + 131 项测试 + `test:terminal` |
 | `483036b` `docs: record the modular boundaries and immutable ledger decision` | Agent Note 三件套（英文、中文、配对哈希） | 配对哈希一致 |
 | `775d8d8` `feat: select approvals with numbers and arrows` | 审批编号选择器、未选中起始与重置规则、共享面板谓词、专项测试与黄金输出、双语 README | typecheck + 133 项测试 + `test:terminal` |
+| `4599b18` `fix: refresh the connection status while a picker is open` | 状态冻结改为按界面区分，启动选择器保持连接提示实时；断线重连与复制模式保持的回归测试 | typecheck + 134 项测试 |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
@@ -1223,7 +1224,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 50 个模块、4,893 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 50 个模块、4,897 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1258,7 +1259,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/controller.ts` | 343 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 569 | `App` |
+| `ui/app.tsx` | 573 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
@@ -1288,7 +1289,7 @@ C4Component
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, storage, types, index", "8 文件 602 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
   Component(controller, "controller/", "controller, connection, index", "3 文件 551 行")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 1527 行")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 1531 行")
   Component(cli, "cli/", "index.tsx", "1 文件 91 行")
 
   Rel(root, transport, "公开门面")
