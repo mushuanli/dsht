@@ -1,9 +1,9 @@
 /** Billing estimates with explicit coverage, calendar and unknown-price indicators. */
-import { useTheme } from '../ui/theme/index.ts';
+import { useTheme } from '../theme/index.ts';
 import { Box, Text } from 'ink';
-import { costText } from './ledger.ts';
-import type { Controller } from '../controller/controller.ts';
-import { safeText } from '../transport/wire.ts';
+import { costText } from '../../cost/index.ts';
+import type { Controller } from '../../controller/index.ts';
+import { safeText } from '../../transport/wire.ts';
 
 /** Render cached totals while the independent HTTP cost scan refreshes.
  * @param controller - Selected session and origin-scoped cost ledger.

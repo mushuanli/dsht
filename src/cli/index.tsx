@@ -6,8 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CostLedger, DEFAULT_PRICES, pricesFrom } from '../cost/index.ts';
 import { parseArgs } from 'node:util';
-import { render } from 'ink';
-import { App } from '../ui/app.tsx';
+import { mount } from '../ui/mount.tsx';
 import { sessionLabel } from '../session/navigation.ts';
 import { CookieStore, login } from '../transport/auth.ts';
 import { Client } from '../transport/client.ts';
@@ -81,7 +80,7 @@ async function main(): Promise<void> {
   const costs = new CostLedger(prices, costDirectory);
   await costs.load();
   const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits);
-  const app = render(<App controller={controller} />, { exitOnCtrlC: false });
+  const app = mount(controller);
   const terminate = () => app.unmount();
   process.once('SIGTERM', terminate);
   controller.start();

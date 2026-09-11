@@ -9,7 +9,7 @@ import { ReferenceMenu } from './input/references.tsx';
 import { historyLayout, releaseHistoryLayout, type Reasoning } from '../session/history.ts';
 import { toolLine, type Transcript } from '../session/transcript.ts';
 import { activeReference, fileMention, type FileReference } from '../session/references.ts';
-import { CostPanel } from '../cost/view.tsx';
+import { CostPanel } from './dialogs/cost.tsx';
 import { StatusBar } from './chat/status.tsx';
 import { ChatHeader } from './chat/header.tsx';
 import { ChatViewport } from './chat/viewport.tsx';

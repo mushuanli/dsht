@@ -26,7 +26,7 @@
   },
   "scripts": {
     "start": "tsx src/cli/index.tsx",
-    "build": "tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "test": "tsx --test tests/*/*.test.ts tests/*/*.test.tsx",
     "test:terminal": "node scripts/test/terminal.mjs",

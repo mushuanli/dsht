@@ -279,8 +279,8 @@ npx @itookit/dsht list sessions --workspace WORKSPACE_ID --json
 ```sh
 npm start -- list workspaces --json
 npm start -- list sessions --json
-node --import tsx src/cli.tsx list workspaces --json
-node --import tsx src/cli.tsx list sessions --json
+node --import tsx src/cli/index.tsx list workspaces --json
+node --import tsx src/cli/index.tsx list sessions --json
 ```
 
 JSON 输出格式为 `{ "items": [...] }`；省略 `--json` 则输出制表符分隔的列表。工作区筛选使用服务端 `sessionIds` 成员关系。工作区列表读取 `workspace/follow` 的首个 baseline 后取消订阅，不会调用不存在的 `workspace/list` 端点。
@@ -374,7 +374,7 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 轮次数来自完整会话的 `sessionStats.turns` 投影。上下文占用标为 `~`：Harness 将供应商用量与对话变化估算值、最新模型容量结合。Token 总量来自完整会话的 `tokenUsage` 投影，分别显示非缓存输入、输出、缓存读取和缓存写入；思考 token 已包含在输出中。总量随服务端用量投影更新，不按流式字符计数。缺失数据显示 `unknown` 或 `?`。重连时控制流基线整体替换状态，每个投影键的序号防止旧 follow 快照覆盖较新的指标。
 
-默认使用 [Catppuccin Mocha](https://catppuccin.com/palette/) 主题：`❯ User` 为蓝色，`✦ Assistant` 为绿色，思考为淡紫色，工具为天蓝色，成功为绿色，错误为红色。紧凑状态栏中 Ready 为绿色、Working 为黄色、离线为红色，模型／强度为淡紫色、费用为天蓝色、用量为柔和灰色。上下文占用达到 80% 时从绿色变黄，95% 时变红；这只是视觉阈值，不代表服务端压缩触发条件。各组先按宽度裁剪，再添加 ANSI 样式，保持对齐及无色终端输出。语义配色独立放在 `src/theme.ts`，应用可单独接收主题，消息不保存 ANSI 样式。Ink 根据终端能力输出颜色，无色终端仍保留角色标记。工具调用显示名称和描述；命令与描述不同时，下一行以 `$` 显示命令第一行。没有描述时使用命令第一行、路径或查询作为摘要。各行按终端显示宽度截断；结果按调用 ID 在原条目上将 ⚙ 更新为 ✓ 或 ✗，不再重复新增结果条目，命令预览保留两格缩进。调用尚未加载时单独显示结果摘要，加载调用页后合并；嵌套结果正文保持隐藏。
+默认使用 [Catppuccin Mocha](https://catppuccin.com/palette/) 主题：`❯ User` 为蓝色，`✦ Assistant` 为绿色，思考为淡紫色，工具为天蓝色，成功为绿色，错误为红色。紧凑状态栏中 Ready 为绿色、Working 为黄色、离线为红色，模型／强度为淡紫色、费用为天蓝色、用量为柔和灰色。上下文占用达到 80% 时从绿色变黄，95% 时变红；这只是视觉阈值，不代表服务端压缩触发条件。各组先按宽度裁剪，再添加 ANSI 样式，保持对齐及无色终端输出。语义配色独立放在 `src/ui/theme/index.ts`，应用可单独接收主题，消息不保存 ANSI 样式。Ink 根据终端能力输出颜色，无色终端仍保留角色标记。工具调用显示名称和描述；命令与描述不同时，下一行以 `$` 显示命令第一行。没有描述时使用命令第一行、路径或查询作为摘要。各行按终端显示宽度截断；结果按调用 ID 在原条目上将 ⚙ 更新为 ✓ 或 ✗，不再重复新增结果条目，命令预览保留两格缩进。调用尚未加载时单独显示结果摘要，加载调用页后合并；嵌套结果正文保持隐藏。
 
 思考生成时完整流式显示，思考块结束或正文／工具输出开始后自动折叠。`/think` 按从新到旧列出思考摘要、前一条已加载的用户 prompt，并包含当前尝试。↑/↓ 选择、Enter 跳到原消息并展开；`/think SEQ` 可切换该消息的折叠状态，`/think live` 控制当前尝试。列表在选择、Esc 或其他命令时关闭，不自动超时。打开列表只使用已加载记录，选择 `Load older reasoning` 才读取一页更早历史；prompt 在已加载窗口之前时明确提示，加载对应页面后补全。完整思考仍可被搜索。
 
@@ -394,15 +394,15 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 内置人民币价格于 2026-09-10 根据[官方价格页](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)核对。北京时间工作日 09:00–12:00、14:00–18:00 为高峰，其余时段半价。Flash 高峰未命中输入／缓存命中输入／输出为每百万 token ¥2/¥0.04/¥8，Pro 为 ¥9/¥0.30/¥27；当前模型名为 `deepseek-flash`，旧 Flash 名称沿用同一费率。供应方已公告自北京时间 2026-09-14 12:00 起将 `deepseek-v4-pro` 交由 Flash 服务并按 Flash 价格计费，内置条目已记录该变更，避免此后高估 Pro 用量。单列的缓存写入按未命中输入价计算。配置中的精确模型价格优先；否则 `deepseek-official` 模型名包含 `pro`（不区分大小写）时按 Pro 计价，其余名称包括临时别名均按 Flash 计价。其他供应商需要显式配置。
 
-默认价格有效期从核对日期的北京时间零点开始，这是本地估算规则，不代表官方价格生效日期。更早用量需要补充历史价格版本。程序按助手请求结算记录的时间选择单价；官方未说明跨时段请求的归属，因此边界附近的估算可能与账单不同。图片使用供应商报告的 token 数。每次扫描都按当前配置重新计算已存请求，因此修正价格版本会一并修正此前的小计；此前没有任何条目覆盖的请求，会在条目覆盖其结算日期后被计价。
+默认价格有效期从核对日期的北京时间零点开始，这是本地估算规则，不代表官方价格生效日期。更早用量需要补充历史价格版本。程序按助手请求结算记录的时间选择单价；官方未说明跨时段请求的归属，因此边界附近的估算可能与账单不同。图片使用供应商报告的 token 数。每条请求只在首次计价时按当时加载的价格表决定金额，之后不再改变：修改 `prices.json` 只影响其后才计价的请求，此前没有条目覆盖的请求保持未计价。
 
 首次交互启动会创建 `~/.config/dsht/prices.json`（或 `$XDG_CONFIG_HOME/dsht/prices.json`），可用 `DSHT_CONFIG_DIR` 覆盖目录。JSON 数组中的价格版本包含 `id`、`provider`、`model`、`currency: "CNY"`、`source`、包含起点的 `from`、可选且不含终点的 `until`、`timezone`、星期数字 `weekdays`（`0` 为周日）、日内分钟区间 `windows`，以及 `peak`／`offPeak` 下每百万 token 的 `input`、`cacheRead`、`cacheWrite`、`output` 单价。调价时用 `until` 结束旧区间，再添加唯一 ID 且 `from` 衔接的新版本；程序拒绝重叠区间。重启后读取配置修改；价格由用户维护，启动时不抓取网页价格。
 
-用量文件位于 `~/.local/state/dsht/cost/<origin-hash>/`，遵循 `XDG_STATE_HOME`，也可通过 `DSHT_STATE_DIR` 指定应用状态根目录。文件只含会话 ID、时间戳、模型身份、token 数、所选价格版本和估算值，不包含提示词、工具正文、凭据或 cookie。价格文件属于配置，这些用量文件属于状态，因此只有前者需要纳入设置备份。写入使用私有临时文件及原子替换，按历史截点命名的文件避免旧扫描覆盖更新的缓存截点。缓存跨重启保留，不需要访问服务端配置目录。账本保存的是逐条请求而非累计总额，且跳过已扫描会话的记录只存在内存中，因此重启后的首次扫描会重新读取每个会话，并按各请求自身的结算时间重新计算停机期间新增的用量。
+用量文件位于 `~/.local/state/dsht/cost/<origin-hash>/`，遵循 `XDG_STATE_HOME`，也可通过 `DSHT_STATE_DIR` 指定应用状态根目录。文件只含会话 ID、时间戳、模型身份、token 数、所选价格版本和估算值，不包含提示词、工具正文、凭据或 cookie。价格文件属于配置，这些用量文件属于状态，因此只有前者需要纳入设置备份。写入使用私有临时文件及原子替换，按历史截点命名的文件避免旧扫描覆盖更新的缓存截点。缓存跨重启保留，不需要访问服务端配置目录。账本保存逐条请求而非累计总额，并记录将其固化的价格身份与金额；跳过已扫描会话的记录只存在内存中，因此重启后的首次扫描会重新读取每个会话，为停机期间新增的请求决定金额。旧一代账本格式的缓存文件会被忽略并重建，不做迁移。
 
 ## 客户端接口
 
-安装后的包通过 `@itookit/dsht` 导出 `Client`，通过 `@itookit/dsht/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/client.ts` 导入，或构建后从 `dist/client.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
+安装后的包通过 `@itookit/dsht` 导出 `Client`，通过 `@itookit/dsht/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/transport/client.ts` 导入，或构建后从 `dist/index.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/transport/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
 
 会话和工作区命令在 `args` 内使用 `{ request: { ... } }`；会话列表使用 `{ _request: {} }`。`$events/result` 直接使用具名参数。重连后的 follow 快照整体替换保留状态；持久消息与临时助手文本分别保存。读取器同时支持 `event` 记录和旧版 `chunks` 包装；后者包含 `chunkrow/text-chunks`、`chunkrow/reasoning-chunks` 或 `chunkrow/tool-call-chunks`。不提供 `assistantStream` 的服务端通过日志 chunk 传递实时文本；TUI 只重建尚未完成的尝试，并保留每条压缩记录的起始序号用于翻页。
 
@@ -445,10 +445,12 @@ npm test
 npm run test:terminal
 npm run build
 npm run bench:input
-node dist/cli.js --help
+node dist/cli/index.js --help
 ```
 
 测试使用隔离的 HTTP/WebSocket 服务，驱动实际 Ink 选择器和输入框，在子进程中运行 CLI，并投影复制的 Harness v2 工作区编辑记录和 v0 压缩 chunk 记录。这些检查不需要模型凭据。记录和预期对话输出位于 `tests/`，不依赖父仓库。测试不覆盖真实模型供应商行为。
+
+源码在 `src/` 下按业务域组织：`transport/` 负责服务端 wire 协议与认证，`session/` 负责对话、历史与交互，`cost/` 负责不可重算的计费账本，`catalog/` 负责模型与 preset，`controller/` 是应用门面，`ui/` 承载全部 React 与 Ink，`cli/` 是组装入口。跨模块导入统一走各模块的 `index.ts`；`tests/architecture/dependencies.test.ts` 会拒绝禁止的依赖方向。
 
 `npm test` 渲染不带样式的帧，因为断言和 `tests/expected/` 中的预期输出描述的是文本。从终端启动的测试运行器会向每个测试文件导出 `FORCE_COLOR=1`，使 Ink 在提示符与文本之间插入 SGR 转义序列；`npm run test:terminal` 在任何主机上复现该环境，`prepublishOnly` 也会运行它，因此从终端发布时验证的就是终端实际渲染的结果。 主题测试在独立子进程中分别渲染真彩色和纯文本，并隔离父进程中影响终端和 CI 颜色检测的环境设置。
 
