@@ -449,6 +449,23 @@ test('a new message draft returns the view to the live end, but a slash command 
   await pressKey(ui, '\u0003');
 });
 
+test('a status panel that fits leaves the history arrows with the composer', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready && ui.lastFrame()?.includes('你好') === true);
+  await pressKey(ui, '/status'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Session s1') === true);
+  // The compacted panel fits this terminal, so ↑ still recalls history rather than scrolling it.
+  await pressKey(ui, '\u001b[A');
+  await until(() => ui.lastFrame()?.includes('❯ /status') === true);
+  await pressKey(ui, '\u0010');
+  await until(() => ui.lastFrame()?.includes('❯ 你好') === true);
+  await pressKey(ui, '\u0003');
+});
+
 test('a pasted multi-line snippet becomes one composer line without sending it', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');

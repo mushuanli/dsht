@@ -105,6 +105,13 @@ test('arrows and PgUp/PgDn scroll the open panel through the running application
   await press('\u001b[B');
   await until(() => ui.lastFrame() !== first);
   assert.match(ui.lastFrame()!, /Status 2-/);
+  // This terminal makes the panel scroll, so the arrows stay with the panel and Ctrl+P reaches
+  // the composer history instead of being swallowed.
+  assert.equal(ui.lastFrame()?.includes('❯ Message, @host-file, or /help'), true);
+  await press('\u0010');
+  await until(() => ui.lastFrame()?.includes('❯ /status') === true);
+  await press('\u0003');
+  await until(() => ui.lastFrame()?.includes('❯ Message, @host-file, or /help') === true);
   await press('\u001b[A');
   await until(() => ui.lastFrame()?.includes('Status 1-') === true);
   await press('\u001b[6~');

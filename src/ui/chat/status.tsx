@@ -87,7 +87,7 @@ function compactStatusFields(fields: string[], width: number): string[] {
 }
 
 /** Render a live clock and selected-session metadata; the timer belongs to this mounted bar. */
-export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, scroll = 0, pageSize, onScroll, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number; onScroll?(next: number): void; paused?: boolean }) {
+export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, scroll = 0, pageSize, onScroll, onOverflow, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number; onScroll?(next: number): void; onOverflow?(overflow: boolean): void; paused?: boolean }) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const [now, setNow] = useState(Date.now);
@@ -143,7 +143,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
       <Text color={colors[index]} bold={index === 0}>{text}</Text>
     </Text> : null)}</Text>;
   }
-  return <StatusDetails controller={controller} theme={theme} width={width} now={now} scroll={scroll} pageSize={pageSize} onScroll={onScroll} />;
+  return <StatusDetails controller={controller} theme={theme} width={width} now={now} scroll={scroll} pageSize={pageSize} onScroll={onScroll} onOverflow={onOverflow} />;
 });
 
 /** Expanded detail panel.
@@ -151,8 +151,8 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
  * It is a separate component because it is the only branch that scrolls, and a hook behind the
  * collapsed branch's early return would change the hook order between the two states.
  */
-const StatusDetails = memo(function StatusDetails({ controller, theme, width, now, scroll, pageSize, onScroll }:
-{ controller: Controller; theme: Theme; width?: number; now: number; scroll: number; pageSize?: number; onScroll?(next: number): void }) {
+const StatusDetails = memo(function StatusDetails({ controller, theme, width, now, scroll, pageSize, onScroll, onOverflow }:
+{ controller: Controller; theme: Theme; width?: number; now: number; scroll: number; pageSize?: number; onScroll?(next: number): void; onOverflow?(overflow: boolean): void }) {
   const { stdout } = useStdout();
   const state = controller.state;
   const running = controller.running;
@@ -200,6 +200,8 @@ const StatusDetails = memo(function StatusDetails({ controller, theme, width, no
   const start = Math.max(0, Math.min(scroll, Math.max(0, lines.length - size)));
   // Arrows and the wheel can ask for a line past either end; report the settled position back.
   useEffect(() => { if (start !== scroll) onScroll?.(start); }, [start, scroll, onScroll]);
+  // The caller needs to know whether this panel owns the arrows or has nothing to scroll.
+  useEffect(() => { onOverflow?.(lines.length > size); }, [lines.length, size, onOverflow]);
   const visible = lines.slice(start, start + size);
   return <Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
     {visible.map(line => <Text key={line.key} color={line.color} dimColor={line.dim}>{line.text}</Text>)}

@@ -96,6 +96,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const helpPages = Math.ceil(COMMAND_HINTS.length / helpPageSize);
   const currentHelpPage = Math.min(helpPage, helpPages - 1);
   const [statusScroll, setStatusScroll] = useState(0);
+  const [statusOverflow, setStatusOverflow] = useState(false);
   // The panel owns two border rows and a one-row footer, and the two header rows and the
   // three-row composer above it never shrink, so only the remainder of the screen height shows rows.
   const statusViewRows = Math.max(1, (stdout.rows ?? 30) - 9);
@@ -162,6 +163,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const optionStart = Math.max(0, optionCursor - optionPageSize + 1);
   // One open panel owns the arrow and digit keys; the picker screens and the composer are not keyboard owners.
   const panelBlocksKeys = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || help || costExpanded || statusExpanded);
+  // Composer recall yields to a panel only when that panel needs the keys. A status panel that fits
+  // the screen has nothing to scroll, so the arrows stay with the history; Ctrl+P/N always reach it.
+  const recallBlocked = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || help || costExpanded || (statusExpanded && statusOverflow));
   const questionKeysActive = !!question && options.length > 0 && !choiceState.custom && !copyMode && !panelBlocksKeys;
   const approvalKeysActive = pending?.event === 'approval/request' && !copyMode && !panelBlocksKeys;
   const approvalIndex = approvalSelection?.eventId === eventId ? approvalSelection.index : -1;
@@ -238,10 +242,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (help && (key.pageUp || key.pageDown)) {
       setHelpPage(Math.max(0, Math.min(helpPages - 1, currentHelpPage + (key.pageUp ? -1 : 1)))); return;
     }
-    if (statusExpanded && (key.upArrow || key.downArrow)) {
+    if (statusExpanded && statusOverflow && (key.upArrow || key.downArrow)) {
       setStatusScroll(value => Math.max(0, value + (key.upArrow ? -1 : 1))); return;
     }
-    if (statusExpanded && (key.pageUp || key.pageDown)) {
+    if (statusExpanded && statusOverflow && (key.pageUp || key.pageDown)) {
       setStatusScroll(value => Math.max(0, value + (key.pageUp ? -statusViewRows : statusViewRows))); return;
     }
     if (key.pageUp || key.pageDown) { scrollHistory(key.pageUp ? 10 : -10); return; }
@@ -267,7 +271,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
     const recallNext = key.downArrow || key.ctrl && _value === 'n';
     if ((recallPrevious || recallNext) && state.online && !controller.state.busy && !pending
-      && !queueOpen && !panelBlocksKeys
+      && !queueOpen && (!recallBlocked || key.ctrl)
       && (state.screen === 'chat' || draft.current !== '' || key.ctrl)) {
       setInput(inputHistory.current.move(recallPrevious ? -1 : 1, draft.current), true); return;
     }
@@ -478,7 +482,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setScroll(Math.max(0, current.length - pageSize - row));
     } finally { if (historyAbort.current === abort) historyAbort.current = undefined; }
   }
-  useMouseWheel(direction => { if (statusExpanded) setStatusScroll(value => Math.max(0, value - direction * 3)); else scrollHistory(direction * 3); }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
+  useMouseWheel(direction => { if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3)); else scrollHistory(direction * 3); }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
   const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
   const end = Math.max(pageSize, length - position - trailingGap);
   const visible = useMemo(() => layout.viewport(Math.max(0, end - pageSize), end), [layout, end, pageSize]);
@@ -583,7 +587,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
       {costExpanded && <CostPanel controller={controller} />}
-      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} revision={state.version} paused={statusFrozen} /></Frozen>
+      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} revision={state.version} paused={statusFrozen} /></Frozen>
     </Box>
   </Box></Frozen></CopyMode.Provider></ThemeContext.Provider>;
 }
