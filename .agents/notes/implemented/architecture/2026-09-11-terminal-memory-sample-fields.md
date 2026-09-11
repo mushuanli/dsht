@@ -10,7 +10,7 @@ The runtime memory log recorded the process counters, the retained transcript an
 
 A sample now also records the layout row cache (`layoutRows`, `layoutCacheBytes`, `layoutSpans`, `layoutSpanChars`), its incremental live-tail state, the math and diagram cache (`markdownEntries`, `markdownChars`, `markdownHits`, `markdownMisses`), the live character count, the reasoning entry count, and the sessions, pages and events of the last completed scan. `layoutStats` reports the cache of one transcript and `markdownCacheStats` the render cache, so the numbers come from the structures themselves instead of a second estimate.
 
-When the runtime exposes `global.gc`, a sample first collects and records `heapUsedAfterGc` and `gcMs`, which separates retained state from garbage V8 has not collected; otherwise the fields are absent. `npm run start:profile` starts the client with `--expose-gc --heapsnapshot-signal=SIGUSR2`, so a heap snapshot can be written at the plateau with `kill -USR2`, and `--max-old-space-size` can bound a run that is already at 3 GB.
+When the runtime exposes `global.gc`, a sample first collects and records `heapUsedAfterGc` and `gcMs`, which separates retained state from garbage V8 has not collected; otherwise the fields are absent. `npm run start:profile` creates `.diagnostics/` and starts the client with `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics`, so `kill -USR2 <pid>` writes a heap snapshot at the plateau into that directory — a snapshot directory that does not exist would crash the process on the signal — and `--max-old-space-size` can bound a run that is already at 3 GB.
 
 ## Alternatives considered
 

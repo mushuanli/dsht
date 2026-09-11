@@ -10,7 +10,7 @@ Status: implemented
 
 样本现在还会记录布局行缓存（`layoutRows`、`layoutCacheBytes`、`layoutSpans`、`layoutSpanChars`）、它的增量实时尾部状态、数学与图表缓存（`markdownEntries`、`markdownChars`、`markdownHits`、`markdownMisses`）、实时字符数、推理条目数，以及最近一次完成扫描的会话数、页数与事件数。`layoutStats` 报告某个 transcript 的缓存，`markdownCacheStats` 报告渲染缓存，因此这些数字来自结构本身，而不是第二份估算。
 
-当运行时暴露 `global.gc` 时，样本会先回收一次并记录 `heapUsedAfterGc` 与 `gcMs`，把真正保留的状态与 V8 尚未回收的垃圾区分开；没有该能力时这些字段缺席。`npm run start:profile` 以 `--expose-gc --heapsnapshot-signal=SIGUSR2` 启动客户端，于是可以在平台期用 `kill -USR2` 写出堆快照，也可以用 `--max-old-space-size` 给已经到 3 GB 的运行加上上限。
+当运行时暴露 `global.gc` 时，样本会先回收一次并记录 `heapUsedAfterGc` 与 `gcMs`，把真正保留的状态与 V8 尚未回收的垃圾区分开；没有该能力时这些字段缺席。`npm run start:profile` 会先建好 `.diagnostics/`，再以 `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics` 启动客户端，于是可以在平台期用 `kill -USR2 <pid>` 把堆快照写进该目录——快照目录不存在时该信号会直接让进程崩溃——也可以用 `--max-old-space-size` 给已经到 3 GB 的运行加上上限。
 
 ## Alternatives considered
 

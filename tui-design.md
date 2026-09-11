@@ -651,7 +651,7 @@ dsht [options] [list workspaces|list sessions]
 | `--history-mb <n>` | 历史软上限 MiB，默认 16，必须为正整数 |
 | `--json` | `list` 输出 `{ "items": [...] }` |
 | `--memory-log <path>` | 运行时内存日志路径，默认 `<state>/memory.log`；空值报错 |
-| `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 以 `--expose-gc --heapsnapshot-signal=SIGUSR2` 启动，可在平台期用 `kill -USR2` 写出堆快照 |
+| `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 先建好 `.diagnostics/` 再以 `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics` 启动，可在平台期用 `kill -USR2 <pid>` 把堆快照写进该目录（快照目录必须先存在，否则信号会让进程崩溃） |
 | `--help` | 打印帮助 |
 
 约束与行为：
