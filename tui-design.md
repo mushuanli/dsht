@@ -2,7 +2,7 @@
 
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
-**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`fc378de`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
+**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`e9ea13b`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 54 个模块（8 个业务域 + 共享契约），约 5,125 行；`tests/` 19 个测试文件；137 项测试 |
+| 源码规模 | `src/` 54 个模块（8 个业务域 + 共享契约），约 5,245 行；`tests/` 20 个测试文件；140 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -174,14 +174,14 @@ C4Component
   title 业务域与依赖方向（自下而上，无反向依赖）
 
   Component(root, "共享契约", "src/state.ts", "State 与 ControllerStore")
-  Component(storage, "storage/", "3 文件 120 行", "全部文件系统操作：私有读写、原子替换、独占创建与流式写入")
-  Component(transport, "transport/", "5 文件 384 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
-  Component(session, "session/", "11 文件 1600 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
-  Component(cost, "cost/", "8 文件 602 行", "价格、记录折叠、存储、账本、扫描器与 CostController")
+  Component(storage, "storage/", "3 文件 132 行", "全部文件系统操作：私有读写、原子替换、独占创建与流式写入")
+  Component(transport, "transport/", "5 文件 359 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
+  Component(session, "session/", "11 文件 1707 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
+  Component(cost, "cost/", "8 文件 608 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "3 文件 551 行", "Controller 门面与 ConnectionController")
+  Component(controller, "controller/", "4 文件 659 行", "Controller 门面、ConnectionController 与内存日志")
   Component(ui, "ui/", "18 文件 1531 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
-  Component(cli, "cli/", "1 文件 91 行", "参数、目录准备与进程生命周期")
+  Component(cli, "cli/", "1 文件 111 行", "参数、目录准备与进程生命周期")
 
   Rel(root, transport, "被依赖")
   Rel(storage, transport, "被依赖")
@@ -218,7 +218,7 @@ C4Component
 
 1. **宿主事件层**：`session/follow` 的 `snapshot` / `event` / `chunks` / `assistant-stream` 帧，以及 `session/control` 的 `baseline` / `projection` / `queue` / `jobs` 帧。
 2. **语义消息层**（`Transcript`）：只保留可显示事件（`user/message`、`assistant/message`、`tool/result`）的裁剪副本；未完成的 assistant 流保存在独立的 `blocks` 中，永不写入持久历史。
-3. **投影视图层**（`historyLayout` / `LayoutIndex`）：把语义消息按当前终端宽度包装成行，缓存每段的行数与起始偏移，只物化可见视口；最多缓存 2,048 行且单条消息不超过 256 KiB。
+3. **投影视图层**（`historyLayout` / `LayoutIndex`）：把语义消息按当前终端宽度包装成行，缓存每段的行数与起始偏移，只物化可见视口；最多缓存 2,048 行且单条消息不超过 256 KiB。未完成的实时部分按稳定 `key` 增量换行：文本只会增长，因此最后一个非空行之前的行不再重排，每帧只重排该行残余与新到的增量。
 4. **渲染层**（Ink）：仅可见行成为 React 节点，远端文本先经 `safeText` 清洗再着色。
 
 `Controller` 是唯一的状态发布者：`State` 通过 `update(patch)` 整体替换并递增 `version`，React 18 的 `useSyncExternalStore(controller.subscribe, controller.snapshot)` 读取它。`State` 与 `ControllerStore` 契约位于 `src/state.ts`，由 `ConnectionController`、`SessionController`、`CatalogController` 与 `CostController` 共同写入；`pending`（待答问题/审批）由 `SessionController` 的 `interactions` 映射在每次 `update` 时按当前会话推导，因此**可见对话框与帧到达顺序无关**。选择器世代同样由 store 持有，会话与 catalog 域据此丢弃跨越切换的在途响应。
@@ -233,6 +233,7 @@ C4Component
 | 单一复用 WebSocket | 所有流共用 `/api/remote.mux`，以 `streamId` 多路复用 | 一个物理连接、一处生命周期、便于整体关闭 |
 | 宿主是持久层的唯一所有者 | 客户端只保存可重载的内存副本；工具结果正文只在宿主日志中 | 不产生第二份真相，切换会话可整段释放 |
 | 投影与渲染分离 | 语义块、折叠状态、行索引、着色互不写入 | 折叠变化不修改内容，搜索与 `/think` 始终可用完整文本 |
+| 实时尾部增量换行 | 每个布局按实时部分的稳定 `key` 保存已定稿行与最后一行残余来源，只重排残余与新增量 | 逐帧整段换行的时间随累计长度乘帧数增长，而历史行不可能因新增文本重排 |
 | 不自动重试写操作 | 所有 `session/*`、`workspace/*`、`commands/execute` 只尝试一次 | 丢失的响应无法判定宿主是否已执行，重试可能重复投递 |
 | 世代化重连 | 每次断线重建 `Telemetry`、清空 `runningUpdates` 与 `interactions`，以新基线替换 | 宿主基线是重连后的权威状态，旧世代数据不得回灌 |
 | 未知 waterfall 必须委托 | 未识别的 `waterfall` 事件一律用 `{kind:'next'}` 回应 | 否则会阻塞宿主的 Cordis 事件链 |
@@ -461,7 +462,7 @@ class Controller implements ControllerStore, ConnectionListener {
 #### 3.2.3 `Transcript`（`src/session/transcript.ts`）
 
 ```ts
-interface MessagePart { kind: 'text' | 'reasoning' | 'tool' | 'success' | 'error'; text: string; closed?: boolean }
+interface MessagePart { kind: 'text' | 'reasoning' | 'tool' | 'success' | 'error'; text: string; closed?: boolean; key?: string }
 interface Message { seq: number; role: string; text: string; parts: MessagePart[]; compact?: boolean; folded?: string }
 interface ThoughtEntry { seq: number; promptSeq?: number; prompt: string; preview: string }
 
@@ -765,7 +766,8 @@ C4Dynamic
   Rel(controller, app, "9. update({transcript}) 递增 State.version")
   Rel(app, layout, "10. historyLayout(displayTranscript, width, ...)")
   Rel(app, transcript, "11. messagesForWidth(width) 与 liveParts(width)")
-  Rel(controller, host, "12. 向上滚动至顶或 /older 时 session/page 回退一页")
+  Rel(layout, transcript, "12. 按 liveParts 的稳定 key 增量重排实时尾部，已定稿行不再重排")
+  Rel(controller, host, "13. 向上滚动至顶或 /older 时 session/page 回退一页")
 ```
 
 缺口即重连：`revision` 或 `index` 不连续时 `accept` 抛错，`item` 回调捕获后调用 `generationFailed`，整个连接世代重建并重新取 `snapshot`。
@@ -1057,7 +1059,7 @@ C4Component
 | 数据 | 持有者 | 读取方 | 写入方 | 回收方式 |
 | --- | --- | --- | --- | --- |
 | 会话事件窗口（语义消息、未完成助手流） | `Transcript` | `messagesForWidth`、`thoughts`、`searchHistory`、`liveParts` | `accept`、`addPage` | `trimHistory` 按软预算回收；`dispose` 整体释放 |
-| 行缓存与偏移索引 | `LayoutIndex`（`WeakMap<Transcript, …>`） | `historyLayout().viewport` | 同上 | `releaseHistoryLayout`；每会话上限 2,048 行 |
+| 行缓存、偏移索引与实时尾部换行状态 | `LayoutIndex`（`WeakMap<Transcript, …>`） | `historyLayout().viewport` | 同上 | `releaseHistoryLayout` 与 `dispose`；每会话上限 2,048 行 |
 | 投影值、每键水位 | `Telemetry.entries` | `view()` | `accept`、`snapshot` | 每个连接世代重建 `Telemetry` |
 | 排队输入与活动任务计数 | `Telemetry.queues` / `Telemetry.jobs` | `pending()`、`view().jobs` | `accept` 的 `queue`/`jobs` 帧 | 新基线整体替换 |
 | 运行状态与观察起点 | `ConnectionController` 的 `runningUpdates`、`observedRunningAt` | `SessionController.running`、`workingSince` | `api-session/status` emit | 世代开始时清空 |
@@ -1211,7 +1213,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 19 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 137 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放。
+- 20 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 140 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1259,6 +1261,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `a5c7944` `refactor: confine filesystem operations to a storage unit` | 新增 `src/storage/`、`cost/storage.ts` 更名为 `cost/ledger-files.ts`、依赖门禁新增 fs 限制 | typecheck + 134 项测试 + `test:terminal` |
 | `e123063` `feat: log runtime memory samples by default` | 有界内存日志、`--memory-log`／`--no-memory-log`／`DSHT_MEMORY_LOG`、存储新增追加写 | typecheck + 137 项测试 |
 | `fc378de` `fix: write the memory-log header when the file is created` | 新文件首次写入即带格式表头；新增测试固定该行为 | typecheck + 137 项测试 |
+| `5a60a7e` `docs: mark the memory-log commits as verified` | 在 7.8 中记录内存日志提交的验证结论 | 文档改动 |
+| `e9ea13b` `perf: wrap the growing live tail incrementally` | 实时部分带稳定 `key`，布局保存已定稿行与最后一行残余来源；折叠推理同样限制输入来源 | typecheck + 140 项测试 + `test:terminal` |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
@@ -1266,7 +1270,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 54 个模块、5,125 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 54 个模块、5,245 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1280,9 +1284,9 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `transport/auth.ts` | 54 | `CookieStore`、`login`、`AuthenticationRequired` |
 | `transport/endpoint.ts` | 23 | `Endpoint`、`endpoint` |
 | `transport/host.ts` | 14 | `HostAccess` |
-| `session/controller.ts` | 570 | `SessionController` |
-| `session/transcript.ts` | 578 | `Transcript`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
-| `session/history.ts` | 165 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
+| `session/controller.ts` | 573 | `SessionController` |
+| `session/transcript.ts` | 582 | `Transcript`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
+| `session/history.ts` | 272 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
 | `session/telemetry.ts` | 108 | `Telemetry`、`QueuedInput` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
 | `session/navigation.ts` | 33 | `navigationCommand`、`sessionLabel`、`resolveTarget` |
@@ -1294,16 +1298,16 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `cost/pricing.ts` | 129 | `DEFAULT_PRICES`、`pricesFrom`、`priceAt`、`lowestPrice`、`chargeFor`、`costDay` |
 | `cost/records.ts` | 62 | `costRecords`、`foldSamples` |
 | `cost/ledger-files.ts` | 78 | `loadLedgers`、`saveLedger` |
-| `cost/ledger.ts` | 114 | `CostLedger`、`costText` |
+| `cost/ledger.ts` | 126 | `CostLedger`、`costText` |
 | `cost/scanner.ts` | 74 | `costAddresses`、`sessionCostHistory` |
 | `cost/controller.ts` | 92 | `CostController`、`CostHost` |
 | `cost/types.ts` | 38 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
 | `cost/index.ts` | 9 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
-| `controller/controller.ts` | 343 | `Controller` |
+| `controller/controller.ts` | 367 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
-| `controller/memory-log.ts` | 75 | `MemoryLog` |
+| `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |
 | `ui/app.tsx` | 573 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
@@ -1323,19 +1327,19 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
 | `ui/theme/index.ts` | 27 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
-| `cli/index.tsx` | 92 | 可执行入口（无导出） |
+| `cli/index.tsx` | 111 | 可执行入口（无导出） |
 
 ```mermaid
 C4Component
   title 源码索引（按业务域）
 
   Component(root, "根契约", "index.ts, state.ts", "公开库门面与共享状态")
-  Component(storage, "storage/", "files, directories, index", "3 文件 120 行")
-  Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "5 文件 384 行")
-  Component(session, "session/", "controller, transcript, history, telemetry, memory, navigation, references, export, types, connection-view, index", "11 文件 1600 行")
-  Component(cost, "cost/", "controller, ledger, pricing, records, scanner, storage, types, index", "8 文件 602 行")
+  Component(storage, "storage/", "files, directories, index", "3 文件 132 行")
+  Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "5 文件 359 行")
+  Component(session, "session/", "controller, transcript, history, telemetry, memory, navigation, references, export, types, connection-view, index", "11 文件 1707 行")
+  Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "8 文件 608 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, connection, index", "3 文件 551 行")
+  Component(controller, "controller/", "controller, connection, memory-log, index", "3 文件 551 行")
   Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 1531 行")
   Component(cli, "cli/", "index.tsx", "1 文件 91 行")
 
