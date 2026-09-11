@@ -25,6 +25,43 @@ function assertInsideComposer(frame: string, label: string) {
   assert.equal(lines.filter(line => line.includes('╭')).length, 1, frame);
 }
 
+test('startup status refreshes after connection and reconnect while copy mode retains its frame', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  assert.match(ui.lastFrame()!, /Connecting…/);
+  assert.match(ui.lastFrame()!, /Offline/);
+  await pressKey(ui, '\u0013');
+  const frozen = ui.lastFrame();
+  controller.start();
+  await until(() => controller.state.online && controller.state.workspaces.length > 0);
+  assert.equal(ui.lastFrame(), frozen);
+  await pressKey(ui, '\u001b');
+  await until(() => ui.lastFrame()?.includes('Choose workspace') === true);
+  const connected = async () => {
+    await until(() => controller.state.online && !ui.lastFrame()?.includes('Offline') && !ui.lastFrame()?.includes('Connecting…'));
+    assert.match(ui.lastFrame()!, /● Ready/);
+  };
+  await connected();
+  for (const screen of ['workspaces', 'sessions', 'path']) {
+    if (screen === 'path') {
+      controller.enterPath();
+      await until(() => ui.lastFrame()?.includes('Absolute directory path on host') === true);
+    } else if (screen === 'sessions') {
+      await controller.switchWorkspace('w1');
+      await until(() => ui.lastFrame()?.includes('Choose session') === true);
+    }
+    assert.equal(controller.state.screen, screen);
+    const workspaces = controller.state.workspaces;
+    fixture.disconnect();
+    await until(() => !controller.state.online && ui.lastFrame()?.includes('Offline') === true);
+    await connected();
+    await until(() => controller.state.workspaces !== workspaces);
+    await until(() => controller.state.screen === (screen === 'path' ? 'workspaces' : screen));
+  }
+});
+
 test('startup requires workspace and session selection before showing the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token');
@@ -34,6 +71,7 @@ test('startup requires workspace and session selection before showing the compos
   controller.start();
   await until(() => ui.lastFrame()?.includes('Project α') === true);
   assert.match(ui.lastFrame()!, /Choose workspace/);
+  assert.doesNotMatch(ui.lastFrame()!, /Connecting…|Offline/);
   assertInsideComposer(ui.lastFrame()!, 'Choose workspace');
   await press('\r');
   await until(() => ui.lastFrame()?.includes('Choose session') === true);

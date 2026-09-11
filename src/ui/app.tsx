@@ -116,6 +116,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const referenceOpen = token !== undefined;
   const dialogOpen = !!(queueOpen || removal || models || thoughtList || historyQuery !== undefined || searchResults || costExpanded || statusExpanded || help || pending || referenceOpen || state.screen !== 'chat');
   const displayPaused = copyMode || dialogOpen;
+  // Startup screens need live connection feedback even while their picker remains open.
+  const statusPaused = copyMode || (state.screen === 'chat' && dialogOpen);
   const matches = referenceOpen && lookup?.draft === input && lookup.sessionId === state.sessionId ? lookup : undefined;
   useEffect(() => {
     if (!referenceOpen) return;
@@ -483,12 +485,14 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     ? [controller.sessionName, width >= 60 ? workspaceName : undefined].filter(Boolean).join(' · ')
     : workspaceName || 'All workspaces';
   const commandSuggestions = input.startsWith('/') && !input.includes(' ') ? suggestedCommands(input) : undefined;
+  // Reading older history pauses the clock without freezing the connection state on picker screens.
+  const statusFrozen = statusPaused || (state.screen === 'chat' && position > 0);
   return <ThemeContext.Provider value={theme}><CopyMode.Provider value={copyMode}><Frozen frozen={copyMode} identity={`${width}:${stdout.rows}`}><Box flexDirection="column" paddingX={1} height={Math.max(1, (stdout.rows ?? 30) - 1)} overflowY="hidden">
     {copyMode && <Text color={theme.accent}>Copy mode · drag to select · Esc / Ctrl+S resumes</Text>}
     <ChatHeader title={headerTitle} mode={controller.sessionMode} width={width} frozen={displayPaused} identity={`${width}:${state.sessionId}`} />
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden">
     {historyLoading && <Text dimColor>{historyLoading} · Esc / Ctrl+C cancel</Text>}
-    <Frozen frozen={displayPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
+    <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
     {state.error && <Text color={theme.colors.error}>{state.error}</Text>}
       {state.screen === 'chat' && <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
         historyWindow={!!historyWindow} frozen={displayPaused}
@@ -563,7 +567,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
       {costExpanded && <CostPanel controller={controller} />}
-      <Frozen frozen={displayPaused || position > 0} identity={`${width}:${state.sessionId}:${statusExpanded}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} revision={state.version} paused={displayPaused || position > 0} /></Frozen>
+      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} revision={state.version} paused={statusFrozen} /></Frozen>
     </Box>
   </Box></Frozen></CopyMode.Provider></ThemeContext.Provider>;
 }
