@@ -68,12 +68,14 @@ export interface StatusGroups {
   phase?: StatusSegment;
   /** How to stop the running turn. */
   stop?: StatusSegment;
-  /** This session's cost, scope-labelled so it cannot read as a share of the day total. */
+  /** This session's cost, the only cost a narrow bar can show beside its other groups. */
   session?: StatusSegment;
+  /** Today's cost with the all-time total in parentheses; replaces the session cost where it fits. */
+  balance?: StatusSegment;
   /** Context share, labelled because a bare percentage next to money reads as a budget. */
   context?: StatusSegment;
-  /** Today's cost across sessions; shown only where the width allows it. */
-  day?: StatusSegment;
+  /** The same share drawn as a bar; used only where it still fits beside every other kept group. */
+  contextBar?: StatusSegment;
   /** Model name without its reasoning effort, which is dropped first. */
   model?: StatusSegment;
   /** Reasoning effort, kept only while the model name still fits beside it. */
@@ -119,20 +121,59 @@ export function compactStatusRows(groups: StatusGroups, width: number): StatusSe
   const clean = (group: StatusSegment | undefined): StatusSegment | undefined =>
     group === undefined ? undefined : { ...group, text: safeText(group.text).replace(/[\r\n\t]+/g, ' ') };
   groups = { state: clean(groups.state)!, phase: clean(groups.phase), stop: clean(groups.stop), session: clean(groups.session),
-    context: clean(groups.context), day: clean(groups.day), model: clean(groups.model), effort: clean(groups.effort),
-    turns: clean(groups.turns), tokens: clean(groups.tokens) };
+    balance: clean(groups.balance), context: clean(groups.context), contextBar: clean(groups.contextBar),
+    model: clean(groups.model), effort: clean(groups.effort), turns: clean(groups.turns), tokens: clean(groups.tokens) };
   const cluster = [groups.state, groups.phase, groups.stop].filter(Boolean) as StatusSegment[];
-  const rest = [groups.session, groups.context, groups.day, groups.model, groups.effort, groups.turns, groups.tokens].filter(Boolean) as StatusSegment[];
+  // The bar carries one cost slot: the session slice where the ledger has one, otherwise today's cost
+  // with the all-time total, because that is then the only cost there is to show.
+  const money = groups.session ?? groups.balance;
+  // Display order reads the model beside its effort and the money after the share it sits next to;
+  // keep order is by value, so a narrow bar holds the cost and the share before a model it cannot show.
+  const order = [groups.model, groups.effort, groups.context, money, groups.turns, groups.tokens].filter(Boolean) as StatusSegment[];
+  const rank = [money, groups.context, groups.model, groups.effort, groups.turns, groups.tokens].filter(Boolean) as StatusSegment[];
   // One row while enough of the sequence fits; each step drops the least valuable group first.
   // The cost is never dropped, only moved to the second row, so the search stops above it.
-  const floor = groups.session === undefined ? 0 : 1;
-  for (let keep = rest.length; keep >= floor; keep--) {
-    const row = pack(cluster, rest.slice(0, keep));
-    if (measure(row) <= width) return [row];
+  const floor = money === undefined ? 0 : 1;
+  for (let keep = rank.length; keep >= floor; keep--) {
+    const kept = new Set(rank.slice(0, keep));
+    const row = pack(cluster, order.filter(group => kept.has(group)));
+    // A bar that has dropped every other group is the compact layout, where the cost keeps the
+    // session scope: the day total with the all-time total is the wider reading of the same money.
+    if (measure(row) <= width) return [keep > floor ? widen(row, groups, width) : row];
   }
-  if (groups.session === undefined && measure(pack(cluster, [])) > width) return [fitCluster(cluster, width)];
+  if (money === undefined && measure(pack(cluster, [])) > width) return [fitCluster(cluster, width)];
   // Not even the state cluster and the cost share a row, so the cost opens the second one.
-  return [fitCluster(cluster, width), packGreedy(rest, width)];
+  return [fitCluster(cluster, width), widen(packGreedy(rank, width), groups, width)];
+}
+
+/** Offer the clearer reading of two groups already on the row: the two-scope cost, then the bar.
+ *
+ * Both are renderings of a value the row already carries, not additional groups, so neither
+ * displaces a group that fits: below the width that holds the reading, the plain form keeps its place.
+ * @param row - A packed row that already fits.
+ * @param groups - Cleaned groups, used to find each pair by identity.
+ * @param width - Available terminal columns.
+ * @returns The row with the readings that fit.
+ */
+function widen(row: StatusSegment[], groups: StatusGroups, width: number): StatusSegment[] {
+  // The cost's scope answers more than the shape of the share, so it is offered first.
+  const cost = swap(row, groups.session, groups.balance, width);
+  return swap(cost, groups.context, groups.contextBar, width);
+}
+
+/** Replace one group with its fuller rendering where the whole row still fits.
+ * @param row - A packed row that already fits.
+ * @param from - Group to replace, matched by identity.
+ * @param to - Fuller rendering of that group.
+ * @param width - Available terminal columns.
+ * @returns The row with the replacement, or the row unchanged where it does not fit.
+ */
+function swap(row: StatusSegment[], from: StatusSegment | undefined, to: StatusSegment | undefined, width: number): StatusSegment[] {
+  if (from === undefined || to === undefined) return row;
+  const index = row.indexOf(from);
+  if (index < 0) return row;
+  const replaced = [...row.slice(0, index), to, ...row.slice(index + 1)];
+  return measure(replaced) <= width ? replaced : row;
 }
 
 /** Fit the state cluster, dropping the phase and then the stop hint before truncating the state.
@@ -250,15 +291,26 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     // priced, when it is only estimated, or when the scan has not covered every session yet.
     const inexact = coverage !== 'complete';
     const money = (value: CostTotal): string => `¥${value.amount.toFixed(2)}${value.unknown || value.estimated || inexact ? '*' : ''}`;
+    // One marker covers both scopes, because either an unpriceable record or an estimate in the day
+    // or in the all-time total makes the pair inexact as a reading.
+    const balance = (today: CostTotal, all: CostTotal): string =>
+      `¥: ${today.amount.toFixed(2)} (${all.amount.toFixed(2)})${today.unknown || today.estimated || all.unknown || all.estimated || inexact ? '*' : ''}`;
+    const todayTotal = costs === undefined ? undefined : costs.total(undefined, 1, Date.now());
+    const allTotal = costs === undefined ? undefined : costs.total();
     const sessionTotal = costs !== undefined && costs.hasSession(state.sessionId) ? costs.total(state.sessionId) : undefined;
+    const contextColor = percent === undefined ? theme.status.usage
+      : percent >= 95 ? theme.status.critical : percent >= 80 ? theme.status.warning : theme.status.context;
+    // Ten cells resolve context to tenths, the same resolution the percentage beside them reports.
+    const cells = percent === undefined ? 0 : Math.round(percent / 10);
     const groups: StatusGroups = {
       state: stateToken,
       ...(phaseLabel === undefined || pauseReason !== undefined ? {} : { phase: { text: phaseLabel } }),
       ...(running && pauseReason === undefined ? { stop: { text: '^C' } } : {}),
       ...(sessionTotal === undefined ? {} : { session: { text: `S${money(sessionTotal)}`, color: theme.status.cost } }),
-      ...(percent === undefined ? {} : { context: { text: `ctx ${percent}%`,
-        color: percent >= 95 ? theme.status.critical : percent >= 80 ? theme.status.warning : theme.status.context } }),
-      ...(costs === undefined ? {} : { day: { text: `D${money(costs.total(undefined, 1, Date.now()))}`, color: theme.status.cost } }),
+      ...(todayTotal === undefined || allTotal === undefined ? {} : { balance: { text: balance(todayTotal, allTotal), color: theme.status.cost } }),
+      ...(percent === undefined ? {} : {
+        context: { text: `ctx ${percent}%`, color: contextColor },
+        contextBar: { text: `ctx: ${'█'.repeat(cells)}${'░'.repeat(10 - cells)} ~${percent}%`, color: contextColor } }),
       ...(model === undefined ? {} : { model: { text: model, color: theme.status.model } }),
       ...(model === undefined || effort === undefined ? {} : { effort: { text: effort, color: theme.status.model } }),
       ...(numeric(record(view.values.sessionStats).turns) === undefined ? {} : { turns: { text: `${count(numeric(record(view.values.sessionStats).turns))} turns`, color: theme.status.usage } }),

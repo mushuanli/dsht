@@ -233,7 +233,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   controller.start();
   await until(() => controller.state.transcript.ready && ui.lastFrame()?.includes('1K tok') === true);
   const compact = ui.lastFrame()!.split('\n').find(line => line.includes('1K tok'))!;
-  assert.match(compact, /● Ready │ ctx 25% · chat · 42 turns · 1K tok/);
+  assert.match(compact, /● Ready │ chat · ctx: ███░░░░░░░ ~25% · 42 turns · 1K tok/);
   assert.equal(ui.lastFrame()?.includes('Workspace:'), false);
   assert.match(ui.lastFrame()!, /First conversation/);
   await pressKey(ui, '/status');
@@ -542,7 +542,7 @@ test('/cost displays cached session, daily and three-day estimates without submi
   const expected = await readFile(new URL('../expected/cost.txt', import.meta.url), 'utf8');
   for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()?.includes(line), ui.lastFrame());
   // The open panel pauses the clock, and the bar names that reason instead of freezing silently.
-  assert.match(ui.lastFrame()!, /⏸ dialog │ S¥0\.00\* · D¥0\.00\*/);
+  assert.match(ui.lastFrame()!, /⏸ dialog │ chat · ¥: 0\.00 \(0\.00\)\*/);
   assert.equal(fixture.calls.some(c => c.method === 'session/prompt'), false);
 });
 
@@ -692,9 +692,9 @@ test('cost coverage marks the subtotals it cannot confirm instead of rewriting t
     ui.unmount(); ui.cleanup();
     return frame;
   };
-  // With nothing cached the day subtotal exists and is marked incomplete; no session slice does.
+  // With nothing cached the day subtotal stands in for the session slice and is marked incomplete.
   assert.match(bar(), /● Ready/);
-  assert.match(bar(), /D¥0\.00\*/);
+  assert.match(bar(), /¥: 0\.00 \(0\.00\)\*/);
   assert.doesNotMatch(bar(), /S¥/);
   await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T10:00:00+08:00'),
     type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
@@ -751,11 +751,11 @@ test('title and status fit terminal widths and keep model alignment when working
   await refresh();
   assert.match(ui.lastFrame()!.split('\n')[0]!, /^\s*中文会话标题/);
   const working = ui.lastFrame()!.split('\n').find(line => line.includes('◐ '))!;
-  assert.match(working, /◐ 0:0\d · \^C │ ctx 25% · v4\.1-flash · high · 42 turns · 166\.2M tok/);
+  assert.match(working, /◐ 0:0\d · \^C │ v4\.1-flash · high · ctx: ███░░░░░░░ ~25% · 42 turns · 166\.2M tok/);
   controller.state = { ...controller.state, version: 1, sessions: [{ sessionId: 's1', running: false }] };
   await refresh();
   const ready = ui.lastFrame()!.split('\n').find(line => line.includes('● Ready'))!;
-  assert.match(ready, /● Ready │ ctx 25% · v4\.1-flash · high · 42 turns · 166\.2M tok/);
+  assert.match(ready, /● Ready │ v4\.1-flash · high · ctx: ███░░░░░░░ ~25% · 42 turns · 166\.2M tok/);
   assert.doesNotMatch(ready, /\^C/);
   for (columns of [80, 40, 24, 12]) {
     await refresh();

@@ -63,7 +63,7 @@ function groups(overrides: Partial<StatusGroups> = {}): StatusGroups {
   const segment = (text: string) => ({ text });
   return {
     state: segment('◐ 0:08'), phase: segment('bash 12s'), stop: segment('^C'), session: segment('S¥1.23*'),
-    context: segment('ctx 25%'), day: segment('D¥5.00*'), model: segment('v4.1-flash'), effort: segment('high'),
+    balance: segment('¥: 5.00 (12.34)'), context: segment('ctx 25%'), contextBar: segment('ctx: ███░░░░░░░ ~25%'), model: segment('v4.1-flash'), effort: segment('high'),
     turns: segment('42 turns'), tokens: segment('166.2M tok'), ...overrides,
   };
 }
@@ -77,10 +77,21 @@ test('the status bar drops its least valuable group first and never drops the co
   const ready = groups({ state: { text: '● Ready' }, phase: undefined, stop: undefined });
   assert.equal([text(compactStatusRows(full, 140)), text(compactStatusRows(ready, 140))].join('\n') + '\n',
     readFileSync(new URL('../expected/status-compact.txt', import.meta.url), 'utf8'));
-  // Dropping order: tokens, turns, effort, model, day, context — the cost stays to the last.
-  assert.equal(text(compactStatusRows(full, 80)), '◐ 0:08 · bash 12s · ^C │ S¥1.23* · ctx 25% · D¥5.00* · v4.1-flash · high');
-  assert.equal(text(compactStatusRows(full, 60)), '◐ 0:08 · bash 12s · ^C │ S¥1.23* · ctx 25% · D¥5.00*');
-  assert.equal(text(compactStatusRows(full, 46)), '◐ 0:08 · bash 12s · ^C │ S¥1.23* · ctx 25%');
+  // A bar and a two-scope cost are clearer readings of groups the row already carries, so neither
+  // appears where it would displace one: the bar gives way below its own width, and the day total
+  // gives way below its own, while neither ever takes a group from the row it joins.
+  assert.match(text(compactStatusRows(full, 109)), /ctx: ███░░░░░░░ ~25%/);
+  assert.match(text(compactStatusRows(full, 100)), /ctx 25% · ¥: 5\.00 \(12\.34\)/);
+  assert.equal(text(compactStatusRows(full, 100)).includes('166.2M tok'), true);
+  assert.match(text(compactStatusRows(full, 94)), /¥: 5\.00 \(12\.34\)/);
+  // Below the day total's own width the session scope stands, and the compact layout keeps it.
+  assert.match(text(compactStatusRows(full, 93)), /S¥1\.23\*/);
+  assert.equal(text(compactStatusRows(full, 93)).includes('¥: '), false);
+  assert.equal(text(compactStatusRows(full, 40)).includes('¥: '), false);
+  // Dropping order: tokens, turns, effort, model, context — the cost stays to the last.
+  assert.equal(text(compactStatusRows(full, 80)), '◐ 0:08 · bash 12s · ^C │ v4.1-flash · high · ctx 25% · S¥1.23* · 42 turns');
+  assert.equal(text(compactStatusRows(full, 60)), '◐ 0:08 · bash 12s · ^C │ v4.1-flash · ctx 25% · S¥1.23*');
+  assert.equal(text(compactStatusRows(full, 46)), '◐ 0:08 · bash 12s · ^C │ ctx 25% · S¥1.23*');
   assert.equal(text(compactStatusRows(full, 40)), '◐ 0:08 · bash 12s · ^C │ S¥1.23*');
   // Below the widest one-row form the cost opens a second row instead of being dropped.
   assert.equal(text(compactStatusRows(full, 24)), '◐ 0:08 · bash 12s · ^C\nS¥1.23* · ctx 25%');
