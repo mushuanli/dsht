@@ -73,6 +73,18 @@ export async function writeExclusiveStream(path: string, source: () => Promise<A
   }
 }
 
+/** Append to an owner-only file, creating it when absent.
+ *
+ * Appending keeps a long-lived diagnostic file cheap to extend; callers that need a bounded file
+ * rewrite it periodically with `writePrivateFile`.
+ * @param path - Destination path.
+ * @param contents - Text to append.
+ */
+export async function appendPrivateFile(path: string, contents: string): Promise<void> {
+  const handle = await open(path, 'a', 0o600);
+  try { await handle.writeFile(contents); } finally { await handle.close(); }
+}
+
 /** Remove a file, treating an already absent file as success.
  * @param path - File to remove.
  */

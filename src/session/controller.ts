@@ -76,6 +76,9 @@ export class SessionController {
   /** Whether a turn, cancellation or prompt admission is still in flight. */
   get active(): boolean { return this.interruptTask !== undefined || this.running || this.admission !== undefined; }
 
+  /** Whether reading protects the loaded window, suspending history reclamation. */
+  get pinned(): boolean { return this.historyPinned; }
+
   /** Drop generation-scoped state before a new connection generation begins. */
   beginGeneration(): void { this.stoppingSession = undefined; }
 

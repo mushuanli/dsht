@@ -65,6 +65,18 @@ export class CostLedger {
     this.totals.clear();
   }
 
+  /** Count the retained ledger so a memory sample can separate it from the transcript window.
+   * @returns Sessions and charges currently held, and how many charges carry no amount.
+   */
+  summary(): { sessions: number; charges: number; unpriced: number } {
+    let charges = 0, unpriced = 0;
+    for (const session of this.sessions.values()) {
+      charges += session.charges.length;
+      unpriced += session.charges.filter(charge => charge.amount === undefined).length;
+    }
+    return { sessions: this.sessions.size, charges, unpriced };
+  }
+
   /** Whether this session has a complete cached scan.
    * @param sessionId - Selected session identity.
    * @returns True when a complete scan is available.

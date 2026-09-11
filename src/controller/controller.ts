@@ -9,6 +9,7 @@ import type { Transcript } from '../session/transcript.ts';
 import type { CostLedger } from '../cost/ledger.ts';
 import { CostController } from '../cost/controller.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
+import { MemoryLog } from './memory-log.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import type { HistorySearch, RemovalTarget } from '../session/types.ts';
 
@@ -27,12 +28,14 @@ export class Controller implements ControllerStore, ConnectionListener {
   readonly catalog: CatalogController;
   /** Background billing scan; present only when a ledger was supplied. */
   readonly cost: CostController | undefined;
+  /** Bounded runtime memory samples; present only when a log path was supplied. */
+  readonly memoryLog: MemoryLog | undefined;
   private readonly observers = new Set<() => void>();
   private selector = 0;
 
   constructor(readonly base: string, token: string | undefined, private readonly initialSession?: string,
     makeClient: () => Client = () => new Client(base),
-    authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS) {
+    authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS, readonly memoryLogPath?: string) {
     const options: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
     this.connection = new ConnectionController(this, options, this);
     this.session = new SessionController(this, this.connection, this.connection, historyLimits);
@@ -43,6 +46,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       signal: () => this.connection.signal(),
       publish: () => this.update({}),
     });
+    if (memoryLogPath !== undefined) this.memoryLog = new MemoryLog(memoryLogPath, () => this.memorySample());
   }
 
   /** React-compatible state subscription. */
@@ -75,7 +79,7 @@ export class Controller implements ControllerStore, ConnectionListener {
   }
 
   /** Start one retry loop, with a fresh snapshot generation after every disconnect. */
-  start(): void { this.connection.start(); }
+  start(): void { this.connection.start(); this.memoryLog?.start(); }
 
   /** Cancel retries and HTTP, close the socket, and release session and catalog work. */
   async stop(): Promise<void> {
@@ -83,6 +87,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     await this.session.settle();
     await this.catalog.settle();
     await this.cost?.stop();
+    await this.memoryLog?.stop();
     this.session.release();
   }
 
@@ -104,6 +109,25 @@ export class Controller implements ControllerStore, ConnectionListener {
     try { await operation(); return true; }
     catch (error) { this.update({ error: errorText(error) }); return false; }
     finally { this.update({ busy: false }); }
+  }
+
+  /** Read the counters one memory sample records; content never leaves as text. */
+  private memorySample(): ObjectValue {
+    const memory = process.memoryUsage();
+    const transcript = this.state.transcript;
+    const ledger = this.costs?.summary();
+    return {
+      time: new Date().toISOString(),
+      rss: memory.rss, heapTotal: memory.heapTotal, heapUsed: memory.heapUsed,
+      external: memory.external, arrayBuffers: memory.arrayBuffers,
+      online: this.state.online, screen: this.state.screen,
+      session: this.state.sessionId ?? null,
+      pinned: this.session.pinned,
+      records: transcript.retainedRecordCount, retainedBytes: transcript.retainedBytes,
+      beforeSeq: transcript.beforeSeq ?? null, hasMore: transcript.hasMore,
+      live: transcript.hasLiveContent, pending: this.state.pending.length,
+      ...(ledger === undefined ? {} : { ledgerSessions: ledger.sessions, ledgerCharges: ledger.charges, ledgerUnpriced: ledger.unpriced }),
+    };
   }
 
   /** A new generation starts; drop generation-scoped domain state. */

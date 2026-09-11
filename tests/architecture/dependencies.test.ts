@@ -14,7 +14,7 @@ const UNITS: Record<string, readonly string[]> = {
   session: ['transport', 'session', 'state.ts', 'storage'],
   cost: ['transport', 'cost', 'storage'],
   catalog: ['transport', 'catalog', 'state.ts'],
-  controller: ['transport', 'session', 'cost', 'catalog', 'controller', 'state.ts'],
+  controller: ['transport', 'session', 'cost', 'catalog', 'controller', 'state.ts', 'storage'],
   ui: ['transport', 'session', 'cost', 'catalog', 'controller', 'ui', 'state.ts'],
   cli: ['transport', 'session', 'cost', 'catalog', 'controller', 'ui', 'cli', 'state.ts', 'storage'],
   'state.ts': ['transport', 'session'],

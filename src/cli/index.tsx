@@ -25,6 +25,8 @@ With no command, choose a workspace and session interactively.
   --auth-dir <path>     Private cookie directory (or DSHT_AUTH_DIR)
   --history-records <n> Soft history record limit (default 2000)
   --history-mb <n>      Soft history payload budget in MiB (default 16)
+  --memory-log <path>   Append runtime memory samples; a failing log stops itself
+  --no-memory-log       Disable the runtime memory log (default: enabled)
   --json               Print machine-readable list output
   --help               Show this help
 
@@ -33,6 +35,7 @@ First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 /cost shows session, today and three-day CNY estimates.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
+The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
 Examples:
   npx @itookit/dsht
   dsht list workspaces --json
@@ -44,6 +47,7 @@ async function main(): Promise<void> {
     url: { type: 'string', default: process.env.DSH_URL ?? 'http://127.0.0.1:3080' },
     'history-records': { type: 'string' }, 'history-mb': { type: 'string' },
     workspace: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
+    'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
   const list = positionals[0] === 'list' && ['workspaces', 'sessions'].includes(positionals[1] ?? '') && positionals.length === 2;
@@ -77,16 +81,31 @@ async function main(): Promise<void> {
   const raw = await readText(pricePath);
   if (raw === undefined) throw new Error(`Price configuration disappeared: ${pricePath}`);
   const prices = pricesFrom(JSON.parse(raw));
-  const costDirectory = join(process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht'), 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
+  const stateRoot = process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht');
+  const costDirectory = join(stateRoot, 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory);
   await costs.load();
-  const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits);
+  const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits, memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']));
   const app = mount(controller);
   const terminate = () => app.unmount();
   process.once('SIGTERM', terminate);
   controller.start();
   try { await app.waitUntilExit(); }
   finally { process.off('SIGTERM', terminate); await controller.shutdown(); }
+}
+
+/** Resolve the runtime memory log path: an explicit flag wins, then the environment, then the default.
+ * @param stateRoot - Application state root used for the default path.
+ * @param requested - `--memory-log` value, when given.
+ * @param disabled - `--no-memory-log` flag.
+ * @returns Absolute log path, or undefined when the log is disabled.
+ */
+function memoryLogPath(stateRoot: string, requested: string | undefined, disabled: boolean | undefined): string | undefined {
+  if (requested !== undefined && requested.trim() === '') throw new Error('--memory-log requires a path');
+  if (disabled) return undefined;
+  const chosen = (requested ?? process.env.DSHT_MEMORY_LOG)?.trim();
+  if (chosen === undefined || chosen === '') return join(stateRoot, 'memory.log');
+  return chosen === 'off' ? undefined : chosen;
 }
 
 main().catch(error => { process.stderr.write(`${errorText(error)}\n`); process.exitCode = 1; });

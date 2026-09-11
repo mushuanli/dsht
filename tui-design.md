@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 53 个模块（8 个业务域 + 共享契约），约 4,980 行；`tests/` 18 个测试文件；134 项测试 |
+| 源码规模 | `src/` 54 个模块（8 个业务域 + 共享契约），约 5,125 行；`tests/` 19 个测试文件；137 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -204,7 +204,7 @@ C4Component
 | `session/` | `transport`、`session`、`state.ts`、`storage` | 纯 TypeScript，不含 React |
 | `cost/` | `transport`、`cost`、`storage` | 不依赖 session 投影，也不依赖 ui；React 与 Ink 不进入该域 |
 | `catalog/` | `transport`、`catalog`、`state.ts` | 独立的模型元数据域 |
-| `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`state.ts` | 应用门面与连接世代 |
+| `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`state.ts`、`storage` | 应用门面、连接世代与内存日志 |
 | `ui/` | `transport`（不含 `client.ts`）、`session`、`cost`、`catalog`、`controller`、`ui`、`state.ts` | 唯一允许 React 与 Ink 的域；不得直接调用传输层 client |
 | `cli/` | 全部 | 组装入口，只通过 `ui/mount.tsx` 渲染 |
 | `state.ts` | `transport`、`session` | 共享状态契约 |
@@ -649,6 +649,8 @@ dsht [options] [list workspaces|list sessions]
 | `--history-records <n>` | 历史软上限条数，默认 2000，必须为正整数 |
 | `--history-mb <n>` | 历史软上限 MiB，默认 16，必须为正整数 |
 | `--json` | `list` 输出 `{ "items": [...] }` |
+| `--memory-log <path>` | 运行时内存日志路径，默认 `<state>/memory.log`；空值报错 |
+| `--no-memory-log` | 关闭运行时内存日志（默认开启） |
 | `--help` | 打印帮助 |
 
 约束与行为：
@@ -660,7 +662,7 @@ dsht [options] [list workspaces|list sessions]
 - 交互模式注册 `SIGTERM` → `app.unmount()`，并在 `finally` 中调用 `controller.shutdown()`。
 - 失败时向 `stderr` 写 `errorText(error)` 并设 `process.exitCode = 1`。
 
-环境变量：`DSH_URL`、`DSH_TOKEN`、`DSHT_AUTH_DIR`、`DSHT_CONFIG_DIR`、`DSHT_STATE_DIR`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`HOME`。
+环境变量：`DSH_URL`、`DSH_TOKEN`、`DSHT_AUTH_DIR`、`DSHT_CONFIG_DIR`、`DSHT_STATE_DIR`、`DSHT_MEMORY_LOG`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`HOME`。
 
 ### 3.4 Slash 命令接口
 
@@ -704,6 +706,7 @@ dsht [options] [list workspaces|list sessions]
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 |
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sessionHash>-<cut>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，原子重命名 |
+| 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG`、`DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，追加 + 每 1,000 行原子重写 |
 
 Cookie 文件为 `{ version: 1, origin, cookie, expiresAt }`；POSIX 下读写都会校验属主与权限（目录不得有 group/other 位、文件为 0600），并拒绝符号链接。成本文件同样在加载时校验版本、字段类型与价格合法性，并保留每个会话最大的 `cut`。
 
@@ -1000,6 +1003,7 @@ C4Component
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 | 认证成功且服务端下发持久 Cookie 时 |
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 | 仅首次交互启动创建；之后由用户维护 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sha256(sessionId)>-<cut>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600 | 每次成功扫描一个会话 |
+| 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本，满 1,000 行重写 |
 | 导出归档 | 用户指定，或 `<cwd>/session-<sanitized-id>-<Date.now()>.zip` | — | 0600，`wx` 独占 | `/export` 成功时 |
 
 #### 5.2.1 认证 Cookie
@@ -1108,7 +1112,7 @@ C4Component
 
 - **回收顺序**：切会话、归档当前会话或断线时依次 `releaseHistoryLayout` → `Transcript.dispose()` → 清理行缓存与投影；`pinHistory(true)` 在阅读、搜索或展开历史期间暂停回收，`/latest` 或回到实时尾部后恢复。
 - **软预算**：会话窗口默认 2,000 条或 16 MiB（`--history-records`、`--history-mb` 可调），回收目标为预算的 75%，至少保留最近 `min(32, max(1, maxRecords / 4))` 条，并保护未完成的历史流与离线历史。
-- **落盘内容限制**：Cookie、价格与 charges 文件之外不写任何内容。charges 只包含会话 ID、时间、provider/model、token 桶、所选价格版本与金额；提示词、工具正文、回答文本、凭据与 Cookie 值都不进入成本文件。取消或失败的导出会删除不完整 ZIP。
+- **落盘内容限制**：Cookie、价格、charges 与内存日志之外不写任何内容；内存日志只有计数与大小，不含提示词、工具或会话正文。charges 只包含会话 ID、时间、provider/model、token 桶、所选价格版本与金额；提示词、工具正文、回答文本、凭据与 Cookie 值都不进入成本文件。取消或失败的导出会删除不完整 ZIP。
 - **一致性**：认证 Cookie 与成本 cut 文件都以“临时文件 + `rename`”原子替换；`prices.json` 只在首次启动以 `wx` 创建，之后由用户维护。成本 cut 文件名携带 opening cursor，使并发或陈旧的扫描无法顶替更新的结果。
 - **重建代价**：内存数据可随时由宿主重建，但重建需要重新订阅 `session/follow`（新鲜快照）与重新扫描成本历史；重启后第一次成本扫描会重新读取每个会话，并只为其中新出现的请求决定金额，已固化的历史 charge 原样载入。
 
@@ -1151,7 +1155,7 @@ C4Component
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（15 篇）与 `feature/`（1 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（16 篇）与 `feature/`（1 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 | Agent Note | 主题 |
 | --- | --- |
@@ -1171,6 +1175,7 @@ C4Component
 | `architecture/2026-09-11-modular-boundaries-immutable-ledger` | 按业务域重组目录、拆分 Controller/App、账本改为不可重算 |
 | `architecture/2026-09-11-terminal-approval-options` | 审批编号选择器、未选中起始、Esc 与重放重置 |
 | `architecture/2026-09-11-terminal-storage-unit` | 文件操作统一归属 `src/storage/`，由依赖门禁强制 |
+| `architecture/2026-09-11-terminal-memory-log` | 默认启用的有界运行时内存日志，区分真实保留与 V8 高水位 |
 
 ### 7.3 文档配对
 
@@ -1206,7 +1211,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 18 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`ui/`、`cli/`、`architecture/`），共 134 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放。
+- 19 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 137 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1259,12 +1264,12 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 53 个模块、4,980 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 54 个模块、5,125 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `index.ts`（公开门面） | 3 | `Client`、`HttpError`、`RemoteError`、`Subscription` |
-| `storage/files.ts` | 90 | `readText`、`readPrivateFile`、`writePrivateFile`、`createPrivateFile`、`writeExclusiveStream`、`removeFile` |
+| `storage/files.ts` | 102 | `readText`、`readPrivateFile`、`writePrivateFile`、`appendPrivateFile`、`createPrivateFile`、`writeExclusiveStream`、`removeFile` |
 | `storage/directories.ts` | 27 | `ensureDirectory`、`ensurePrivateDirectory`、`listEntries` |
 | `storage/index.ts` | 3 | 域 barrel |
 | `state.ts`（共享契约） | 48 | `State`、`ControllerStore`、`initialState` |
@@ -1296,6 +1301,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `catalog/index.ts` | 2 | 域 barrel |
 | `controller/controller.ts` | 343 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
+| `controller/memory-log.ts` | 75 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |
 | `ui/app.tsx` | 573 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
