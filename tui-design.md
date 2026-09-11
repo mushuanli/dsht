@@ -2,7 +2,7 @@
 
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
-**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`1e9c182`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
+**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`e1b115a`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,697 行；`tests/` 23 个测试文件；156 项测试 |
+| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,700 行；`tests/` 23 个测试文件；157 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -1053,6 +1053,8 @@ C4Component
 
 鼠标上报在 `useMouseWheel` 挂载且 `screen === 'chat'` 时写入 `\x1b[?1006h\x1b[?1000h`（SGR 扩展 + 按键跟踪），在禁用或卸载时写入 `\x1b[?1000l\x1b[?1006l` 恢复。进入复制模式会禁用上报并释放捕获，以便终端原生选择；对话框期间仍保持上报，使滚轮与 PgUp/PgDn 可以滚动背景对话，但左键不进入复制模式，需要原生选择时按 Ctrl+S 冻结整个显示。该状态不落盘，进程异常终止时由终端自身的会话结束或下一次启动重新协商。
 
+草稿与视口位置：输入从空变为非空、且首字符不是 `/` 时，视口回到实时末端（等价于 `setScroll(0)`），因此开始写消息不必先滚到底；以 `/` 开头的命令不改变视口，草稿已存在时继续编辑或在其中向上滚动同样保留读者当前位置。
+
 ### 5.3 进程内内存状态
 
 以下数据在进程退出后全部丢失，重启时由宿主基线或已加载会话重建：
@@ -1214,7 +1216,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 23 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 156 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
+- 23 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 157 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1274,6 +1276,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ec7c0bc` `docs: record the status panel wrapping in the design` | 3.4 记录换行与翻页，附录 A 复核两个模块行数，7.8 补三条提交 | 14 个 Mermaid 块解析通过；附录合计与源码一致 |
 | `cb1132e` `feat: render markdown, diagrams and math in terminal history` | `session/markdown.ts`、`math.ts`、`export-html.ts`；表格按列宽排版、Mermaid 字符网格、MathJax Unicode 公式与离线 HTML 导出；实时尾部在出现 Markdown 语法时转为重解析 | typecheck + 156 项测试 + `test:terminal`；32/100 列快照与增量重放 |
 | `1e9c182` `docs: add the Agent Notes that were missing from the history` | 补入此前未 `git add -f` 的三份 Agent Note（compaction、dialog context、steering） | 配对哈希一致 |
+| `0b9772a` `docs: index the markdown modules and refresh the appendix` | 附录 A 补 `session/markdown.ts`、`math.ts`、`export-html.ts` 并逐行复核；2.5 记录 Markdown 解析位置；3.4 补 `/export-html` | 14 个 Mermaid 块解析通过；附录合计 5,697 行与源码一致 |
+| `e1b115a` `fix: return to the live end when a message draft starts` | 草稿由空变为非空且首字符不是 `/` 时视口回到实时末端；斜杠命令与已有草稿下的滚动不受影响 | typecheck + 157 项测试 + `test:terminal` |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
@@ -1281,7 +1285,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 57 个模块、5,697 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 57 个模块、5,700 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1323,7 +1327,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 583 | `App` |
+| `ui/app.tsx` | 586 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
