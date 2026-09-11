@@ -22,7 +22,13 @@ export function elapsedTime(milliseconds: number): string {
   return `${minutes >= 60 ? `${Math.floor(minutes / 60)}h ` : ''}${minutes % 60}m ${seconds % 60}s`;
 }
 
+/** Compact token counts; one formatter is reused because construction dominates the format cost. */
+const compactNumber = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+
 /** Produce compact metadata lines without inferring missing provider measurements.
+ *
+ * Counts use the compact form the single-row bar already uses, because a full count of a long
+ * session is eight digits wide and pushes each line past the terminal width on its own.
  * @param values - Current host projection values.
  * @param defaultModel - Host catalog default used before a session selects a route.
  * @param running - Whether the current route or next route is primary.
@@ -33,19 +39,20 @@ export function metricLines(values: ObjectValue, defaultModel: ObjectValue | und
   const current = running ? selection.lastUsed ?? selection.next ?? defaultModel : selection.next ?? selection.lastUsed ?? defaultModel;
   const model = modelName(current);
   const next = modelName(selection.next);
+  const compact = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
   const pressure = record(values.contextPressure);
   const used = numeric(pressure.projectedTokens) ?? numeric(pressure.pressureTokens);
   const capacity = numeric(pressure.contextWindow);
   const context = used !== undefined && capacity !== undefined && capacity > 0
-    ? `~${Math.min(100, Math.round(used / capacity * 100))}% (${count(used)}/${count(capacity)})`
+    ? `~${Math.min(100, Math.round(used / capacity * 100))}% (${compact(used)}/${compact(capacity)})`
     : 'unknown';
   const usage = record(values.tokenUsage);
   const buckets = [usage.uncachedInputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].map(numeric);
   const total = buckets.every(value => value !== undefined) ? (buckets as number[]).reduce((a, b) => a + b, 0) : undefined;
   return [
     `Model: ${model}${running && next !== 'unknown' && next !== model ? ` · Next: ${next}` : ''}`,
-    `Context ${context} · ${count(total)} tok`,
-    `In ${count(buckets[0])} · Out ${count(buckets[1])} · Cache ${count(buckets[2])}/${count(buckets[3])}`,
+    `Context ${context} · ${compact(total)} tok`,
+    `In ${compact(buckets[0])} · Out ${compact(buckets[1])} · Cache ${compact(buckets[2])}/${compact(buckets[3])}`,
   ];
 }
 
@@ -78,9 +85,6 @@ function compactStatusFields(fields: string[], width: number): string[] {
   }
   return [toolLine(join(), width)];
 }
-
-/** Compact token counts; one formatter is reused because construction dominates the format cost. */
-const compactNumber = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 /** Render a live clock and selected-session metadata; the timer belongs to this mounted bar. */
 export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, scroll = 0, pageSize, onScroll, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number; onScroll?(next: number): void; paused?: boolean }) {

@@ -1,6 +1,6 @@
 Session s1
 Workspace Project α · /host/project
 Model: p/chat
-Context ~25% (25/100) · 1,000 tok
+Context ~25% (25/100) · 1K tok
 In 100 · Out 200 · Cache 300/400
 Queued 2 · Jobs 1 · 42 turns

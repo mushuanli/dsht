@@ -14,7 +14,7 @@ test('shows current and pending models, approximate occupancy and disjoint usage
   };
   assert.deepEqual(metricLines(values, undefined, true), [
     'Model: p/current · Next: p/next (high)',
-    'Context ~25% (25/100) · 1,000 tok',
+    'Context ~25% (25/100) · 1K tok',
     'In 100 · Out 200 · Cache 300/400',
   ]);
   assert.equal(metricLines(values, undefined, false)[0], 'Model: p/next (high)');

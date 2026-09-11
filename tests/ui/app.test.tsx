@@ -238,7 +238,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   assert.match(ui.lastFrame()!, /First conversation/);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('1,000 tok') === true);
+  await until(() => ui.lastFrame()?.includes('Context ~25% (25/100)') === true);
   for (const line of (await readFile(new URL('../expected/status-bar.txt', import.meta.url), 'utf8')).trimEnd().split('\n')) {
     assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
   }
@@ -253,10 +253,10 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   await pressKey(ui, '\u001b');
   await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
   // Esc closed the details panel; reopen it to watch the metrics across a reconnect.
-  assert.equal(ui.lastFrame()?.includes('1,000 tok'), false);
+  assert.equal(ui.lastFrame()?.includes('Session s1'), false);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('1,000 tok') === true);
+  await until(() => ui.lastFrame()?.includes('Session s1') === true);
   fixture.controlBaseline = { projections: {}, queues: {}, jobs: {} };
   fixture.disconnect();
   await until(() => !controller.state.online);
@@ -264,7 +264,8 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
   await pressKey(ui, '/status'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Context unknown') === true);
-  assert.equal(ui.lastFrame()?.includes('1,000 tok'), false);
+  // The panel is open here, and its stale total is gone with the cleared projections.
+  assert.equal(ui.lastFrame()?.includes('1K tok'), false);
   await pressKey(ui, '/status');
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('ctx ?') === true);
