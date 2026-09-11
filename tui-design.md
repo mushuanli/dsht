@@ -2,7 +2,7 @@
 
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
-**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`e9ea13b`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
+**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`b634d4f`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -1263,6 +1263,9 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `fc378de` `fix: write the memory-log header when the file is created` | 新文件首次写入即带格式表头；新增测试固定该行为 | typecheck + 137 项测试 |
 | `5a60a7e` `docs: mark the memory-log commits as verified` | 在 7.8 中记录内存日志提交的验证结论 | 文档改动 |
 | `e9ea13b` `perf: wrap the growing live tail incrementally` | 实时部分带稳定 `key`，布局保存已定稿行与最后一行残余来源；折叠推理同样限制输入来源 | typecheck + 140 项测试 + `test:terminal` |
+| `11e04ca` `docs: refresh the source index and describe the incremental live wrap` | 附录 A 逐行重新核对行数并补上缺失文件；2.5／2.6／3.2.3／4.2／5.3／6 描述增量换行 | 14 个 Mermaid 块解析通过；附录合计 5,245 行与源码一致 |
+| `0aea3aa` `test: measure whole-text and incremental live wrapping` | `bench:history` 增加长单段流的整段换行与增量布局对比 | `npm run bench:history` |
+| `b634d4f` `docs: cite the wrapping benchmark in the live-wrap note` | Agent Note 引用已提交的基准数据并刷新配对哈希 | 配对哈希一致 |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
