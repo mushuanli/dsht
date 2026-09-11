@@ -8,6 +8,9 @@ import { toolLine } from '../../session/transcript.ts';
 import type { Controller } from '../../controller/controller.ts';
 import { safeText, type Json, type ObjectValue } from '../../transport/wire.ts';
 
+/** One detail row of the expanded panel before it is wrapped to the terminal width. */
+interface StatusDetail { key: string; text: string; color?: string; dim?: boolean }
+
 /** Format elapsed wall time, clamping clock skew instead of displaying negative durations.
  * @param milliseconds - Elapsed duration.
  * @returns Minute/second display, with hours when needed.
@@ -80,7 +83,7 @@ function compactStatusFields(fields: string[], width: number): string[] {
 const compactNumber = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 /** Render a live clock and selected-session metadata; the timer belongs to this mounted bar. */
-export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; paused?: boolean }) {
+export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, page = 0, pageSize, paused = false }: { controller: Controller; expanded?: boolean; width?: number; revision?: number; page?: number; pageSize?: number; paused?: boolean }) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const [now, setNow] = useState(Date.now);
@@ -136,22 +139,41 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
       <Text color={colors[index]} bold={index === 0}>{text}</Text>
     </Text> : null)}</Text>;
   }
-  return <Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
-    <Text color={running ? theme.colors.context : theme.colors.muted}>{running
+  // Every detail row wraps to the terminal width, so a narrow terminal loses nothing; lines that
+  // still do not fit are paged rather than dropped, because the panel shares the screen height.
+  const detail: StatusDetail[] = [
+    { key: 'activity', color: running ? theme.colors.context : theme.colors.muted, text: running
       ? `◐ Working · ${since === undefined ? 'unknown duration' : elapsedTime(now - since)}${state.transcript.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
-      : '● Ready · Ctrl+C exit'}{!state.online ? ' · disconnected, last known status' : ''}</Text>
-    <Text wrap="truncate-end">Host: {safeText(controller.base)} · {safeText(state.status)}</Text>
-    {state.sessionId && <Text>Session ID: {safeText(state.sessionId)}</Text>}
-    {controller.sessionMode && <Text>Mode: {safeText(controller.sessionMode)}</Text>}
-    <Text wrap="truncate-end">Workspace: {safeText(label)}</Text>
-    {metricLines(view.values, state.defaultModel, running).map((line, index) => <Text key={index} dimColor>{safeText(line)}</Text>)}
-    {costs && <Text dimColor>Cost (CNY estimate): Session {sessionCost} · Today {todayCost}</Text>}
-    {costs && coverage === 'partial' && <Text color={theme.colors.context}>Cost coverage incomplete: {costs.error ? safeText(costs.error) : 'no complete scan yet'}</Text>}
-    <Text dimColor>Turns: {count(numeric(record(view.values.sessionStats).turns))}</Text>
-    <Text dimColor>Queued: {count(view.queued)} · Active jobs: {count(view.jobs)}</Text>
-    {state.controlError && <Text color={theme.colors.context}>{safeText(state.controlError)}</Text>}
-    {state.presetError && <Text color={theme.colors.context}>Preset names unavailable: {safeText(state.presetError)}</Text>}
-    {state.modelError && <Text color={theme.colors.context}>Model catalog unavailable: {safeText(state.modelError)}</Text>}
+      : `● Ready · Ctrl+C exit${!state.online ? ' · disconnected, last known status' : ''}` },
+    { key: 'host', text: `Host: ${safeText(controller.base)} · ${safeText(state.status)}` },
+    ...state.sessionId ? [{ key: 'session', text: `Session ID: ${safeText(state.sessionId)}` }] : [],
+    ...controller.sessionMode ? [{ key: 'mode', text: `Mode: ${safeText(controller.sessionMode)}` }] : [],
+    { key: 'workspace', text: `Workspace: ${safeText(label)}` },
+    ...metricLines(view.values, state.defaultModel, running).map((line, index) => ({ key: `metric-${index}`, text: safeText(line), dim: true })),
+    ...costs ? [{ key: 'cost', text: `Cost (CNY estimate): Session ${sessionCost} · Today ${todayCost}`, dim: true }] : [],
+    ...costs && coverage === 'partial'
+      ? [{ key: 'coverage', color: theme.colors.context, text: `Cost coverage incomplete: ${costs.error ? safeText(costs.error) : 'no complete scan yet'}` }] : [],
+    { key: 'turns', text: `Turns: ${count(numeric(record(view.values.sessionStats).turns))}`, dim: true },
+    { key: 'queued', text: `Queued: ${count(view.queued)} · Active jobs: ${count(view.jobs)}`, dim: true },
+    ...state.controlError ? [{ key: 'control-error', color: theme.colors.context, text: safeText(state.controlError) }] : [],
+    ...state.presetError ? [{ key: 'preset-error', color: theme.colors.context, text: `Preset names unavailable: ${safeText(state.presetError)}` }] : [],
+    ...state.modelError ? [{ key: 'model-error', color: theme.colors.context, text: `Model catalog unavailable: ${safeText(state.modelError)}` }] : [],
+  ];
+  // Border and horizontal padding take four columns, so a detail row wraps inside what is left.
+  const inner = Math.max(1, (width ?? Math.max(3, (stdout.columns ?? 80) - 2)) - 4);
+  const measured = (text: string) => wrapAnsi(text, inner, { trim: false, hard: true }).split('\n').length;
+  const lines = detail.flatMap(row => wrapAnsi(row.text, inner, { trim: false, hard: true }).split('\n')
+    .map((text, index) => ({ ...row, key: `${row.key}:${index}`, text })));
+  const budget = Math.max(1, pageSize ?? lines.length);
+  const hint = (count: number, index: number) => `Status ${index + 1}/${count} · PgUp/PgDn pages · Esc close`;
+  // A footer that wraps takes rows from the page, so its height is reserved before dividing them.
+  const bare = Math.max(1, Math.ceil(lines.length / budget));
+  const size = Math.max(1, budget - (bare > 1 ? measured(hint(bare, 0)) : 0));
+  const pages = Math.max(1, Math.ceil(lines.length / size));
+  const current = Math.min(Math.max(0, page), pages - 1);
+  return <Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
+    {lines.slice(current * size, (current + 1) * size).map(line => <Text key={line.key} color={line.color} dimColor={line.dim}>{line.text}</Text>)}
+    {pages > 1 && <Text dimColor>{hint(pages, current)}</Text>}
   </Box>;
 });
 
