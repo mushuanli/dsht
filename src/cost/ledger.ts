@@ -60,7 +60,8 @@ export class CostLedger {
     const previous = new Map<string, Charge>((current?.charges ?? []).map(charge => [charge.key, charge]));
     const charges = foldSamples(events).map(sample => decide(this.prices, sample, previous.get(sample.key)));
     const saved: SavedCost = { version: 2, sessionId, cut, charges };
-    if (this.directory) await saveLedger(this.directory, saved);
+    // Another process may have persisted a newer cut of this session since it was last read.
+    if (this.directory && !await saveLedger(this.directory, saved)) return;
     this.sessions.set(sessionId, saved);
     this.totals.clear();
   }

@@ -7,10 +7,20 @@ import type { Charge, SavedCost } from './types.ts';
 /** Current on-disk ledger generation. Files of another generation are ignored, not migrated. */
 const LEDGER_VERSION = 2;
 
-/** Load every complete session cut under one origin directory.
+/** Every file this unit owns: the fixed per-session name, or the `<session>-<cut>.json` it replaced. */
+const OWNED_FILE = /^[0-9a-f]{64}(?:-\d+)?\.json$/;
+
+/** The one file that holds a session's newest cut; the cut itself lives inside the file. */
+function ledgerName(sessionId: string): string {
+  return `${createHash('sha256').update(sessionId).digest('hex')}.json`;
+}
+
+/** Load every session's newest cut, leaving one fixed file per session.
  *
- * Each session keeps its highest cut; a file of another generation or an unreadable shape is
- * treated as absent so the next scan rebuilds it.
+ * A file of another generation, a file with an unreadable shape, and a cut file superseded by the
+ * newer name all describe work the next scan rebuilds, so loading removes them; the newest slice
+ * of a superseded name is rewritten under the fixed one first. Files this unit does not own are
+ * left where they are.
  * @param directory - Origin-scoped ledger directory, or undefined when persistence is disabled.
  * @returns The newest saved slice per session identity.
  */
@@ -18,30 +28,49 @@ export async function loadLedgers(directory: string | undefined): Promise<Map<st
   const sessions = new Map<string, SavedCost>();
   if (!directory) return sessions;
   await ensureDirectory(directory);
+  const superseded: { path: string; sessionId: string }[] = [];
   for (const name of await listEntries(directory)) {
-    if (!name.endsWith('.json')) continue;
-    const raw = await readText(join(directory, name));
+    if (!OWNED_FILE.test(name)) continue;
+    const path = join(directory, name);
+    const raw = await readText(path);
     // A file removed between listing and reading is simply absent.
     if (raw === undefined) continue;
     const saved = parseLedger(raw);
-    if (saved === undefined) continue;
+    if (saved === undefined) { await removeFile(path); continue; }
     if ((sessions.get(saved.sessionId)?.cut ?? -2) <= saved.cut) sessions.set(saved.sessionId, saved);
+    if (name !== ledgerName(saved.sessionId)) superseded.push({ path, sessionId: saved.sessionId });
+  }
+  for (const { path, sessionId } of superseded) {
+    await writePrivateFile(join(directory, ledgerName(sessionId)), JSON.stringify(sessions.get(sessionId)) + '\n');
+    await removeFile(path);
   }
   return sessions;
 }
 
-/** Write one session cut atomically and drop that session's older cuts.
+/** Write one session cut unless the directory already holds a newer one.
+ *
+ * The file is the system of record across processes, so a scan that opened an older snapshot must
+ * not replace a cut another scan already persisted.
  * @param directory - Origin-scoped ledger directory.
  * @param saved - Complete slice to persist.
+ * @returns Whether the directory now holds this slice.
  */
-export async function saveLedger(directory: string, saved: SavedCost): Promise<void> {
-  const prefix = createHash('sha256').update(saved.sessionId).digest('hex') + '-';
-  await writePrivateFile(join(directory, `${prefix}${saved.cut}.json`), JSON.stringify(saved) + '\n');
-  for (const name of await listEntries(directory)) {
-    if (name.startsWith(prefix) && name.endsWith('.json') && Number(name.slice(prefix.length, -5)) < saved.cut) {
-      await removeFile(join(directory, name));
-    }
-  }
+export async function saveLedger(directory: string, saved: SavedCost): Promise<boolean> {
+  const path = join(directory, ledgerName(saved.sessionId));
+  const existing = await readText(path);
+  if (existing !== undefined && persistedCut(existing) > saved.cut) return false;
+  await writePrivateFile(path, JSON.stringify(saved) + '\n');
+  return true;
+}
+
+/** The cut already persisted in one file, or -1 when it holds no decision worth keeping.
+ * @param raw - File contents read from the ledger directory.
+ * @returns The persisted cut.
+ */
+function persistedCut(raw: string): number {
+  try { return parseLedger(raw)?.cut ?? -1; }
+  // A file of another generation or an unreadable shape carries no decision, so the new cut replaces it.
+  catch { return -1; }
 }
 
 /** Validate one persisted ledger; another generation or an unreadable shape is absent. */
