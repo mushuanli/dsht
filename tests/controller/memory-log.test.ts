@@ -7,10 +7,11 @@ import { join } from 'node:path';
 import { Controller } from '../../src/controller/index.ts';
 import { host, until } from '../support/host.ts';
 
-async function harness(t: { after(fn: () => Promise<void>): void }, path: string, ledger?: undefined) {
+/** Start a controller on session `s1` with a memory log, and always tear both down. */
+async function harness(t: Parameters<typeof test>[0] extends never ? never : { after(fn: () => void | Promise<void>): void }, path: string) {
   const fixture = await host();
   t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger, undefined, path);
+  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined, undefined, path);
   t.after(async () => { await controller.stop(); });
   controller.start();
   await until(() => controller.state.transcript.ready);
@@ -50,13 +51,13 @@ test('the log rewrites itself so a long run keeps only the newest samples', asyn
   assert.equal((JSON.parse(lines.at(-1)!) as { records: number }).records, 1);
 });
 
-test('the log is absent without a path and stops itself after a write failure', async t => {
+test('the log is absent without a path, and a write failure stops it without stopping the client', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const bare = new Controller(fixture.url, 'fixture-token');
+  t.after(async () => { await bare.stop(); });
   assert.equal(bare.memoryLog, undefined);
   bare.start();
-  await until(() => bare.state.transcript.ready);
-  await bare.stop();
+  await until(() => bare.state.online);
 
   const directory = await mkdtemp(join(tmpdir(), 'dsht-memory-')); t.after(() => rm(directory, { recursive: true, force: true }));
   const blocked = join(directory, 'not-a-file');

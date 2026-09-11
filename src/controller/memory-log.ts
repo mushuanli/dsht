@@ -1,5 +1,5 @@
 /** Runtime memory samples appended to one bounded local file for diagnosing growth over a long run. */
-import { appendPrivateFile, writePrivateFile } from '../storage/index.ts';
+import { appendPrivateFile, createPrivateFile, writePrivateFile } from '../storage/index.ts';
 import { errorText, type ObjectValue } from '../transport/wire.ts';
 
 /** Time between automatic samples. */
@@ -25,10 +25,19 @@ export class MemoryLog {
   error: string | undefined;
   constructor(readonly path: string | undefined, private readonly sampleSource: () => ObjectValue) {}
 
+  /** Write the header into a new file, then sample once; a missing or unwritable path is reported
+   * by that first sample instead of here.
+   */
+  private async begin(): Promise<void> {
+    if (this.path === undefined) return;
+    try { await createPrivateFile(this.path, HEADER); } catch { /* the sample below reports it */ }
+    await this.sample();
+  }
+
   /** Sample once now and then every `SAMPLE_INTERVAL_MS`; absent when no path was configured. */
   start(): void {
     if (this.path === undefined || this.timer !== undefined) return;
-    void this.sample();
+    void this.begin();
     this.timer = setInterval(() => { void this.sample(); }, SAMPLE_INTERVAL_MS);
   }
 
