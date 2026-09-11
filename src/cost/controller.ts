@@ -66,12 +66,14 @@ export class CostController {
         const sessions = array(object(await client.call('session/list', { _request: {} }, combined)).items).map(object);
         combined.throwIfAborted();
         const failures: string[] = [];
+        let scanned = 0, pages = 0, events = 0;
         for (const session of sessions) {
           combined.throwIfAborted();
           const sessionId = string(session.sessionId);
           if (!session.running && typeof session.updatedAt === 'number' && this.updates.get(sessionId) === session.updatedAt) continue;
           try {
-            const history = await sessionCostHistory(client, session, combined);
+            const history = await sessionCostHistory(client, session, combined, () => { pages++; });
+            scanned++; events += history.events.length;
             await ledger.replace(sessionId, history.cursor, history.events);
             if (!session.running && typeof session.updatedAt === 'number') this.updates.set(sessionId, session.updatedAt);
             this.host.publish();
@@ -82,6 +84,7 @@ export class CostController {
           }
         }
         ledger.error = failures.length === 0 ? '' : `${failures.length} of ${sessions.length} sessions failed: ${failures[0]}`;
+        ledger.lastScan = { sessions: scanned, pages, events };
         ledger.scannedAt = Date.now();
       } catch (error) { ledger.error = errorText(error); }
       finally { ledger.scanning = false; this.host.publish(); }

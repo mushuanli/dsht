@@ -27,6 +27,8 @@ export class CostLedger {
   scannedAt?: number;
   scanning = false;
   error = '';
+  /** Work the last completed scan performed, so a memory sample can attribute its allocation. */
+  lastScan?: { sessions: number; pages: number; events: number };
   constructor(readonly prices: PriceVersion[] = DEFAULT_PRICES, readonly directory?: string) {}
 
   /** Cached charges count as complete; only a failed scan or an empty ledger is partial.

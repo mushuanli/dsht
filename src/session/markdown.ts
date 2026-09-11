@@ -33,9 +33,12 @@ for (const level of ['block', 'inline'] as const) parser.use({ extensions: [{
 
 const rendered = new Map<string, string>();
 let cachedChars = 0;
+let cacheHits = 0;
+let cacheMisses = 0;
 function cached(key: string, render: () => string): string {
   const existing = rendered.get(key);
-  if (existing !== undefined) return existing;
+  if (existing !== undefined) { cacheHits++; return existing; }
+  cacheMisses++;
   const result = render();
   const size = key.length + result.length;
   if (size <= 64 * 1024) {
@@ -46,6 +49,13 @@ function cached(key: string, render: () => string): string {
     rendered.set(key, result); cachedChars += size;
   }
   return result;
+}
+
+/** Report the bounded math and diagram cache, so a memory sample can tell churn from retention.
+ * @returns Cached entries, their accounted characters, and lookup counters.
+ */
+export function markdownCacheStats(): { entries: number; chars: number; hits: number; misses: number } {
+  return { entries: rendered.size, chars: cachedChars, hits: cacheHits, misses: cacheMisses };
 }
 
 function mathText(token: MathToken): string {

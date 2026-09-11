@@ -55,6 +55,20 @@ class LayoutIndex {
 
   get cachedRowCount(): number { return this.cacheSize; }
 
+  /** Measure what the row cache actually holds, including the style spans the byte bound ignores.
+   * @returns Cached rows, their accounted characters, and the span objects inside them.
+   */
+  stats(): { rows: number; cacheBytes: number; spans: number; spanChars: number } {
+    let cacheBytes = 0, spans = 0, spanChars = 0;
+    for (const { rows } of this.cache.values()) {
+      for (const row of rows) {
+        cacheBytes += row.text.length;
+        for (const span of row.spans ?? []) { spans++; spanChars += span.text.length; }
+      }
+    }
+    return { rows: this.cacheSize, cacheBytes, spans, spanChars };
+  }
+
   get assistantSeen(): boolean { return this.segments.at(-1)?.assistantSeen ?? false; }
 
   update(messages: Message[]): void {
@@ -242,6 +256,19 @@ const noOverrides: ReadonlySet<number> = new Set();
  */
 export function releaseHistoryLayout(transcript: Transcript): void {
   indexes.get(transcript)?.dispose(); indexes.delete(transcript);
+}
+
+/** Report what one transcript's layout still holds, for memory samples and diagnostics.
+ *
+ * The row cache is the only structure that grows with expanded reasoning and Markdown rows, and
+ * its byte bound counts neither the span objects nor the incremental live-tail state.
+ * @param transcript - Transcript whose layout should be measured.
+ * @returns Cache and live-tail counters, or undefined when no layout was built yet.
+ */
+export function layoutStats(transcript: Transcript): { rows: number; cacheBytes: number; spans: number; spanChars: number; liveWraps: number; liveMarkdown: number } | undefined {
+  const index = indexes.get(transcript);
+  if (!index) return undefined;
+  return { ...index.stats(), liveWraps: index.liveWraps.size, liveMarkdown: index.liveMarkdown.size };
 }
 
 /** Lay out an indexed conversation without concatenating its historical rows on every stream frame.

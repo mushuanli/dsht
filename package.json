@@ -26,6 +26,7 @@
   },
   "scripts": {
     "start": "tsx src/cli/index.tsx",
+    "start:profile": "NODE_OPTIONS=\"--expose-gc --heapsnapshot-signal=SIGUSR2\" tsx src/cli/index.tsx",
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "test": "tsx --test tests/*/*.test.ts tests/*/*.test.tsx",

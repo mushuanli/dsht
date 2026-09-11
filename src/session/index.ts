@@ -2,7 +2,8 @@
 export { SessionController } from './controller.ts';
 export { contentText, toolLine, Transcript } from './transcript.ts';
 export type { Message, MessagePart, ThoughtEntry } from './transcript.ts';
-export { historyLayout, releaseHistoryLayout } from './history.ts';
+export { historyLayout, layoutStats, releaseHistoryLayout } from './history.ts';
+export { markdownCacheStats } from './markdown.ts';
 export type { HistoryRow, Reasoning, RowKind } from './history.ts';
 export { Telemetry } from './telemetry.ts';
 export type { QueuedInput } from './telemetry.ts';

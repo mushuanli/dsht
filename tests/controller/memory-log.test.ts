@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Controller } from '../../src/controller/index.ts';
+import { historyLayout } from '../../src/session/index.ts';
 import { host, until } from '../support/host.ts';
 
 /** Start a controller on session `s1` with a memory log, and always tear both down. */
@@ -38,6 +39,25 @@ test('a memory sample records the reclamation state and appends one bounded line
   assert.ok(Number(sample.rss) > 0 && Number(sample.heapUsed) > 0);
   assert.ok(!('ledgerCharges' in sample));
   if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
+});
+
+test('a sample reports the layout, render cache and scan counters beside the retained window', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-memory-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'memory.log');
+  const { controller } = await harness(t, path);
+  // Build the layout the UI builds, so its row cache is measurable rather than absent.
+  const transcript = controller.state.transcript;
+  historyLayout(transcript, 100);
+  await controller.memoryLog!.sample();
+  const sample = JSON.parse((await readFile(path, 'utf8')).trimEnd().split('\n').at(-1)!) as Record<string, unknown>;
+  for (const field of ['layoutRows', 'layoutCacheBytes', 'layoutSpans', 'layoutSpanChars', 'layoutLiveWraps', 'layoutLiveMarkdown',
+    'markdownEntries', 'markdownChars', 'markdownHits', 'markdownMisses', 'liveChars', 'thoughts']) {
+    assert.equal(typeof sample[field], 'number', `${field} is missing from the sample`);
+  }
+  assert.ok(Number(sample.layoutRows) > 0, 'the built layout should be visible in the sample');
+  assert.equal(typeof sample.scanning, 'boolean');
+  // A forced collection is reported only on a runtime that exposes one.
+  assert.equal('heapUsedAfterGc' in sample, typeof (globalThis as { gc?: () => void }).gc === 'function');
 });
 
 test('the log rewrites itself so a long run keeps only the newest samples', async t => {

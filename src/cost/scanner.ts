@@ -24,12 +24,13 @@ export function costAddresses(session: ObjectValue): ObjectValue[] {
  * @param client - Authenticated host transport.
  * @param session - One row from the host session list.
  * @param signal - Cancels paging without cancelling any agent work.
+ * @param onPage - Counts each history request, so a scan can report how much it re-read.
  * @returns Opening cursor and the minimal billing events behind it.
  */
-export async function sessionCostHistory(client: Client, session: ObjectValue, signal: AbortSignal): Promise<{ cursor: number; events: ObjectValue[] }> {
+export async function sessionCostHistory(client: Client, session: ObjectValue, signal: AbortSignal, onPage?: () => void): Promise<{ cursor: number; events: ObjectValue[] }> {
   let lastError: unknown;
   for (const address of costAddresses(session)) {
-    try { return await readCostHistory(client, address, signal); }
+    try { return await readCostHistory(client, address, signal, onPage); }
     catch (error) {
       lastError = error;
       // Only a delivery-mode mismatch justifies the other form; every other failure is final here.
@@ -40,7 +41,8 @@ export async function sessionCostHistory(client: Client, session: ObjectValue, s
 }
 
 /** Page one addressed session's history into the billing events the ledger folds. */
-async function readCostHistory(client: Client, address: ObjectValue, signal: AbortSignal): Promise<{ cursor: number; events: ObjectValue[] }> {
+async function readCostHistory(client: Client, address: ObjectValue, signal: AbortSignal, onPage?: () => void): Promise<{ cursor: number; events: ObjectValue[] }> {
+  onPage?.();
   const snapshot = await new Promise<ObjectValue>((resolve, reject) => {
     let sub: Subscription | undefined;
     const timeout = setTimeout(() => finish(new Error('Cost history snapshot timed out')), client.timeoutMs);
@@ -66,6 +68,7 @@ async function readCostHistory(client: Client, address: ObjectValue, signal: Abo
     const seqs = records.map(r => object(object(r).event).seq);
     if (!seqs.length || seqs.some(n => typeof n !== 'number' || !Number.isSafeInteger(n))) throw new Error('Invalid cost history page');
     const beforeSeq = Math.min(...seqs as number[]);
+    onPage?.();
     page = object(await client.call('session/page', { request: { address, throughSeq: cursor, beforeSeq, maxMessages: 80 } }, signal));
     if (page.hasMore && array(page.records).every(r => Number(object(object(r).event).seq) >= beforeSeq)) throw new Error('Cost history page did not advance');
   }

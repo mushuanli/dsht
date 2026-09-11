@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,700 行；`tests/` 23 个测试文件；157 项测试 |
+| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 5,777 行；`tests/` 23 个测试文件；158 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -651,7 +651,7 @@ dsht [options] [list workspaces|list sessions]
 | `--history-mb <n>` | 历史软上限 MiB，默认 16，必须为正整数 |
 | `--json` | `list` 输出 `{ "items": [...] }` |
 | `--memory-log <path>` | 运行时内存日志路径，默认 `<state>/memory.log`；空值报错 |
-| `--no-memory-log` | 关闭运行时内存日志（默认开启） |
+| `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 以 `--expose-gc --heapsnapshot-signal=SIGUSR2` 启动，可在平台期用 `kill -USR2` 写出堆快照 |
 | `--help` | 打印帮助 |
 
 约束与行为：
@@ -1005,8 +1005,8 @@ C4Component
 | --- | --- | --- | --- | --- |
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 | 认证成功且服务端下发持久 Cookie 时 |
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 | 仅首次交互启动创建；之后由用户维护 |
-| 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sha256(sessionId)>-<cut>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600 | 每次成功扫描一个会话 |
-| 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本，满 1,000 行重写 |
+| 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sha256(sessionId)>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600 | 每个会话一个文件，写入较新 cut 时替换 |
+| 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本（含布局与渲染缓存计数、扫描工作量；带 `--expose-gc` 时另有回收后堆），满 1,000 行重写 |
 | 导出归档 | 用户指定，或 `<cwd>/session-<sanitized-id>-<Date.now()>.zip` | — | 0600，`wx` 独占 | `/export` 成功时 |
 
 #### 5.2.1 认证 Cookie
@@ -1054,6 +1054,8 @@ C4Component
 鼠标上报在 `useMouseWheel` 挂载且 `screen === 'chat'` 时写入 `\x1b[?1006h\x1b[?1000h`（SGR 扩展 + 按键跟踪），在禁用或卸载时写入 `\x1b[?1000l\x1b[?1006l` 恢复。进入复制模式会禁用上报并释放捕获，以便终端原生选择；对话框期间仍保持上报，使滚轮与 PgUp/PgDn 可以滚动背景对话，但左键不进入复制模式，需要原生选择时按 Ctrl+S 冻结整个显示。该状态不落盘，进程异常终止时由终端自身的会话结束或下一次启动重新协商。
 
 草稿与视口位置：输入从空变为非空、且首字符不是 `/` 时，视口回到实时末端（等价于 `setScroll(0)`），因此开始写消息不必先滚到底；以 `/` 开头的命令不改变视口，草稿已存在时继续编辑或在其中向上滚动同样保留读者当前位置。
+
+内存样本字段：除进程计数器、保留窗口与账本外，样本还记录布局行缓存（行数、记账字节、span 个数与字符数）、增量实时尾部状态、数学与图表缓存的条目/字符/命中/未命中、实时字符数、推理条目数，以及最近一次成本扫描的会话数、页数与事件数；`--expose-gc` 下额外记录一次强制回收后的堆与耗时，用于区分"真正保留"与"V8 尚未回收"。
 
 ### 5.3 进程内内存状态
 
@@ -1216,7 +1218,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 23 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 157 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
+- 23 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 158 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1278,6 +1280,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `1e9c182` `docs: add the Agent Notes that were missing from the history` | 补入此前未 `git add -f` 的三份 Agent Note（compaction、dialog context、steering） | 配对哈希一致 |
 | `0b9772a` `docs: index the markdown modules and refresh the appendix` | 附录 A 补 `session/markdown.ts`、`math.ts`、`export-html.ts` 并逐行复核；2.5 记录 Markdown 解析位置；3.4 补 `/export-html` | 14 个 Mermaid 块解析通过；附录合计 5,697 行与源码一致 |
 | `e1b115a` `fix: return to the live end when a message draft starts` | 草稿由空变为非空且首字符不是 `/` 时视口回到实时末端；斜杠命令与已有草稿下的滚动不受影响 | typecheck + 157 项测试 + `test:terminal` |
+| `0b837d7` `docs: record the draft scroll rule in the design` | 5.2.5 记录草稿与视口位置规则；附录 A 复核 `ui/app.tsx`；7.8 补两条提交 | 附录合计 5,700 行与源码一致 |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
@@ -1285,7 +1288,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 57 个模块、5,700 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 57 个模块、5,777 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1301,7 +1304,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `transport/host.ts` | 14 | `HostAccess` |
 | `session/controller.ts` | 583 | `SessionController` |
 | `session/transcript.ts` | 582 | `Transcript`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
-| `session/history.ts` | 293 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
+| `session/history.ts` | 320 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
 | `session/telemetry.ts` | 108 | `Telemetry`、`QueuedInput` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
 | `session/navigation.ts` | 33 | `navigationCommand`、`sessionLabel`、`resolveTarget` |
@@ -1309,21 +1312,21 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/export.ts` | 30 | `saveSessionLog` |
 | `session/types.ts` | 10 | `RemovalTarget`、`HistorySearch` |
 | `session/connection-view.ts` | 19 | `ConnectionView` |
-| `session/markdown.ts` | 235 | `hasMarkdown`、`markdownRows`、`markdownHtml`、`MarkdownRow`、`MarkdownSpan` |
+| `session/markdown.ts` | 245 | `hasMarkdown`、`markdownRows`、`markdownHtml`、`MarkdownRow`、`MarkdownSpan` |
 | `session/math.ts` | 67 | `renderMath` |
 | `session/export-html.ts` | 42 | `saveTranscriptHtml` |
-| `session/index.ts` | 16 | 域 barrel |
+| `session/index.ts` | 17 | 域 barrel |
 | `cost/pricing.ts` | 129 | `DEFAULT_PRICES`、`pricesFrom`、`priceAt`、`lowestPrice`、`chargeFor`、`costDay` |
 | `cost/records.ts` | 62 | `costRecords`、`foldSamples` |
 | `cost/ledger-files.ts` | 107 | `loadLedgers`、`saveLedger` |
-| `cost/ledger.ts` | 127 | `CostLedger`、`costText` |
-| `cost/scanner.ts` | 74 | `costAddresses`、`sessionCostHistory` |
-| `cost/controller.ts` | 92 | `CostController`、`CostHost` |
+| `cost/ledger.ts` | 129 | `CostLedger`、`costText` |
+| `cost/scanner.ts` | 77 | `costAddresses`、`sessionCostHistory` |
+| `cost/controller.ts` | 95 | `CostController`、`CostHost` |
 | `cost/types.ts` | 38 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
 | `cost/index.ts` | 9 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
-| `controller/controller.ts` | 374 | `Controller` |
+| `controller/controller.ts` | 405 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |

@@ -2,6 +2,8 @@
 import { Client } from '../transport/client.ts';
 import { errorText, type Json, type ObjectValue } from '../transport/wire.ts';
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from '../session/memory.ts';
+import { layoutStats } from '../session/history.ts';
+import { markdownCacheStats } from '../session/markdown.ts';
 import { SessionController } from '../session/controller.ts';
 import { CatalogController } from '../catalog/controller.ts';
 import type { Telemetry } from '../session/telemetry.ts';
@@ -111,23 +113,52 @@ export class Controller implements ControllerStore, ConnectionListener {
     finally { this.update({ busy: false }); }
   }
 
-  /** Read the counters one memory sample records; content never leaves as text. */
+  /** Read the counters one memory sample records; content never leaves as text.
+   *
+   * The retained transcript and the ledger are small in practice, so a sample also reads the two
+   * structures that grow with rendered content — the layout row cache and the bounded math and
+   * diagram cache — and the work the last cost scan re-read, which is the only timer here whose
+   * per-pass work scales with history. With a runtime that exposes `gc`, the sample also reports
+   * the heap after a forced collection, so retained state and uncollected garbage stay distinct.
+   */
   private memorySample(): ObjectValue {
     const memory = process.memoryUsage();
     const transcript = this.state.transcript;
     const ledger = this.costs?.summary();
+    const layout = layoutStats(transcript);
+    const markdown = markdownCacheStats();
+    const gc = this.forcedGc();
     return {
       time: new Date().toISOString(),
       rss: memory.rss, heapTotal: memory.heapTotal, heapUsed: memory.heapUsed,
       external: memory.external, arrayBuffers: memory.arrayBuffers,
+      ...(gc === undefined ? {} : { heapUsedAfterGc: gc.used, gcMs: gc.ms }),
       online: this.state.online, screen: this.state.screen,
       session: this.state.sessionId ?? null,
       pinned: this.session.pinned,
       records: transcript.retainedRecordCount, retainedBytes: transcript.retainedBytes,
       beforeSeq: transcript.beforeSeq ?? null, hasMore: transcript.hasMore,
-      live: transcript.hasLiveContent, pending: this.state.pending.length,
+      live: transcript.hasLiveContent, liveChars: transcript.liveText.length, pending: this.state.pending.length,
+      thoughts: transcript.thoughts.length,
+      ...(layout === undefined ? {} : { layoutRows: layout.rows, layoutCacheBytes: layout.cacheBytes, layoutSpans: layout.spans,
+        layoutSpanChars: layout.spanChars, layoutLiveWraps: layout.liveWraps, layoutLiveMarkdown: layout.liveMarkdown }),
+      markdownEntries: markdown.entries, markdownChars: markdown.chars, markdownHits: markdown.hits, markdownMisses: markdown.misses,
+      scanning: this.costs?.scanning ?? false,
+      ...(this.costs?.lastScan === undefined ? {} : { scanSessions: this.costs.lastScan.sessions,
+        scanPages: this.costs.lastScan.pages, scanEvents: this.costs.lastScan.events }),
       ...(ledger === undefined ? {} : { ledgerSessions: ledger.sessions, ledgerCharges: ledger.charges, ledgerUnpriced: ledger.unpriced }),
     };
+  }
+
+  /** Collect before reading the heap when the runtime exposes a collection.
+   * @returns Heap in use after the collection and how long it took, or undefined without `global.gc`.
+   */
+  private forcedGc(): { used: number; ms: number } | undefined {
+    const collect = (globalThis as { gc?: () => void }).gc;
+    if (typeof collect !== 'function') return undefined;
+    const start = Date.now();
+    collect();
+    return { used: process.memoryUsage().heapUsed, ms: Date.now() - start };
   }
 
   /** A new generation starts; drop generation-scoped domain state. */
