@@ -94,6 +94,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const currentHelpPage = Math.min(helpPage, helpPages - 1);
   const [answers, setAnswers] = useState<Record<string, ObjectValue[]>>({});
   const [optionState, setOptionState] = useState<{ key: string; cursor: number; selected: string[]; custom: boolean }>();
+  const [approvalSelection, setApprovalSelection] = useState<{ eventId: string; index: number }>();
   const [referenceIndex, setReferenceIndex] = useState(0);
   const [dismissedReference, dismissReference] = useState<string>();
   const [lookup, setLookup] = useState<{ draft: string; sessionId: string; items: FileReference[]; error?: string }>();
@@ -107,6 +108,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const pending = state.pending[0];
   const queued = controller.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
   useEffect(() => { setQueueOpen(false); }, [state.sessionId, pending?.eventId]);
+  // A replayed interaction (same eventId after a reconnect) starts unselected again.
+  useEffect(() => { setApprovalSelection(undefined); }, [state.sessionId, state.online, pending?.eventId]);
   const token = state.screen === 'chat' && state.online && !state.busy && !pending
     && !input.startsWith('/') && dismissedReference !== input && cursor === input.length
     ? activeReference(input) : undefined;
@@ -148,8 +151,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Reserve the header, composer and question instructions; each choice may have a description.
   const optionPageSize = Math.max(1, Math.min(6, Math.floor(((stdout.rows ?? 30) - 16) / 2)));
   const optionStart = Math.max(0, optionCursor - optionPageSize + 1);
-  const questionKeysActive = !!question && options.length > 0 && !choiceState.custom && !copyMode
-    && !removal && !models && !thoughtList && historyQuery === undefined && !searchResults && !help && !costExpanded && !statusExpanded;
+  // One open panel owns the arrow and digit keys; the picker screens and the composer are not keyboard owners.
+  const panelBlocksKeys = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || help || costExpanded || statusExpanded);
+  const questionKeysActive = !!question && options.length > 0 && !choiceState.custom && !copyMode && !panelBlocksKeys;
+  const approvalKeysActive = pending?.event === 'approval/request' && !copyMode && !panelBlocksKeys;
+  const approvalIndex = approvalSelection?.eventId === eventId ? approvalSelection.index : -1;
   const answerQuestion = async (selected: string[], custom?: string) => {
     if (controller.state.pending[0]?.eventId !== eventId) throw new Error('The pending question has changed');
     const answer = { id: string(question!.id), selected, ...(custom ? { custom } : {}) };
@@ -179,10 +185,26 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       if (key.ctrl && draft.current) setInput('');
       if (key.escape) {
         setOptionState({ ...choiceState, custom: false });
+        setApprovalSelection(undefined);
         setRemoval(undefined); setModels(undefined); setThoughtList(false); setSearchResults(undefined);
         setHistoryQuery(undefined); setHistoryMatches(undefined); setHelp(false); setCostExpanded(false); setStatusExpanded(false);
       }
       return;
+    }
+    if (approvalKeysActive && !draft.current && controller.state.online && !controller.state.busy
+      && controller.state.pending[0]?.eventId === eventId && !key.ctrl && !key.meta) {
+      const digit = /^[1-3]$/.test(_value) ? Number(_value) - 1 : -1;
+      if (digit >= 0 || key.upArrow || key.downArrow) {
+        // An unselected list enters at the first, non-destructive choice, so a stray arrow plus Enter cannot cancel.
+        const index = digit >= 0 ? digit : approvalIndex < 0 ? 0
+          : Math.max(0, Math.min(2, approvalIndex + (key.upArrow ? -1 : 1)));
+        setApprovalSelection({ eventId, index }); return;
+      }
+      if (key.return) {
+        // Choice 3 cancels the turn instead of answering the request, so it sends no event result.
+        if (approvalIndex >= 0) operate(() => approvalIndex === 2 ? controller.cancelTurn() : controller.approve(approvalIndex === 0));
+        return;
+      }
     }
     if (questionKeysActive && !draft.current && !controller.state.busy && !key.ctrl && !key.meta) {
       const digit = /^[1-9]$/.test(_value) ? Number(_value) - 1 : -1;
@@ -230,7 +252,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
     const recallNext = key.downArrow || key.ctrl && _value === 'n';
     if ((recallPrevious || recallNext) && state.online && !controller.state.busy && !pending
-      && !queueOpen && !removal && !models && !thoughtList && historyQuery === undefined && !searchResults && !help && !costExpanded && !statusExpanded
+      && !queueOpen && !panelBlocksKeys
       && (state.screen === 'chat' || draft.current !== '' || key.ctrl)) {
       setInput(inputHistory.current.move(recallPrevious ? -1 : 1, draft.current), true); return;
     }
@@ -509,6 +531,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         <Text bold color={theme.colors.context}>{question ? `Question ${answered.length + 1}/${questions.length}${question.header ? ` · ${safeText(string(question.header))}` : ''}` : 'Approval required'}</Text>
         <Text>{safeText(question ? string(question.question) : JSON.stringify(pending.request, null, 2))}</Text>
         {question?.detail && <Text>{safeText(string(question.detail))}</Text>}
+        {pending.event === 'approval/request' && <Box flexDirection="column" flexShrink={0}>
+          {/* Choices 1 and 2 are the host's `allowed-once` and `rejected` outcomes; 3 cancels the turn. */}
+          {['Allow once', 'Deny', 'Stop turn'].map((label, index) => <Text key={label} color={approvalIndex === index ? theme.accent : undefined}>
+            {approvalIndex === index ? '❯ ' : '  '}{index + 1}. {label}
+          </Text>)}
+          <Text dimColor>↑ ↓ / 1–3 select · Enter confirm</Text>
+        </Box>}
         {options.length > 0 && <Box flexDirection="column" flexShrink={0}>
           {[...options, { label: 'Other answer — type below' }].map((option, index) => ({ option, index }))
             .slice(optionStart, optionStart + optionPageSize).map(({ option, index }) => <Box key={index} flexDirection="column" flexShrink={0}>
@@ -526,7 +555,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         <Box flexShrink={0}>
         <Text color={theme.accent}>❯ </Text>
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(draft.current); }}
-          reservedKeys={queueOpen && !pending ? ['d'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
+          reservedKeys={approvalKeysActive ? ['1','2','3'] : queueOpen && !pending ? ['d'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
           focus={state.online && !state.busy && !copyMode} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
         </Box>
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}

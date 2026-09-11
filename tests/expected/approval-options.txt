@@ -1,0 +1,6 @@
+Approval required
+1. Allow once
+2. Deny
+3. Stop turn
+↑ ↓ / 1–3 select · Enter confirm
+/allow approves once · /deny rejects · /cancel stops

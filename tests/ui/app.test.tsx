@@ -1165,6 +1165,88 @@ test('working input automatically steers, stays inside the composer, and can be 
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 3);
 });
 
+test('approval numbers and arrows require explicit selection and preserve command drafts', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  const results = () => fixture.calls.filter(call => call.method === '$events/result');
+  for (const [index, keys] of [['1'], ['\u001b[B', '\u001b[B']].entries()) {
+    fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: `numbered-${index}`, agentId: 's1', request: { toolName: 'bash', reason: 'Confirm operation' } });
+    await until(() => ui.lastFrame()?.includes('Approval required') === true);
+    const expected = await readFile(new URL('../expected/approval-options.txt', import.meta.url), 'utf8');
+    for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
+    await pressKey(ui, '\r');
+    assert.equal(results().length, index);
+    if (index === 0) {
+      await pressKey(ui, '/allow'); await pressKey(ui, '2');
+      assert.match(ui.lastFrame()!, /❯ \/allow2/);
+      await pressKey(ui, '\u0003');
+    }
+    for (const key of keys) await pressKey(ui, key);
+    assert.equal(results().length, index);
+    await pressKey(ui, '\r');
+    await until(() => controller.state.pending.length === 0 && !controller.state.busy);
+    const result = object(object(results().at(-1)!.payload).args);
+    assert.equal(object(result.outcome).value, index === 0 ? 'allowed-once' : 'rejected');
+  }
+  fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'stop-numbered', agentId: 's1', request: { description: 'Confirm stop' } });
+  await until(() => ui.lastFrame()?.includes('Confirm stop') === true);
+  await pressKey(ui, '3');
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+  await pressKey(ui, '\r');
+  await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
+  assert.equal(results().length, 2);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('approval selection starts unselected, clears on Escape and resets when the request returns', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  const results = () => fixture.calls.filter(call => call.method === '$events/result');
+  const cancellations = () => fixture.calls.filter(call => call.method === 'session/cancel').length;
+  const request = (eventId: string) => fixture.emit({ type: 'waterfall', event: 'approval/request', eventId, agentId: 's1', request: { toolName: 'bash' } });
+  // An upward arrow from the unselected state enters at the first choice, never at Stop turn.
+  request('arrow-up');
+  await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  await pressKey(ui, '\u001b[A');
+  assert.match(ui.lastFrame()!, /❯ 1\. Allow once/);
+  await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0);
+  const allowed = object(object(results().at(-1)!.payload).args);
+  assert.equal(object(allowed.outcome).value, 'allowed-once');
+  assert.equal(cancellations(), 0);
+  // Escape clears the highlight, so a later Enter neither answers nor cancels.
+  request('escape-clears');
+  await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  await pressKey(ui, '3');
+  assert.match(ui.lastFrame()!, /❯ 3\. Stop turn/);
+  await pressKey(ui, '\u001b');
+  assert.doesNotMatch(ui.lastFrame()!, /❯ [123]\./);
+  await pressKey(ui, '\r');
+  await until(() => !controller.state.busy);
+  assert.equal(results().length, 1);
+  assert.equal(cancellations(), 0);
+  // Answering clears the request; when the same identity returns it is unselected again.
+  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0);
+  const denied = object(object(results().at(-1)!.payload).args);
+  assert.equal(object(denied.outcome).value, 'rejected');
+  request('escape-clears');
+  await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /❯ [123]\./);
+  await pressKey(ui, '\r');
+  await until(() => !controller.state.busy);
+  assert.equal(results().length, 2);
+  assert.equal(cancellations(), 0);
+  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0);
+});
+
 test('questions and approvals take precedence over the pending-input picker', async t => {
   const fixture = await host(); t.after(() => fixture.close()); fixture.queuePrompts = true;
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
