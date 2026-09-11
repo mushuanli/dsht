@@ -2,7 +2,7 @@
 
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
-**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`f22352b`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
+**事实基线**：`tui/` 目录内容，模块化重构与后续改动的提交序列 `e3a921e`…`ca18658`（2026-09-11，见 7.8），`package.json` 版本 `0.3.0`。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md` 与 `tui/.agents/notes/implemented/` 读出，未使用其他来源。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 54 个模块（8 个业务域 + 共享契约），约 5,275 行；`tests/` 21 个测试文件；144 项测试 |
+| 源码规模 | `src/` 54 个模块（8 个业务域 + 共享契约），约 5,304 行；`tests/` 22 个测试文件；147 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -692,7 +692,7 @@ dsht [options] [list workspaces|list sessions]
 | `/export` | `[local.zip]` | 把会话日志 ZIP 保存为新文件 |
 | `/allow` | — | 一次性批准待答请求 |
 | `/deny` | — | 拒绝待答请求 |
-| `/status` | — | 展开完整状态详情 |
+| `/status` | — | 展开完整状态详情；窄屏按面板宽度换行，`PgUp`/`PgDn` 翻页 |
 | `/cost` | — | 显示费用估算并刷新用量 |
 | `/think` | `[seq or live]` | 查看带用户提示摘要的推理 |
 | `/help` | — | 列出全部命令 |
@@ -1213,7 +1213,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 21 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 144 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理。
+- 22 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 147 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1268,6 +1268,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `b634d4f` `docs: cite the wrapping benchmark in the live-wrap note` | Agent Note 引用已提交的基准数据并刷新配对哈希 | 配对哈希一致 |
 | `ec22b19` `docs: record the live-wrap benchmark commits in the design baseline` | 事实基线与 7.8 记录增量换行的提交序列 | 文档改动 |
 | `f22352b` `fix: keep one fixed ledger file per session` | 账本文件名固定为 `<sha256(sessionId)>.json`、cut 移入内容、写入前比较、加载时清理旧代数与旧命名残片 | typecheck + 144 项测试 + `test:terminal`；现网目录 49→46 文件、3.10→2.14 MB，切片逐字节不变 |
+| `8a3f15b` `docs: record the fixed ledger file name in the design` | 5.2.3 记录固定文件名、写入前比较与加载清理；附录 A 复核 cost 域行数 | 14 个 Mermaid 块解析通过；附录合计 5,275 行与源码一致 |
+| `ca18658` `fix: wrap and page the expanded status panel` | 明细行先按面板内容宽度硬换行，再按 `rows - 9` 的预算用 `PgUp`/`PgDn` 分页；页脚自身高度参与预算 | typecheck + 147 项测试 + `test:terminal`；新增 `tests/support/tty.ts` |
 
 `npm run test:package` 在重构后的最终状态运行并通过；提交信息使用 Conventional 前缀，正文记录范围与不变量。
 
@@ -1275,7 +1277,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 54 个模块、5,275 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 54 个模块、5,304 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1314,7 +1316,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 573 | `App` |
+| `ui/app.tsx` | 580 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
@@ -1326,7 +1328,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 15 | `HistoryViewport` |
-| `ui/chat/status.tsx` | 173 | `StatusBar`、`elapsedTime`、`metricLines`、`compactStatus` |
+| `ui/chat/status.tsx` | 195 | `StatusBar`、`elapsedTime`、`metricLines`、`compactStatus` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
 | `ui/input/history.ts` | 38 | `InputHistory` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
