@@ -416,6 +416,38 @@ test('mouse scrolling loads history and slash search selects a matching record',
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
 });
 
+test('a new message draft returns the view to the live end, but a slash command does not', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const records = Array.from({ length: 40 }, (_, index) => ({
+    type: 'event', event: { seq: index, type: 'user/message', surfaceOp: 'append',
+      data: { content: [{ type: 'text', text: `history-record-${index}` }] } },
+  }));
+  fixture.followSnapshot = { type: 'snapshot', cursor: 39, hasMore: false, header: { id: 's1' }, records };
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => ui.lastFrame()?.includes('history-record-39') === true);
+  await pressKey(ui, '\u001b[<64;3;4M');
+  await until(() => ui.lastFrame()?.includes('history-record-39') === false);
+  // A slash command is not a message, so typing one keeps the reader where they are.
+  await pressKey(ui, '/');
+  assert.equal(ui.lastFrame()?.includes('history-record-39'), false);
+  await pressKey(ui, '\u0003');
+  await until(() => ui.lastFrame()?.includes('❯ Message, @host-file, or /help') === true);
+  // Starting a message returns to the live end with the draft intact.
+  await pressKey(ui, 'h');
+  await until(() => ui.lastFrame()?.includes('history-record-39') === true);
+  assert.match(ui.lastFrame()!, /❯ h/);
+  // Once the draft exists, a reader who scrolls away keeps their place while editing it.
+  await pressKey(ui, '\u001b[<64;3;4M');
+  await until(() => ui.lastFrame()?.includes('history-record-39') === false);
+  await pressKey(ui, 'i');
+  assert.equal(ui.lastFrame()?.includes('history-record-39'), false);
+  assert.match(ui.lastFrame()!, /❯ hi/);
+  await pressKey(ui, '\u0003');
+});
+
 test('search loads old messages, opens cross-session matches and cancels local paging', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 10, hasMore: true, header: { id: 's1' }, records: [

@@ -53,6 +53,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Input callbacks may run before Ink refreshes the controlled field's listener.
   const setInput = (value: string, recalled = false) => {
     if (!recalled) inputHistory.current.reset();
+    // A new message draft returns the view to the live end, so composing never needs a scroll first.
+    // A slash command is not a message, and the reader keeps their place while typing one.
+    if (state.screen === 'chat' && draft.current === '' && value !== '' && !value.startsWith('/')) setScroll(0);
     draft.current = value; updateInput(value); setCursor(value.length);
   };
   const [historyWindow, setHistoryWindow] = useState<Transcript>();
