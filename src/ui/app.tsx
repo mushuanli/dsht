@@ -20,7 +20,7 @@ import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, QueueDialog, Queue
 import { COMMAND_HINTS, completeCommand as completeDraft, suggestedCommands } from './commands/registry.ts';
 import { classifySubmission } from './commands/parse.ts';
 import { Controller, type HistorySearch, type RemovalTarget } from '../controller/controller.ts';
-import { sessionLabel } from '../session/navigation.ts';
+import { sessionLabel, sessionStatus, workspaceStatus } from '../session/navigation.ts';
 import { array, errorText, object, safeText, string, type ObjectValue } from '../transport/wire.ts';
 
 /** Transient notices expire; interactive panels remain open until dismissed. */
@@ -388,9 +388,15 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (accepted) setInput('');
   };
 
+  // Session activity is a list-level fact, so both pickers read it without loading any history.
+  const listAge = Date.now();
+  const sessionsOf = (workspace: ObjectValue): ObjectValue[] => {
+    const ids = new Set(array(workspace.sessionIds).map(string));
+    return state.sessions.filter(session => ids.has(string(session.sessionId)));
+  };
   const choices: Choice[] = state.screen === 'workspaces' ? [
     ...state.workspaces.map(workspace => ({ key: string(workspace.workspaceId),
-      label: `${string(workspace.title)}  ${string(workspace.path)}`,
+      label: `${[workspaceStatus(sessionsOf(workspace)), string(workspace.title), string(workspace.path)].filter(Boolean).join('  ')}`,
       remove: () => setRemoval({ kind: 'workspace', id: string(workspace.workspaceId), name: string(workspace.title), path: string(workspace.path) }),
       action: () => controller.pickWorkspace(string(workspace.workspaceId)) })),
     { key: '@all', label: 'All sessions', action: () => operate(() => controller.switchSession('all')) },
@@ -398,7 +404,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   ] : [
     ...(state.workspaceId && !state.showAllSessions ? [{ key: '@new', label: '+ New session', action: () => operate(() => controller.createSession()) }] : []),
     ...controller.visibleSessions.map(session => ({ key: string(session.sessionId),
-      label: `${session.running ? '● ' : ''}${sessionLabel(session)}  ${session.sessionId}`,
+      label: `${sessionStatus(session, listAge)} ${sessionLabel(session)}  ${session.sessionId}`,
       remove: () => operate(() => requestRemoval('session', string(session.sessionId))),
       action: () => { setScroll(0); operate(() => controller.selectSession(string(session.sessionId))); } })),
     { key: '@back', label: '← Workspaces', action: () => operate(() => controller.showPicker('workspaces')) },

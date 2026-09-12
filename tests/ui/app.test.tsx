@@ -76,7 +76,7 @@ test('startup requires workspace and session selection before showing the compos
   await press('\r');
   await until(() => ui.lastFrame()?.includes('Choose session') === true);
   await press('\u001b[B');
-  await until(() => ui.lastFrame()?.includes('❯ First conversation') === true);
+  await until(() => ui.lastFrame()?.includes('❯ ● First conversation') === true);
   await press('\r');
   await until(() => ui.lastFrame()?.includes('你好') === true);
   assert.equal(controller.state.sessionId, 's1');
@@ -730,6 +730,29 @@ test('an idle bar re-reads the clock so the day subtotal rolls over at midnight'
   await new Promise(resolve => setImmediate(resolve));
   // The calendar day moved with nothing else happening, so only today's figure changes.
   assert.match(ui.lastFrame()!, /flash · ¥: 0\.00 \(1\.00\)/, ui.lastFrame());
+});
+
+test('the pickers show each session state and a workspace rollup from the list summary', async t => {
+  const controller = new Controller('http://x1:4096', undefined);
+  const now = Date.now();
+  controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
+    workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2', 's3'] }],
+    sessions: [
+      { sessionId: 's1', updatedAt: now - 5 * 60_000, projections: { values: { title: 'Idle one' } } },
+      { sessionId: 's2', running: true, updatedAt: now - 2 * 60_000, projections: { values: { title: 'Running one' } } },
+      { sessionId: 's3', blank: true, projections: { values: { title: 'Blank one' } } },
+    ] };
+  let ui!: ReturnType<typeof render>;
+  await act(async () => { ui = render(<App controller={controller} />); });
+  t.after(() => { ui.unmount(); ui.cleanup(); });
+  // The workspace row rolls its sessions up by state, running first.
+  assert.match(ui.lastFrame()!, /◐ 1  ● 1  ○ 1  Project α  \/host\/project/, ui.lastFrame());
+  controller.state = { ...controller.state, screen: 'sessions', workspaceId: 'w1', showAllSessions: false };
+  await act(async () => { ui.rerender(<App controller={controller} />); });
+  const frame = ui.lastFrame()!;
+  assert.match(frame, /◐ 2m Running one  s2/, frame);
+  assert.match(frame, /● 5m Idle one  s1/, frame);
+  assert.match(frame, /○ Blank one  s3/, frame);
 });
 
 test('Tab completes a slash command and stops at an ambiguous shared prefix', async t => {
