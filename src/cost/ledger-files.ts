@@ -1,7 +1,7 @@
 /** Atomic per-session persistence for the immutable charge ledger. */
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { ensureDirectory, listEntries, readText, removeFile, writePrivateFile } from '../storage/index.ts';
+import { ensureDirectory, listEntries, readText, removeFile, renameFile, writePrivateFile } from '../storage/index.ts';
 import type { Charge, SavedCost } from './types.ts';
 
 /** Current on-disk ledger generation. Files of another generation are ignored, not migrated. */
@@ -17,16 +17,18 @@ function ledgerName(sessionId: string): string {
 
 /** Load every session's newest cut, leaving one fixed file per session.
  *
- * A file of another generation, a file with an unreadable shape, and a cut file superseded by the
- * newer name all describe work the next scan rebuilds, so loading removes them; the newest slice
- * of a superseded name is rewritten under the fixed one first. Files this unit does not own are
- * left where they are.
+ * A cut file superseded by the newer fixed name is rewritten under that name and the copy is
+ * removed, which preserves its decisions. A file this build cannot read is set aside under a
+ * `.unreadable` name and counted, never deleted: it holds sealed amounts the host log alone cannot
+ * reproduce, so removing it would silently re-price them under today's table while destroying the
+ * only copy of what was recorded. Files this unit does not own are left where they are.
  * @param directory - Origin-scoped ledger directory, or undefined when persistence is disabled.
- * @returns The newest saved slice per session identity.
+ * @returns The newest saved slice per session identity, and how many files could not be read.
  */
-export async function loadLedgers(directory: string | undefined): Promise<Map<string, SavedCost>> {
+export async function loadLedgers(directory: string | undefined): Promise<{ sessions: Map<string, SavedCost>; unreadable: number }> {
   const sessions = new Map<string, SavedCost>();
-  if (!directory) return sessions;
+  const unreadable: string[] = [];
+  if (!directory) return { sessions, unreadable: 0 };
   await ensureDirectory(directory);
   const superseded: { path: string; sessionId: string }[] = [];
   for (const name of await listEntries(directory)) {
@@ -36,7 +38,14 @@ export async function loadLedgers(directory: string | undefined): Promise<Map<st
     // A file removed between listing and reading is simply absent.
     if (raw === undefined) continue;
     const saved = parseLedger(raw);
-    if (saved === undefined) { await removeFile(path); continue; }
+    // A file this build cannot read is kept: it holds sealed amounts that the host log alone cannot
+    // reproduce, so deleting it would silently re-price them under today's table. The count is
+    // reported instead, and the next scan of that session only adds decisions it does not have.
+    if (saved === undefined) {
+      unreadable.push(name);
+      await renameFile(path, `${path}.unreadable`);
+      continue;
+    }
     if ((sessions.get(saved.sessionId)?.cut ?? -2) <= saved.cut) sessions.set(saved.sessionId, saved);
     if (name !== ledgerName(saved.sessionId)) superseded.push({ path, sessionId: saved.sessionId });
   }
@@ -44,7 +53,7 @@ export async function loadLedgers(directory: string | undefined): Promise<Map<st
     await writePrivateFile(join(directory, ledgerName(sessionId)), JSON.stringify(sessions.get(sessionId)) + '\n');
     await removeFile(path);
   }
-  return sessions;
+  return { sessions, unreadable: unreadable.length };
 }
 
 /** Write one session cut unless the directory already holds a newer one.
@@ -96,7 +105,9 @@ function validCharge(value: unknown): boolean {
   if (c.priceId !== undefined && typeof c.priceId !== 'string') return false;
   if (c.reason !== undefined && typeof c.reason !== 'string') return false;
   if (c.amount !== undefined && (typeof c.amount !== 'number' || !Number.isFinite(c.amount) || c.amount < 0)) return false;
-  if (c.estimated !== undefined && c.estimated !== true) return false;
+  if (c.matchedBy !== undefined && c.matchedBy !== 'exact' && c.matchedBy !== 'alias') return false;
+  if (c.engine !== undefined && (!Number.isSafeInteger(c.engine) || (c.engine as number) < 1)) return false;
+  if (c.catalog !== undefined && (typeof c.catalog !== 'string' || !/^[0-9a-f]{12}$/.test(c.catalog))) return false;
   if (c.time !== undefined && (typeof c.time !== 'number' || !Number.isFinite(c.time) || c.time < 0 || c.time > 8.64e15)) return false;
   if (c.usage !== undefined) {
     if (typeof c.usage !== 'object' || c.usage === null || Array.isArray(c.usage)) return false;

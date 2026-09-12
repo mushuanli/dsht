@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,239 行；`tests/` 26 个测试文件；176 项测试 |
+| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,349 行；`tests/` 26 个测试文件；181 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -1043,6 +1043,9 @@ C4Component
 - **写入**（`CostLedger.replace`）：若内存中已有 `cut >=` 新值则整次跳过；否则先读现有文件，仅当其中记录的 `cut` 不高于待写值时才落盘——先写 `<uuid>.tmp`（`wx`，0600）再 `rename`——并由 `saveLedger` 返回是否写入。未写入时 `replace` 不改动内存切片，使内存与磁盘停在同一切片上。
 - **读取**（`CostLedger.load`）：启动时枚举目录内 `*.json`，逐字段校验 `key`/`provider`/`model`/`usage`/`time`/`amount`/`estimated`/`reason`/`priceId`；同一会话保留 `cut` 最大者（两种命名一起比较），`ENOENT` 跳过。代数不是 2 的文件、内容读不出的文件、以及旧命名下已被取代的文件都属于"下一次扫描会重建"的残片，加载时删除；旧命名里最新的一份先按固定名字重写再删除。不属于本单元的文件名不动。
 - **固化规则**：`priceId` 与 `amount` 是首次计价时写下的决定。后续扫描重放同样的样本时直接复用该决定；只有 `reason === 'missing usage'` 的样本保持开放，等待宿主报告 token。已计价、已估算与未计价的其余情况一律终局。`CostLedger.reprice()`（`--reprice`）是唯一的例外：它依据每笔账保存的样本按当前价目表重新决定，用于修正错误价目表下封存的金额。
+- **模型→费率匹配**：`priceAt` 先按 `canonicalModel()`（NFKC + CJK 句号映射 + 去空白 + 小写）精确匹配 `provider + model`，再匹配版本声明的 `aliases`（尾部 `*` 为前缀），**未声明即 `no price version`**，不再按名字子串猜家族。每条金额同时记录 `matchedBy`（`exact`/`alias`）、`engine`（`PRICING_ENGINE_VERSION`）与 `catalog`（该价格版本的 12 位摘要），因此改表改费率而不改 id 也能被审计分辨。
+- **状态机**：只有已定价的金额终局；`missing usage`／`missing time`／`unsupported usage`／`no price version`／`invalid estimate` 都会在后续扫描中重算，因此表覆盖或修正后能自动定价，`--reprice` 仍是移动已记录金额的唯一途径。
+- **已删除**：`lowestPrice()` 与 `estimated`（无结算时间不再取下限估值，改记 `missing time`，`Σ 每日 = 总计`）；`cacheWrite` 对 `deepseek-official` 非零时记 `unsupported usage`；`compaction/summary` 计入 `BILLING_EVENTS`；无法解析的账本文件移到 `<name>.unreadable` 保留而不是删除。
 - **价目表来源**：`loadPrices` 在 `prices.json` 缺失时用随包 `DEFAULT_PRICES` 种下并写下 `prices.seed.json`（版本 + 内容摘要）。文件仍与该摘要一致时视为工具所有，会用当前随包表重写（因此费率修正能触达旧安装）；一旦内容被编辑，文件即为权威、永不覆盖，`/cost` 会标明「Rates come from prices.json, not the shipped table」。没有戳记的旧文件仅在与被取代的种子完全一致时被替换。
 - **内存镜像**：`sessions: Map<sessionId, SavedCost>` 是读取路径的实际数据源，`totals: Map<cacheKey, CostTotal>` 在每次 `replace` 时清空并惰性重建；`CostController` 另外在内存中记录 `(sessionId, updatedAt)` 以跳过未变化的空闲会话。磁盘只用于跨进程存活，不参与每次查询。
 - **访问事件流**：`CostController.refresh` 以 `session/list` 枚举会话，经 `scanner.sessionCostHistory` 用 `session/follow` 取 snapshot 与 `cursor`、用 `session/page` 逐页向更早回退，最后由 `ledger.replace` 落盘。跳过标记只存在内存中，因此每次重启都会重新读取全部会话，但只为其后新出现的请求决定金额。
@@ -1298,12 +1301,12 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 58 个模块、6,239 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 58 个模块、6,349 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `index.ts`（公开门面） | 3 | `Client`、`HttpError`、`RemoteError`、`Subscription` |
-| `storage/files.ts` | 102 | `readText`、`readPrivateFile`、`writePrivateFile`、`appendPrivateFile`、`createPrivateFile`、`writeExclusiveStream`、`removeFile` |
+| `storage/files.ts` | 114 | `readText`、`readPrivateFile`、`writePrivateFile`、`appendPrivateFile`、`createPrivateFile`、`writeExclusiveStream`、`removeFile` |
 | `storage/directories.ts` | 27 | `ensureDirectory`、`ensurePrivateDirectory`、`listEntries` |
 | `storage/index.ts` | 3 | 域 barrel |
 | `state.ts`（共享契约） | 48 | `State`、`ControllerStore`、`initialState` |
@@ -1326,14 +1329,14 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/math.ts` | 67 | `renderMath` |
 | `session/export-html.ts` | 42 | `saveTranscriptHtml` |
 | `session/index.ts` | 17 | 域 barrel |
-| `cost/pricing.ts` | 167 | `DEFAULT_PRICES`、`PRICES_REVISION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`lowestPrice`、`chargeFor`、`costDay` |
+| `cost/pricing.ts` | 219 | `DEFAULT_PRICES`、`PRICES_REVISION`、`PRICING_ENGINE_VERSION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`candidates`、`canonicalModel`、`catalogDigest`、`chargeFor`、`costDay` |
 | `cost/config.ts` | 69 | `loadPrices`（种子、戳记与迁移） |
-| `cost/records.ts` | 62 | `costRecords`、`foldSamples` |
-| `cost/ledger-files.ts` | 107 | `loadLedgers`、`saveLedger` |
-| `cost/ledger.ts` | 159 | `CostLedger`、`costText` |
+| `cost/records.ts` | 75 | `costRecords`、`foldSamples` |
+| `cost/ledger-files.ts` | 118 | `loadLedgers`、`saveLedger` |
+| `cost/ledger.ts` | 164 | `CostLedger`、`costText` |
 | `cost/scanner.ts` | 77 | `costAddresses`、`sessionCostHistory` |
 | `cost/controller.ts` | 95 | `CostController`、`CostHost` |
-| `cost/types.ts` | 38 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
+| `cost/types.ts` | 54 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
 | `cost/index.ts` | 10 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
@@ -1349,7 +1352,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/commands/parse.ts` | 131 | `Submission`、`SubmissionContext`、`classifySubmission` |
 | `ui/dialogs/picker.tsx` | 42 | `Picker`、`Choice` |
 | `ui/dialogs/index.tsx` | 189 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
-| `ui/dialogs/cost.tsx` | 33 | `CostPanel` |
+| `ui/dialogs/cost.tsx` | 34 | `CostPanel` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 21 | `HistoryViewport` |

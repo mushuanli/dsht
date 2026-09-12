@@ -2,20 +2,32 @@
 import { array, object, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { ChargeSample, Usage } from './types.ts';
 
-/** Host event types that carry billing-relevant usage or route context. */
-const BILLING_EVENTS = new Set(['request/context', 'assistant/message', 'assistant/attempt', 'llm/retry-started', 'session/end-seed']);
+/** Host event types that carry billing-relevant usage or route context.
+ *
+ * `compaction/summary` is a provider request like any other — it reads the whole context to write the
+ * summary — and it records its own provider, model and usage instead of appearing as an assistant
+ * message, so a fold without it under-reports the most expensive requests in a session.
+ */
+const BILLING_EVENTS = new Set(['request/context', 'assistant/message', 'assistant/attempt', 'llm/retry-started', 'session/end-seed', 'compaction/summary']);
 
 /** Keep only billing-relevant fields; prompts, tool bodies, cookies and keys never enter the ledger.
  * @param records - One HTTP history page's records.
  * @returns Minimal durable events for a deterministic usage fold.
  */
 export function costRecords(records: unknown): ObjectValue[] {
-  return array(records).map(raw => object(object(raw).event)).filter(e => BILLING_EVENTS.has(String(e.type))).map(e => {
+  return array(records).map(raw => object(object(raw).event)).filter(e => BILLING_EVENTS.has(String(e.type)))
+    // A summary written without a model call — an unmarked template or remote summarizer — has no
+    // usage and no cost, so it is not a billable sample at all.
+    .filter(e => e.type !== 'compaction/summary' || object(e.data).usage !== undefined).map(e => {
     const d = object(e.data); const m = object(d.message ?? {});
     const stream = array(d.stream ?? []).map(r => object(object(r).chunk ?? {})).filter(c => c.type === 'usage');
+    // A summary names its own provider and model, and carries no turn or step to fold against, so
+    // its route travels as the source a message would carry rather than as folded context.
+    const source = e.type === 'compaction/summary' ? { provider: d.provider ?? null, model: d.model ?? null } : m.source ?? null;
     return { seq: e.seq ?? null, time: e.time ?? null, type: e.type!, data: {
-      inherited: d.inherited ?? false, turn: d.turn ?? null, step: d.step ?? null, provider: d.provider ?? null, model: d.model ?? null,
-      source: m.source ?? null, usage: d.usage ?? stream.at(-1)?.usage ?? null,
+      inherited: d.inherited ?? false, turn: d.turn ?? null, step: d.step ?? null,
+      provider: d.provider ?? null, model: d.model ?? null,
+      source, usage: d.usage ?? stream.at(-1)?.usage ?? null,
     } };
   });
 }
@@ -41,6 +53,7 @@ export function foldSamples(events: readonly ObjectValue[]): ChargeSample[] {
       if (last?.turn === d.turn && last?.step === d.step) last = undefined;
       continue;
     }
+    // A message or summary carries its own route; only the remaining events inherit the folded one.
     const source = object(d.source ?? {}); const provider = String(source.provider ?? route.provider ?? ''); const model = String(source.model ?? route.model ?? '');
     const time = typeof e.time === 'number' && Number.isFinite(e.time) && e.time >= 0 && e.time <= 8.64e15 ? e.time : undefined;
     const usage = validUsage(d.usage);

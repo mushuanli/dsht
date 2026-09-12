@@ -5,18 +5,19 @@ import { foldSamples } from './records.ts';
 import { loadLedgers, saveLedger } from './ledger-files.ts';
 import { MISSING_USAGE, type Charge, type ChargeSample, type CostTotal, type Coverage, type PriceVersion, type SavedCost } from './types.ts';
 
-/** Whether a charge already carries a decision that a later scan must keep. */
-function sealed(charge: Charge): boolean {
-  return charge.amount !== undefined || (charge.reason !== undefined && charge.reason !== MISSING_USAGE);
-}
-
-/** Attach the current table's decision, or reuse the decision an earlier scan recorded.
+/** Attach the current decision for a sample, or keep the amount an earlier scan sealed.
  *
- * A sample without usage has not finished reporting tokens, so it stays open for the next scan;
- * every other decision — priced, unpriced, or estimated — is final.
+ * Only an amount is final: a request that was unpriced stays open, so a table that later covers its
+ * model — or a corrected table — prices it without a reprice, and a request that had not reported
+ * tokens yet is priced when it does. The recorded rates travel with the amount, so re-deciding an
+ * unpriced request cannot move a sealed one.
+ * @param prices - Price table loaded now.
+ * @param sample - Sample folded from the host history.
+ * @param previous - Decision an earlier scan recorded for the same sample, when there was one.
+ * @returns The sealed amount, or a fresh decision.
  */
 function decide(prices: PriceVersion[], sample: ChargeSample, previous: Charge | undefined): Charge {
-  if (previous !== undefined && (sealed(previous) || sample.usage === undefined)) return previous;
+  if (previous?.amount !== undefined) return previous;
   return { ...sample, ...chargeFor(prices, sample.provider, sample.model, sample.time, sample.usage) };
 }
 
@@ -27,6 +28,8 @@ export class CostLedger {
   scannedAt?: number;
   scanning = false;
   error = '';
+  /** Ledger files kept but not read, so a panel can say that recorded amounts were left in place. */
+  unreadableFiles = 0;
   /** Work the last completed scan performed, so a memory sample can attribute its allocation. */
   lastScan?: { sessions: number; pages: number; events: number };
   constructor(readonly prices: PriceVersion[] = DEFAULT_PRICES, readonly directory?: string,
@@ -45,7 +48,9 @@ export class CostLedger {
   /** Load the newest complete cut per session; recorded amounts load without re-pricing. */
   async load(): Promise<void> {
     this.totals.clear();
-    for (const [sessionId, saved] of await loadLedgers(this.directory)) {
+    const loaded = await loadLedgers(this.directory);
+    this.unreadableFiles = loaded.unreadable;
+    for (const [sessionId, saved] of loaded.sessions) {
       if ((this.sessions.get(sessionId)?.cut ?? -2) <= saved.cut) this.sessions.set(sessionId, saved);
     }
   }
@@ -124,17 +129,19 @@ export class CostLedger {
   }
 
   /** Summarize recorded requests across one session or Beijing calendar days.
+   *
+   * Every amount is attributed to the Beijing calendar day of its settlement time, so a dated range
+   * adds exactly the records it contains and the day subtotals always add up to the lifetime total.
    * @param sessionId - Optional session restriction.
    * @param days - Today or today plus the preceding two calendar days.
    * @param now - Clock used for date attribution.
-   * @returns Known subtotal, unpriceable count, and estimated count; an estimated record always
-   *   names an amount, but a dated range only adds the records it can place inside that range.
+   * @returns Known subtotal, unpriceable count, and how many requests the range covers.
    */
   total(sessionId?: string, days?: 1 | 3, now = Date.now()): CostTotal {
     const cacheKey = JSON.stringify([sessionId, days, days ? costDay(now) : '']);
     const cached = this.totals.get(cacheKey);
     if (cached) return cached;
-    const result: CostTotal = { amount: 0, unknown: 0, estimated: 0, records: 0 };
+    const result: CostTotal = { amount: 0, unknown: 0, records: 0 };
     const end = costDay(now); const start = costDay(now - ((days ?? 1) - 1) * 86400_000);
     for (const session of this.sessions.values()) {
       if (sessionId !== undefined && session.sessionId !== sessionId) continue;
@@ -142,9 +149,7 @@ export class CostLedger {
         if (days && charge.time !== undefined && (costDay(charge.time) < start || costDay(charge.time) > end)) continue;
         result.records++;
         if (charge.amount === undefined) { result.unknown++; continue; }
-        const dated = days === undefined || charge.time !== undefined;
-        if (charge.estimated === true || !dated) result.estimated++;
-        if (dated) result.amount += charge.amount;
+        if (days === undefined || charge.time !== undefined) result.amount += charge.amount;
       }
     }
     this.totals.set(cacheKey, result);
@@ -156,4 +161,4 @@ export class CostLedger {
  * @param total - Summary from the ledger.
  * @returns Yuan amount and incompleteness marker.
  */
-export function costText(total: CostTotal): string { return `~¥${total.amount.toFixed(4)}${total.unknown || total.estimated ? '*' : ''}`; }
+export function costText(total: CostTotal): string { return `~¥${total.amount.toFixed(4)}${total.unknown ? '*' : ''}`; }

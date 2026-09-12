@@ -1,6 +1,7 @@
 /** Versioned CNY price tables and the price decision taken for one request sample. */
+import { createHash } from 'node:crypto';
 import { object } from '../transport/wire.ts';
-import { MISSING_USAGE, type PriceDecision, type PriceVersion, type Rates, type Usage } from './types.ts';
+import { MISSING_TIME, MISSING_USAGE, UNSUPPORTED_USAGE, type PriceDecision, type PriceVersion, type Rates, type Usage } from './types.ts';
 
 const clocks = new Map<string, Intl.DateTimeFormat>();
 
@@ -14,15 +15,29 @@ const FLASH_RATES = { peak: { input: 2, cacheRead: 0.04, cacheWrite: 2, output: 
 const PRO_RATES = { peak: { input: 9, cacheRead: 0.3, cacheWrite: 9, output: 27 },
   offPeak: { input: 4.5, cacheRead: 0.15, cacheWrite: 4.5, output: 13.5 } };
 export const DEFAULT_PRICES: PriceVersion[] = [
+  // The published table states that superseded Flash names stay callable and are served by
+  // V4.1-Flash at Flash rates, so every name the host can report is listed instead of guessed at.
   { id: 'deepseek-2026-09-10-flash', provider: 'deepseek-official', model: 'deepseek-flash',
+    aliases: ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-flash*', 'deepseek-v4.1-flash*', 'deepseek-v4.1-flash'],
     from: '2026-09-10T00:00:00+08:00', currency: 'CNY', source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai',
     ...PEAK_SCHEDULE, ...FLASH_RATES },
   // The published table keeps V4 Pro available after 2026-09-14 at these rates, so the interval
   // stays open until a later page names an end.
   { id: 'deepseek-2026-09-10-pro', provider: 'deepseek-official', model: 'deepseek-v4-pro',
+    // No `deepseek-pro*`: a prefix that broad would also claim `deepseek-proxy-*` or `deepseek-prompt-*`.
+    aliases: ['deepseek-v4-pro', 'deepseek-v4-pro*', 'deepseek-v4.1-pro*'],
     from: '2026-09-10T00:00:00+08:00', currency: 'CNY', source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai',
     ...PEAK_SCHEDULE, ...PRO_RATES },
 ];
+
+/** Revision of the pricing decision rules, recorded with every amount they decided.
+ *
+ * Bump it whenever the rules change what an amount would be — the matching of a model name, the
+ * token buckets an amount covers, or the timestamp it is priced at — so a recorded amount can be
+ * traced to the rules that produced it. Version 1 matched a model by the substring `pro` and
+ * priced a request with no settlement time at the cheapest off-peak rate.
+ */
+export const PRICING_ENGINE_VERSION = 2;
 
 /** Revision of the shipped table, recorded beside a seeded file so a correction can replace it. */
 export const PRICES_REVISION = '2026-09-12';
@@ -75,6 +90,7 @@ export function pricesFrom(value: unknown): PriceVersion[] {
     const p = object(raw);
     for (const key of ['id', 'provider', 'model', 'source', 'timezone', 'from']) if (typeof p[key] !== 'string' || !p[key]) throw new Error(`Invalid price ${key}`);
     if (ids.has(String(p.id))) throw new Error('Duplicate price id'); ids.add(String(p.id));
+    if (p.aliases !== undefined && (!Array.isArray(p.aliases) || p.aliases.some(alias => typeof alias !== 'string' || alias === ''))) throw new Error('Invalid price aliases');
     const from = Date.parse(String(p.from)); const until = p.until === undefined ? Infinity : Date.parse(String(p.until));
     if (!Number.isFinite(from) || !(until > from) || p.currency !== 'CNY') throw new Error('Invalid price interval or currency');
     new Intl.DateTimeFormat('en', { timeZone: String(p.timezone) }).format();
@@ -99,49 +115,76 @@ export function pricesFrom(value: unknown): PriceVersion[] {
  */
 export function costDay(time: number): string { return new Date(time + 8 * 3600_000).toISOString().slice(0, 10); }
 
-/** Price family used when a recorded model name has no exact entry. */
-function priceFamily(model: string): string { return model.toLowerCase().includes('pro') ? 'deepseek-v4-pro' : 'deepseek-flash'; }
+/** Canonical form of a model name before matching.
+ *
+ * The host reports names that differ from the published table by width, case, surrounding space, or
+ * the CJK full stop a display path can substitute for a period. Normalizing here keeps the table
+ * readable and keeps a name variant from silently missing its entry. NFKC does not fold the CJK
+ * stops, so they are mapped explicitly.
+ * @param model - Model name exactly as the recorded request reported it.
+ * @returns The name in the form the table is matched against.
+ */
+export function canonicalModel(model: string): string {
+  return model.normalize('NFKC').replace(/[\u3002\uff0e\uff61]/g, '.').trim().toLowerCase();
+}
 
-/** Candidate versions for one request: its exact model first, then the official model family. */
-function candidates(prices: PriceVersion[], provider: string, model: string): PriceVersion[] {
-  const exact = prices.filter(p => p.provider === provider && p.model === model);
-  if (exact.length) return exact;
-  return provider === 'deepseek-official' ? prices.filter(p => p.model === priceFamily(model)) : [];
+/** Whether an alias matches a canonical model name, treating a trailing `*` as a prefix.
+ * @param alias - Alias declared by a price version.
+ * @param model - Canonical model name.
+ * @returns True when the alias covers the name.
+ */
+function aliasMatches(alias: string, model: string): boolean {
+  const canonical = canonicalModel(alias);
+  return canonical.endsWith('*') ? model.startsWith(canonical.slice(0, -1)) : model === canonical;
+}
+
+/** Candidate versions for one request, in the order the table is searched: the exact model, then
+ * the aliases a version declares. A name the table does not cover stays unpriced rather than
+ * falling back to a family guess, because guessing a rate is indistinguishable from a wrong one.
+ * @param prices - Validated versions.
+ * @param provider - Provider identity from the recorded request.
+ * @param model - Recorded model name.
+ * @returns Matching versions, each with the rule that matched it.
+ */
+export function candidates(prices: PriceVersion[], provider: string, model: string): { price: PriceVersion; matchedBy: 'exact' | 'alias' }[] {
+  const canonical = canonicalModel(model);
+  const exact = prices.filter(p => p.provider === provider && canonicalModel(p.model) === canonical);
+  if (exact.length) return exact.map(price => ({ price, matchedBy: 'exact' as const }));
+  return prices.filter(p => p.provider === provider && (p.aliases ?? []).some(alias => aliasMatches(alias, canonical)))
+    .map(price => ({ price, matchedBy: 'alias' as const }));
+}
+
+/** Stable identity of the rates that decided one charge.
+ *
+ * The identity a price version carries can be edited in place while keeping its `id` — which is how
+ * a corrected table once kept charging superseded rates under one id — so the decision records a
+ * digest of the version itself, not only its name.
+ * @param price - Price version an amount was decided from.
+ * @returns Short digest of that version.
+ */
+export function catalogDigest(price: PriceVersion): string {
+  return createHash('sha256').update(JSON.stringify(price)).digest('hex').slice(0, 12);
 }
 
 /** Select a price by event time, applying half-open local peak windows.
  * @param prices - Validated versions.
  * @param provider - Provider identity from the recorded request.
- * @param model - Recorded model name; official DeepSeek aliases fall back to Pro when containing pro, otherwise Flash.
- * @param time - Recorded settlement timestamp used as a billing-time estimate.
- * @returns Matching price version and per-million-token rates, if known.
+ * @param model - Recorded model name.
+ * @param time - Recorded settlement timestamp used as the billing instant.
+ * @returns Matching price version, the rule that matched it, and its per-million-token rates.
  */
-export function priceAt(prices: PriceVersion[], provider: string, model: string, time: number): { price: PriceVersion; rates: Rates } | undefined {
-  const price = candidates(prices, provider, model).find(p => Date.parse(p.from) <= time && (p.until === undefined || time < Date.parse(p.until)));
-  if (!price) return;
+export function priceAt(prices: PriceVersion[], provider: string, model: string, time: number): { price: PriceVersion; rates: Rates; matchedBy: 'exact' | 'alias' } | undefined {
+  const candidate = candidates(prices, provider, model)
+    .find(({ price }) => Date.parse(price.from) <= time && (price.until === undefined || time < Date.parse(price.until)));
+  if (candidate === undefined) return;
+  const { price, matchedBy } = candidate;
   let clock = clocks.get(price.timezone);
   if (!clock) { clock = new Intl.DateTimeFormat('en-US', { timeZone: price.timezone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); clocks.set(price.timezone, clock); }
   const parts = clock.formatToParts(time);
   const part = (name: string) => parts.find(p => p.type === name)!.value;
   const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(part('weekday'));
   const minute = Number(part('hour')) * 60 + Number(part('minute'));
-  return { price, rates: price.weekdays.includes(day) && price.windows.some(([a, b]) => minute >= a && minute < b) ? price.peak : price.offPeak };
-}
-
-/** Select a rate without a settlement time, so an unattributable request still enters the total.
- * The cheapest candidate off-peak rate is a floor: it never overstates, and the charge stays
- * marked as estimated.
- * @param prices - Validated versions.
- * @param provider - Provider identity from the recorded request.
- * @param model - Recorded model name.
- * @returns The candidate version with the lowest off-peak input rate and its rates, if any.
- */
-export function lowestPrice(prices: PriceVersion[], provider: string, model: string): { price: PriceVersion; rates: Rates } | undefined {
-  let best: { price: PriceVersion; rates: Rates } | undefined;
-  for (const price of candidates(prices, provider, model)) {
-    if (best === undefined || price.offPeak.input < best.rates.input) best = { price, rates: price.offPeak };
-  }
-  return best;
+  return { price, matchedBy, rates: price.weekdays.includes(day) && price.windows.some(([a, b]) => minute >= a && minute < b) ? price.peak : price.offPeak };
 }
 
 /** Decide the amount for one request sample using the table loaded at decision time.
@@ -158,10 +201,18 @@ export function lowestPrice(prices: PriceVersion[], provider: string, model: str
  */
 export function chargeFor(prices: PriceVersion[], provider: string, model: string, time: number | undefined, usage: Usage | undefined): PriceDecision {
   if (!usage) return { reason: MISSING_USAGE };
-  const selected = time === undefined ? lowestPrice(prices, provider, model) : priceAt(prices, provider, model, time);
+  // The published DeepSeek table prices cache hits, cache misses and output; a fourth bucket means
+  // the usage mapping is wrong, and inventing a rate for it would hide that.
+  if (provider === 'deepseek-official' && usage.cacheWrite !== 0) return { reason: UNSUPPORTED_USAGE };
+  // No settlement time means the host did not say when the request was billed, and the two peak
+  // bands differ by a factor of two: a floor amount would enter the lifetime total while staying
+  // out of every day range, so the charge is reported unresolved instead of guessed.
+  if (time === undefined) return { reason: MISSING_TIME };
+  const selected = priceAt(prices, provider, model, time);
   if (!selected) return { reason: 'no price version' };
   const amount = (usage.input * selected.rates.input + usage.output * selected.rates.output
     + usage.cacheRead * selected.rates.cacheRead + usage.cacheWrite * selected.rates.cacheWrite) / 1e6;
   if (!Number.isFinite(amount)) return { reason: 'invalid estimate' };
-  return { priceId: selected.price.id, amount, ...(time === undefined ? { estimated: true as const } : {}) };
+  return { priceId: selected.price.id, amount, matchedBy: selected.matchedBy,
+    engine: PRICING_ENGINE_VERSION, catalog: catalogDigest(selected.price) };
 }

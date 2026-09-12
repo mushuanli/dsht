@@ -290,13 +290,13 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
           ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
           : running ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
     // The marker names the scope it belongs to: a subtotal is inexact when a record could not be
-    // priced, when it is only estimated, or when the scan has not covered every session yet.
+    // priced, or when the scan has not covered every session yet.
     const inexact = coverage !== 'complete';
-    const money = (value: CostTotal): string => `¥${value.amount.toFixed(2)}${value.unknown || value.estimated || inexact ? '*' : ''}`;
+    const money = (value: CostTotal): string => `¥${value.amount.toFixed(2)}${value.unknown || inexact ? '*' : ''}`;
     // One marker covers both scopes, because either an unpriceable record or an estimate in the day
     // or in the all-time total makes the pair inexact as a reading.
     const balance = (today: CostTotal, all: CostTotal): string =>
-      `¥: ${today.amount.toFixed(2)} (${all.amount.toFixed(2)})${today.unknown || today.estimated || all.unknown || all.estimated || inexact ? '*' : ''}`;
+      `¥: ${today.amount.toFixed(2)} (${all.amount.toFixed(2)})${today.unknown || all.unknown || inexact ? '*' : ''}`;
     const todayTotal = costs === undefined ? undefined : costs.total(undefined, 1, Date.now());
     const allTotal = costs === undefined ? undefined : costs.total();
     const sessionTotal = costs !== undefined && costs.hasSession(state.sessionId) ? costs.total(state.sessionId) : undefined;
@@ -404,5 +404,5 @@ function modelName(value: Json | ObjectValue | undefined): string {
 }
 
 function compactCost(total: CostTotal): string {
-  return `~¥${total.amount.toFixed(2)}${total.unknown || total.estimated ? '*' : ''}`;
+  return `~¥${total.amount.toFixed(2)}${total.unknown ? '*' : ''}`;
 }

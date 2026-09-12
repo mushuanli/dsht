@@ -20,7 +20,7 @@ export function CostPanel({ controller }: { controller: Controller }) {
   ] as const;
   return <Box flexDirection="column" borderStyle="single" paddingX={1}>
     <Text bold>Cost · CNY estimate · Asia/Shanghai · /cost closes</Text>
-    {rows.map(([label, total]) => <Text key={label}>{label}: {total ? `${costText(total)} · ${total.unknown} unpriced${total.estimated ? ` · ${total.estimated} estimated` : ''} / ${total.records} requests` : '?'}</Text>)}
+    {rows.map(([label, total]) => <Text key={label}>{label}: {total ? `${costText(total)} · ${total.unknown} unpriced / ${total.records} requests` : '?'}</Text>)}
     <Text dimColor>{costs.scanning ? 'Refreshing all visible sessions…'
       : costs.coverage === 'partial' ? 'Partial totals · awaiting a complete scan'
       : costs.scannedAt ? `Last refresh: ${new Date(costs.scannedAt).toISOString()}`
@@ -28,6 +28,7 @@ export function CostPanel({ controller }: { controller: Controller }) {
     {costs.customPrices && <Text color={theme.colors.context}>Rates come from prices.json, not the shipped table.</Text>}
     <Text dimColor>Recorded settlement time determines tariff; * means a subtotal is not exact. Provider invoices are authoritative.</Text>
     {costs.error && <Text color={theme.colors.context}>Partial totals: {safeText(costs.error)}</Text>}
+    {costs.unreadableFiles > 0 && <Text color={theme.colors.context}>{costs.unreadableFiles} ledger file(s) could not be read and were kept; their sessions need a fresh scan.</Text>}
     {costs.missing().slice(0, 6).map(reason => <Text key={reason} color={theme.colors.context}>{safeText(reason)}</Text>)}
   </Box>;
 }

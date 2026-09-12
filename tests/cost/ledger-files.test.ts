@@ -48,12 +48,12 @@ test('cut files under the replaced name migrate to the fixed name and are remove
   await writeFile(join(directory, `${name('s1').slice(0, -5)}-7.json`), JSON.stringify(slice('s1', 7)));
 
   const loaded = await loadLedgers(directory);
-  assert.equal(loaded.get('s1')?.cut, 7);
+  assert.equal(loaded.sessions.get('s1')?.cut, 7);
   assert.deepEqual(await readdir(directory), [name('s1')]);
   assert.equal(await cutOf(join(directory, name('s1'))), 7);
 });
 
-test('an unusable generation, an unreadable file and a superseded cut are removed, foreign files are not', async t => {
+test('an unreadable ledger is set aside and counted, a superseded cut migrates, foreign files are left', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-ledger-')); t.after(() => rm(directory, { recursive: true, force: true }));
   await writeFile(join(directory, `${name('old').slice(0, -5)}-4.json`), JSON.stringify({ ...slice('old', 4), version: 1 }));
   await writeFile(join(directory, name('broken')), 'not a ledger');
@@ -62,9 +62,14 @@ test('an unusable generation, an unreadable file and a superseded cut are remove
   await writeFile(join(directory, 'notes.json'), '{"keep":true}');
 
   const loaded = await loadLedgers(directory);
-  assert.deepEqual([...loaded.keys()], ['s1']);
-  assert.equal(loaded.get('s1')?.cut, 3);
-  assert.deepEqual((await readdir(directory)).sort(), ['notes.json', name('s1')].sort());
+  assert.deepEqual([...loaded.sessions.keys()], ['s1']);
+  assert.equal(loaded.sessions.get('s1')?.cut, 3);
+  // The two files this build cannot read keep their bytes under a name it never reads again.
+  assert.equal(loaded.unreadable, 2);
+  assert.deepEqual((await readdir(directory)).sort(),
+    ['notes.json', name('s1'), `${join(directory, name('broken'))}.unreadable`.slice(directory.length + 1),
+      `${join(directory, name('old')).slice(0, -5)}-4.json.unreadable`.slice(directory.length + 1)].sort());
+  assert.equal(await readFile(join(directory, `${name('broken')}.unreadable`), 'utf8'), 'not a ledger');
 });
 
 test('a stale scan keeps its own slice and cannot rewrite a newer persisted cut', async t => {

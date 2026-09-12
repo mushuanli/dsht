@@ -31,6 +31,18 @@ export async function readPrivateFile(path: string, label: string): Promise<stri
   } finally { await handle.close(); }
 }
 
+/** Move one private file within its directory, ignoring a source that is already gone.
+ *
+ * Used to set an unreadable file aside under a new name without deleting the bytes. A missing source
+ * is not an error: the caller listed the directory earlier and another process may have removed it.
+ * @param from - Existing path.
+ * @param to - Destination path, replaced when it already exists.
+ */
+export async function renameFile(from: string, to: string): Promise<void> {
+  try { await rename(from, to); }
+  catch (error) { if (isMissing(error)) return; throw error; }
+}
+
 /** Replace a file atomically with owner-only contents, leaving no partial file behind.
  * @param path - Destination path.
  * @param contents - Complete file contents.

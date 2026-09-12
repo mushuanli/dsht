@@ -4,13 +4,18 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, pricesFrom, priceAt, lowestPrice, costRecords, costAddresses, costDay, costText, type CostTotal } from '../../src/cost/index.ts';
+import { CostLedger, DEFAULT_PRICES, PRICING_ENGINE_VERSION, pricesFrom, priceAt, chargeFor, candidates, canonicalModel, costRecords, costAddresses, costDay, costText, type CostTotal } from '../../src/cost/index.ts';
 import { Controller } from '../../src/controller/controller.ts';
 import { host, until } from '../support/host.ts';
 import type { ObjectValue } from '../../src/transport/wire.ts';
 
 const at = (date: string) => Date.parse(date + '+08:00');
 const usage = { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 0 };
+/** What one `record()` costs under the shipped Flash table: 2 + 8 + 0.04 peak, half that off peak. */
+const PEAK = 10.04; const OFF_PEAK = 5.02;
+/** A private copy of the shipped table: `pricesFrom` returns the array it is given, so a test that
+ * edits or splices its table would otherwise change the module-level one for every later test. */
+const shipped = () => pricesFrom(DEFAULT_PRICES.map(price => ({ ...price })));
 function record(seq: number, time: number, step = seq, model = 'deepseek-v4-flash', provider = 'deepseek-official'): ObjectValue {
   return { type: 'event', event: { seq, time, type: 'assistant/message', data: { turn: 1, step, usage,
     message: { source: { provider, model }, content: [{ type: 'text', text: 'PRIVATE PROMPT' }] } } } };
@@ -19,7 +24,7 @@ function record(seq: number, time: number, step = seq, model = 'deepseek-v4-flas
 const summary = (total: CostTotal) => ({ ...total, amount: Number(total.amount.toFixed(4)) });
 
 test('tariffs use Beijing weekdays and half-open morning/afternoon windows', () => {
-  const prices = pricesFrom(DEFAULT_PRICES);
+  const prices = shipped();
   const rate = (time: string) => priceAt(prices, 'deepseek-official', 'deepseek-v4-flash', at(time))?.rates.input;
   assert.equal(rate('2026-09-10T08:59:59'), 1);
   assert.equal(rate('2026-09-10T09:00:00'), 2);
@@ -39,7 +44,7 @@ test('tariffs use Beijing weekdays and half-open morning/afternoon windows', () 
 });
 
 test('bundled rates match the published tables, and V4 Pro keeps its own rates', () => {
-  const prices = pricesFrom(DEFAULT_PRICES);
+  const prices = shipped();
   const rates = (model: string, date: string) => priceAt(prices, 'deepseek-official', model, at(date))?.rates;
   assert.deepEqual(rates('deepseek-flash', '2026-09-10T10:00:00'), { input: 2, cacheRead: 0.04, cacheWrite: 2, output: 8 });
   assert.deepEqual(rates('deepseek-flash', '2026-09-10T20:00:00'), { input: 1, cacheRead: 0.02, cacheWrite: 1, output: 4 });
@@ -54,25 +59,107 @@ test('bundled rates match the published tables, and V4 Pro keeps its own rates',
   }
 });
 
-test('an unlisted model uses its name family, and an unlisted provider stays unpriced', () => {
-  const prices = pricesFrom(DEFAULT_PRICES);
-  assert.equal(priceAt(prices, 'deepseek-official', 'some-FLASH-preview', at('2026-09-10T10:00:00'))?.rates.input, 2);
-  assert.equal(priceAt(prices, 'deepseek-official', 'some-Pro-preview', at('2026-09-10T10:00:00'))?.rates.input, 9);
+test('a model the table does not cover stays unpriced instead of being guessed at', () => {
+  const prices = shipped();
+  // A name that merely contains "pro" is not Pro, and a name that contains neither is not Flash.
+  for (const model of ['deepseek-proxy-preview', 'deepseek-v5-ultra', 'some-FLASH-preview', 'some-Pro-preview']) {
+    // A name the table does not declare is not guessed at, however it is spelled.
+    assert.equal(priceAt(prices, 'deepseek-official', model, at('2026-09-10T10:00:00')), undefined, model);
+  }
+  // A name containing "pro" inside another word is not Pro: the declared prefixes decide, so a
+  // Flash prefix still resolves to Flash rather than flipping to the Pro rates.
+  for (const model of ['deepseek-v4-flash-prod', 'deepseek-v4-flash-anything']) {
+    const match = priceAt(prices, 'deepseek-official', model, at('2026-09-10T10:00:00'));
+    assert.equal(match?.price.model, 'deepseek-flash', model);
+    assert.equal(match?.matchedBy, 'alias');
+  }
   assert.equal(priceAt(prices, 'other', 'deepseek-flash', at('2026-09-10T10:00:00')), undefined);
-  assert.deepEqual(lowestPrice(prices, 'deepseek-official', 'deepseek-v4-pro')?.rates, { input: 4.5, cacheRead: 0.15, cacheWrite: 4.5, output: 13.5 });
-  assert.equal(lowestPrice(prices, 'other', 'deepseek-flash'), undefined);
+  // A declared alias still resolves, and the rule that matched it is reported.
+  assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-v4.1-flash-expires-on-0910', at('2026-09-10T10:00:00'))?.matchedBy, 'alias');
+  assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-flash', at('2026-09-10T10:00:00'))?.matchedBy, 'exact');
+  assert.deepEqual(candidates(prices, 'deepseek-official', 'deepseek-flash').map(c => c.matchedBy), ['exact']);
 });
 
-test('a request without a settlement time keeps a floor amount and stays estimated', async () => {
+test('model names match after normalization, including the CJK full stop a host can substitute', () => {
+  assert.equal(canonicalModel(' DeepSeek-V4.1-Flash '), 'deepseek-v4.1-flash');
+  assert.equal(canonicalModel('deepseek-v4。1-flash'), 'deepseek-v4.1-flash');
+  assert.equal(canonicalModel('deepseek-v4．1－flash'.replace('－', '-')), 'deepseek-v4.1-flash');
+  const prices = shipped();
+  assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-v4。1-flash-expires-on-0910', at('2026-09-10T20:00:00'))?.rates.input, 1);
+  assert.equal(priceAt(prices, 'deepseek-official', 'DEEPSEEK-V4.1-FLASH-EXPIRES-ON-0910', at('2026-09-10T20:00:00'))?.rates.input, 1);
+});
+
+test('an amount records the rule that matched, the engine, and a digest of the rates used', () => {
+  const prices = shipped();
+  const decision = chargeFor(prices, 'deepseek-official', 'deepseek-v4.1-flash-expires-on-0910', at('2026-09-10T10:00:00'),
+    { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.equal(decision.matchedBy, 'alias');
+  assert.equal(decision.engine, PRICING_ENGINE_VERSION);
+  assert.match(String(decision.catalog), /^[0-9a-f]{12}$/);
+  // Editing a rate under the same id changes the digest, which is what identifies the rates used.
+  const edited = pricesFrom([{ ...prices[0]!, peak: { ...prices[0]!.peak, input: 3 } }, prices[1]!]);
+  const after = chargeFor(edited, 'deepseek-official', 'deepseek-flash', at('2026-09-10T10:00:00'), { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.notEqual(after.catalog, decision.catalog);
+});
+
+test('a cache-write bucket the published table does not price stays unresolved', () => {
+  const prices = shipped();
+  const usage = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 1_000_000 };
+  assert.deepEqual(chargeFor(prices, 'deepseek-official', 'deepseek-flash', at('2026-09-10T10:00:00'), usage), { reason: 'unsupported usage' });
+  // Another provider may price the bucket, so the rule is scoped to the published DeepSeek table.
+  const other = pricesFrom([{ ...prices[0]!, provider: 'other' }]);
+  assert.equal(chargeFor(other, 'other', 'deepseek-flash', at('2026-09-10T10:00:00'), usage).amount, 4);
+});
+
+test('a request without a settlement time is unresolved, so the day subtotals still add up', async () => {
   const ledger = new CostLedger();
-  const undated = record(0, at('2026-09-10T10:00:00')); delete (undated.event as ObjectValue).time;
-  await ledger.replace('s1', 0, costRecords([undated]));
+  const dated = record(0, at('2026-09-10T10:00:00'));
+  const undated = record(1, at('2026-09-10T10:00:00')); delete (undated.event as ObjectValue).time;
+  await ledger.replace('s1', 1, costRecords([dated, undated]));
   const total = ledger.total('s1');
-  assert.equal(summary(total).amount, 5.02);
-  assert.deepEqual({ unknown: total.unknown, estimated: total.estimated, records: total.records }, { unknown: 0, estimated: 1, records: 1 });
-  assert.equal(costText(total), '~¥5.0200*');
-  // A calendar range cannot place an undated request, so it is counted but not added.
-  assert.deepEqual(summary(ledger.total(undefined, 1, at('2026-09-10T12:00:00'))), { amount: 0, unknown: 0, estimated: 1, records: 1 });
+  // The peak band differs by a factor of two, so a guessed floor would be a wrong number either way.
+  assert.deepEqual(summary(total), { amount: PEAK, unknown: 1, records: 2 });
+  assert.equal(costText(total), '~¥10.0400*');
+  // The unresolved request cannot inflate a day: the day subtotals add up to the lifetime total.
+  assert.deepEqual(summary(ledger.total(undefined, 1, at('2026-09-10T12:00:00'))), { amount: PEAK, unknown: 1, records: 2 });
+  assert.equal(ledger.total(undefined, 1, at('2026-09-10T12:00:00')).amount, ledger.total().amount);
+});
+
+test('a summary request is billed from its own route and usage', async () => {
+  const ledger = new CostLedger();
+  const summary = { type: 'event', event: { seq: 0, time: at('2026-09-10T20:00:00'), type: 'compaction/summary',
+    data: { compactionId: 'c1', provider: 'deepseek-official', model: 'deepseek-v4.1-flash-expires-on-0910',
+      usage: { inputTokens: 760_245, outputTokens: 3_312, cacheReadTokens: 11_904, totalTokens: 775_461 } } } };
+  await ledger.replace('s1', 0, costRecords([summary]));
+  // 760245 x 1 + 11904 x 0.02 + 3312 x 4, off-peak, per million.
+  assert.equal(Number(ledger.total('s1').amount.toFixed(4)), 0.7737);
+  // A summary with no model call reports nothing to bill, so it is not a request at all.
+  const template = { type: 'event', event: { seq: 1, time: at('2026-09-10T20:00:00'), type: 'compaction/summary', data: { compactionId: 'c2' } } };
+  assert.deepEqual(costRecords([template]), []);
+});
+
+test('an unpriced charge is priced once a table covers it, and a priced charge never moves', async () => {
+  const unknown = record(0, at('2026-09-10T10:00:00'), 0, 'deepseek-v5-ultra');
+  const prices = shipped();
+  const ledger = new CostLedger(prices);
+  await ledger.replace('s1', 0, costRecords([unknown]));
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 0, unknown: 1, records: 1 });
+  // A later table that covers the model prices the same stored sample without a reprice.
+  const covered = new CostLedger(pricesFrom([...prices, { ...prices[0]!, id: 'v5', model: 'deepseek-v5-ultra',
+    aliases: undefined }]));
+  await covered.replace('s1', 0, costRecords([unknown]));
+  assert.equal(Number(covered.total('s1').amount.toFixed(4)), PEAK);
+  // An amount already decided survives a table that would decide it differently.
+  const kept = new CostLedger(shipped());
+  const priced = costRecords([record(0, at('2026-09-10T10:00:00'))]);
+  await kept.replace('s1', 0, priced);
+  assert.equal(Number(kept.total('s1').amount.toFixed(4)), PEAK);
+  kept.prices.splice(0, kept.prices.length, ...pricesFrom([{ ...prices[0]!, peak: { ...prices[0]!.peak, input: 1 } }]));
+  await kept.replace('s1', 1, priced);
+  assert.equal(Number(kept.total('s1').amount.toFixed(4)), PEAK);
+  await kept.reprice();
+  // Peak input is 1, so only the input term moves: 1 + 8 + 0.04.
+  assert.equal(Number(kept.total('s1').amount.toFixed(4)), 9.04);
 });
 
 test('coverage reports missing data and failures without distrusting cached charges', async () => {
@@ -97,9 +184,9 @@ test('session, today and three-calendar-day costs retain unknowns and avoid repl
     record(5, at('2026-09-12T10:00:00'), 5, 'unknown', 'other'), record(6, at('2026-09-13T10:00:00'))];
   await ledger.replace('s1', 6, costRecords(records));
   const now = at('2026-09-13T12:00:00');
-  assert.deepEqual(summary(ledger.total('s1')), { amount: 30.12, unknown: 1, estimated: 0, records: 5 });
-  assert.deepEqual(summary(ledger.total(undefined, 1, now)), { amount: 5.02, unknown: 0, estimated: 0, records: 1 });
-  assert.deepEqual(summary(ledger.total(undefined, 3, now)), { amount: 10.04, unknown: 1, estimated: 0, records: 3 });
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 30.12, unknown: 1, records: 5 });
+  assert.deepEqual(summary(ledger.total(undefined, 1, now)), { amount: OFF_PEAK, unknown: 0, records: 1 });
+  assert.deepEqual(summary(ledger.total(undefined, 3, now)), { amount: 10.04, unknown: 1, records: 3 });
   await ledger.replace('s1', 6, costRecords(records));
   assert.equal(ledger.total('s1').records, 5);
   await ledger.replace('s1', 0, []);
@@ -112,7 +199,7 @@ test('fork seed records are excluded while inherited request routes remain usabl
     { type: 'event', event: { seq: 1, type: 'session/end-seed', data: { inherited: true } } },
     record(2, at('2026-09-10T20:00:00'))];
   await ledger.replace('fork', 2, costRecords(records));
-  assert.deepEqual(summary(ledger.total('fork')), { amount: 5.02, unknown: 0, estimated: 0, records: 1 });
+  assert.deepEqual(summary(ledger.total('fork')), { amount: OFF_PEAK, unknown: 0, records: 1 });
 });
 
 test('a decided charge keeps its amount when the price table changes and stores no conversation text', async t => {
@@ -150,14 +237,15 @@ test('a renamed table leaves an already decided charge at its recorded amount', 
   assert.equal(summary(after.total('s1')).amount, 12.1);
 });
 
-test('a charge no price version covered stays unpriced when the table later gains one', async () => {
+test('a charge no table covered is priced once a table covers it, without a reprice', async () => {
   const ledger = new CostLedger([]);
   const events = costRecords([record(0, at('2026-09-10T10:00:00'), 0, 'unlisted-model', 'unlisted-provider')]);
   await ledger.replace('s1', 0, events);
-  assert.deepEqual(summary(ledger.total('s1')), { amount: 0, unknown: 1, estimated: 0, records: 1 });
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 0, unknown: 1, records: 1 });
+  // An unpriced request stays open, so the next table that covers its model prices it in place.
   ledger.prices.push(...DEFAULT_PRICES.map(price => ({ ...price, provider: 'unlisted-provider', model: 'unlisted-model' })));
   await ledger.replace('s1', 1, events);
-  assert.deepEqual(summary(ledger.total('s1')), { amount: 0, unknown: 1, estimated: 0, records: 1 });
+  assert.deepEqual(summary(ledger.total('s1')), { amount: PEAK, unknown: 0, records: 1 });
 });
 
 test('a sample without usage stays open until the host reports tokens', async () => {
@@ -193,8 +281,9 @@ test('price updates select new intervals and inconsistent usage stays unpriced',
   const invalid = record(3, at('2026-09-11T10:00:00'));
   ((invalid.event as ObjectValue).data as ObjectValue).usage = { ...usage, totalTokens: 1 };
   await ledger.replace('s1', 3, costRecords([record(0, at('2026-09-10T10:00:00')), record(1, at('2026-09-11T10:00:00')), unknownTime, invalid]));
-  assert.deepEqual(summary(ledger.total('s1')), { amount: 29.1, unknown: 1, estimated: 1, records: 4 });
-  assert.deepEqual(summary(ledger.total(undefined, 1, at('2026-09-11T12:00:00'))), { amount: 14.04, unknown: 1, estimated: 1, records: 3 });
+  // 10.04 at the first interval's peak, 6 + 8 + 0.04 at the second, and two unresolved requests.
+  assert.deepEqual(summary(ledger.total('s1')), { amount: 24.08, unknown: 2, records: 4 });
+  assert.deepEqual(summary(ledger.total(undefined, 1, at('2026-09-11T12:00:00'))), { amount: 14.04, unknown: 2, records: 3 });
 });
 
 test('cancelling a shared billing refresh aborts paging without cancelling the agent', async t => {
@@ -217,12 +306,17 @@ test('cancelling a shared billing refresh aborts paging without cancelling the a
 
 test('failed attempt stream usage uses its request route and last sample', async () => {
   const ledger = new CostLedger();
-  await ledger.replace('s1', 1, costRecords([
-    { type: 'event', event: { seq: 0, type: 'request/context', data: { provider: 'deepseek-official', model: 'preview-PRO' } } },
+  const attempt = (model: string): ObjectValue[] => costRecords([
+    { type: 'event', event: { seq: 0, type: 'request/context', data: { provider: 'deepseek-official', model } } },
     { type: 'event', event: { seq: 1, time: at('2026-09-10T10:00:00'), type: 'assistant/attempt', data: { turn: 1, step: 1,
       stream: [{ type: 'chunk', chunk: { type: 'usage', usage: { ...usage, inputTokens: 1 } } }, { type: 'chunk', chunk: { type: 'usage', usage } }] } } },
-  ]));
+  ]);
+  // The attempt names no route of its own, so it is priced from the context in force, at its last usage chunk.
+  await ledger.replace('s1', 1, attempt('deepseek-v4-pro'));
   assert.equal(summary(ledger.total('s1')).amount, 36.3);
+  // A route the table does not declare stays unpriced instead of falling back to a name family.
+  await ledger.replace('s2', 1, attempt('preview-PRO'));
+  assert.deepEqual(summary(ledger.total('s2')), { amount: 0, unknown: 1, records: 1 });
 });
 
 test('subagent list rows yield the parent address in both delivery modes', () => {

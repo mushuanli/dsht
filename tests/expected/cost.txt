@@ -1,4 +1,4 @@
 Cost · CNY estimate · Asia/Shanghai · /cost closes
-Session: ~¥0.0001* · 0 unpriced · 3 estimated / 3 requests
-Today: ~¥0.0000* · 0 unpriced · 3 estimated / 3 requests
-3 days (today + previous 2): ~¥0.0000* · 0 unpriced · 3 estimated / 3 requests
+Session: ~¥0.0000* · 3 unpriced / 3 requests
+Today: ~¥0.0000* · 3 unpriced / 3 requests
+3 days (today + previous 2): ~¥0.0000* · 3 unpriced / 3 requests
