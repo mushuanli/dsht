@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import wrapAnsi from 'wrap-ansi';
 import { contentText, Transcript } from '../../src/session/transcript.ts';
+import type { ObjectValue } from '../../src/transport/wire.ts';
 import { historyLayout } from '../../src/session/history.ts';
 import { snapshot } from '../support/host.ts';
 
@@ -248,4 +249,43 @@ test('tool completion replaces the cached call and paging merges an orphan resul
   paged.addPage({ records: [{ type: 'event', event: call }], hasMore: false });
   assert.equal(paged.messages.length, 1);
   assert.equal(paged.messages[0]!.text, cached!.text);
+});
+
+test('a tool that is executing is the phase while its request is unanswered', () => {
+  // Only user-visible events are retained, so the call is read from the assistant message that made it.
+  const message = (seq: number, time: number, content: ObjectValue[]) => ({ type: 'event',
+    event: { seq, time, surfaceOp: 'append', type: 'assistant/message', data: { message: { content } } } });
+  const answered = (seq: number, time: number, toolCallId: string) => ({ type: 'event',
+    event: { seq, time, surfaceOp: 'append', type: 'tool/result', data: { message: { content: [{ type: 'tool-result', toolCallId, isError: false }] } } } });
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, assistantStream: undefined, records: [
+    { type: 'event', event: { seq: 0, time: 1_000, data: { turn: 1 }, type: 'turn/start' } },
+    message(1, 4_000, [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }]),
+  ] });
+  // The assistant stream that asked for the tool has ended, so the live block no longer covers it.
+  assert.deepEqual(transcript.runningTool, { name: 'bash', startedAt: 4_000 });
+  assert.deepEqual(transcript.livePhase, { kind: 'tool', name: 'bash', startedAt: 4_000 });
+  // A second call in flight does not replace the one that has been waiting longest.
+  transcript.accept(message(2, 6_000, [{ type: 'tool-call', id: 'c2', name: 'read', arguments: '{}' }]));
+  assert.deepEqual(transcript.runningTool, { name: 'bash', startedAt: 4_000 });
+  // Answering the first call moves the phase to the one still waiting.
+  transcript.accept(answered(3, 7_000, 'c1'));
+  assert.deepEqual(transcript.runningTool, { name: 'read', startedAt: 6_000 });
+  transcript.accept(answered(4, 8_000, 'c2'));
+  assert.equal(transcript.runningTool, undefined);
+  assert.equal(transcript.livePhase, undefined);
+});
+
+test('a closed turn reports no running tool even when a request was never answered', () => {
+  const transcript = new Transcript();
+  transcript.accept({ ...snapshot, assistantStream: undefined, records: [
+    { type: 'event', event: { seq: 0, time: 1_000, type: 'turn/start', data: { turn: 1 } } },
+    { type: 'event', event: { seq: 1, time: 2_000, surfaceOp: 'append', type: 'assistant/message',
+      data: { message: { content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] } } } },
+  ] });
+  assert.equal(transcript.runningTool?.name, 'bash');
+  // A cancelled tool never writes its result, so the turn ending is what clears the phase.
+  transcript.accept({ type: 'event', event: { seq: 2, time: 3_000, type: 'turn/end', data: { turn: 1, reason: 'aborted' } } });
+  assert.equal(transcript.runningTool, undefined);
+  assert.equal(transcript.livePhase, undefined);
 });

@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,349 行；`tests/` 26 个测试文件；181 项测试 |
+| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,448 行；`tests/` 26 个测试文件；186 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -1064,7 +1064,7 @@ C4Component
 
 选择器状态：`/ws` 与 `/resume` 的每一行都从 `session/list` 摘要读状态，不加载会话历史——会话行前缀是 `◐`（运行中）、`●`（空闲）或 `○`（未使用）加最近活动时间（`now`／分／时／天），工作区行前缀是同样标记的计数（运行中在前）。状态只取 `running` 与 `blank`，不从沉默推断停滞；「等待确认」需要宿主侧的列表投影，目前拿不到。
 
-单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`，由 `Transcript` 记录阶段起始时刻得出，从不从静默推断）· `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00 (13.00)` · 回合 · token。ctx 与费用各带两种读法：整行仍放得下时画条状与「今天花费（历史总计）」，否则退回 `ctx 30%` 与只报本会话的 `S¥3.00*`，账本没有本会话切片时费用槽直接用今天花费；宽度不足时按 token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
+单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都从不从静默推断· `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00 (13.00)` · 回合 · token。ctx 与费用各带两种读法：整行仍放得下时画条状与「今天花费（历史总计）」，否则退回 `ctx 30%` 与只报本会话的 `S¥3.00*`，账本没有本会话切片时费用槽直接用今天花费；宽度不足时按 token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
 
 展开的 `/status` 面板把相关值合并成行并采用短标签（连接／活动、会话与模式、工作区、三行指标、费用与回合、排队与任务各一行），计数采用与单行状态栏相同的紧凑单位（`400.6K/1M`、`229.7M tok`），因此 46 列下常见 11 行、24 行终端一屏可显示；错误各自占行。换行与滚动仍作为小终端的兜底。
 
@@ -1301,7 +1301,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 58 个模块、6,349 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 58 个模块、6,448 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1316,7 +1316,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `transport/endpoint.ts` | 23 | `Endpoint`、`endpoint` |
 | `transport/host.ts` | 14 | `HostAccess` |
 | `session/controller.ts` | 583 | `SessionController` |
-| `session/transcript.ts` | 612 | `Transcript`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
+| `session/transcript.ts` | 655 | `Transcript`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
 | `session/history.ts` | 320 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
 | `session/telemetry.ts` | 108 | `Telemetry`、`QueuedInput` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
@@ -1329,11 +1329,11 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/math.ts` | 67 | `renderMath` |
 | `session/export-html.ts` | 42 | `saveTranscriptHtml` |
 | `session/index.ts` | 17 | 域 barrel |
-| `cost/pricing.ts` | 219 | `DEFAULT_PRICES`、`PRICES_REVISION`、`PRICING_ENGINE_VERSION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`candidates`、`canonicalModel`、`catalogDigest`、`chargeFor`、`costDay` |
+| `cost/pricing.ts` | 218 | `DEFAULT_PRICES`、`PRICES_REVISION`、`PRICING_ENGINE_VERSION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`candidates`、`canonicalModel`、`catalogDigest`、`chargeFor`、`costDay` |
 | `cost/config.ts` | 69 | `loadPrices`（种子、戳记与迁移） |
 | `cost/records.ts` | 75 | `costRecords`、`foldSamples` |
-| `cost/ledger-files.ts` | 118 | `loadLedgers`、`saveLedger` |
-| `cost/ledger.ts` | 164 | `CostLedger`、`costText` |
+| `cost/ledger-files.ts` | 142 | `loadLedgers`、`saveLedger` |
+| `cost/ledger.ts` | 195 | `CostLedger`、`costText` |
 | `cost/scanner.ts` | 77 | `costAddresses`、`sessionCostHistory` |
 | `cost/controller.ts` | 95 | `CostController`、`CostHost` |
 | `cost/types.ts` | 54 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
@@ -1356,7 +1356,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 21 | `HistoryViewport` |
-| `ui/chat/status.tsx` | 408 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
+| `ui/chat/status.tsx` | 410 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
 | `ui/input/history.ts` | 38 | `InputHistory` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |

@@ -115,6 +115,8 @@ export class Transcript {
   private closedBlocks = new Set<number>();
   private oldestSeq: number | undefined;
   private turnMarker: { seq: number; start?: number } | undefined;
+  /** Pending-tool lookup memo, keyed by the revision that produced it. */
+  private runningCache: { version: number; value: { name: string; startedAt: number } | undefined } | undefined;
   private attempt: string | undefined;
   private phase: (LivePhase & { key: string }) | undefined;
   private nextIndex = 0;
@@ -301,9 +303,50 @@ export class Transcript {
    * @returns Phase kind, the tool name when the phase is a tool call, and when the phase began.
    */
   get livePhase(): LivePhase | undefined {
-    if (this.phase === undefined || this.blocks.size === 0) return undefined;
-    const { kind, name, startedAt } = this.phase;
-    return { kind, ...(name === undefined ? {} : { name }), startedAt };
+    if (this.phase !== undefined && this.blocks.size > 0) {
+      const { kind, name, startedAt } = this.phase;
+      return { kind, ...(name === undefined ? {} : { name }), startedAt };
+    }
+    // A tool runs after the assistant stream that asked for it has ended, so the live block no longer
+    // covers it. Falling through to the open turn's unanswered call is what keeps a long command
+    // visible instead of showing an idle bar.
+    const tool = this.runningTool;
+    return tool === undefined ? undefined : { kind: 'tool', name: tool.name, startedAt: tool.startedAt };
+  }
+
+  /** The tool the open turn asked for that has not answered yet, oldest first.
+   * @returns Tool name and the moment the request was recorded, or undefined when none is in flight.
+   */
+  get runningTool(): { name: string; startedAt: number } | undefined {
+    if (this.runningCache?.version === this.version) return this.runningCache.value;
+    const value = this.findPendingTool();
+    this.runningCache = { version: this.version, value };
+    return value;
+  }
+
+  /** Find the open turn's unanswered tool call, which is the work a bar can still be waiting on.
+   *
+   * The host's `tool/call` event is not retained — only user-visible content is — so this reads the
+   * tool-call blocks a retained assistant message carries and the results that answer them.
+   */
+  private findPendingTool(): { name: string; startedAt: number } | undefined {
+    const marker = this.turnMarker;
+    // A turn that ended cannot have a tool in flight, and `turn/end` clears the marker's start.
+    if (marker?.start === undefined) return undefined;
+    const calls: { id: string; name: string; startedAt: number }[] = [];
+    const answered = new Set<string>();
+    for (const seq of this.sortedKeys()) {
+      if (seq <= marker.seq) continue;
+      const event = this.events.get(seq)!;
+      if (event.type !== 'assistant/message' && event.type !== 'tool/result') continue;
+      const startedAt = typeof event.time === 'number' ? event.time : marker.start;
+      for (const block of array(object(object(event.data).message).content).map(object)) {
+        if (block.type === 'tool-call') calls.push({ id: string(block.id), name: string(block.name ?? 'tool'), startedAt });
+        else if (block.type === 'tool-result') answered.add(string(block.toolCallId));
+      }
+    }
+    const pending = calls.find(call => !answered.has(call.id));
+    return pending === undefined ? undefined : { name: pending.name, startedAt: pending.startedAt };
   }
 
   /** Start of the open durable turn, when its timestamp is present in the retained window. */
@@ -598,7 +641,7 @@ function number(value: unknown): number {
 /** Keep only user-visible content in durable client memory; the host owns raw tool results. */
 function retainedEvent(event: ObjectValue): ObjectValue {
   if (!DISPLAY_EVENTS.has(string(event.type))) return event;
-  if (event.surfaceOp !== 'append') return { seq: event.seq!, type: event.type! };
+  if (event.surfaceOp !== 'append') return { seq: event.seq!, type: event.type!, ...(typeof event.time === 'number' ? { time: event.time } : {}) };
   const data = object(event.data);
   const clean = (value: Json): Json => {
     const block = object(value);
@@ -606,7 +649,7 @@ function retainedEvent(event: ObjectValue): ObjectValue {
     if (block.type === 'tool-result') return { type: 'tool-result', toolCallId: block.toolCallId!, isError: block.isError === true };
     return block;
   };
-  return { seq: event.seq!, type: event.type!, surfaceOp: 'append', data: event.type === 'user/message'
+  return { seq: event.seq!, type: event.type!, ...(typeof event.time === 'number' ? { time: event.time } : {}), surfaceOp: 'append', data: event.type === 'user/message'
     ? { content: data.content!, ...(data.source ? { source: data.source } : {}) }
     : { message: { content: array(object(data.message).content).filter(block => event.type !== 'tool/result' || object(block).type === 'tool-result').map(clean) } } };
 }

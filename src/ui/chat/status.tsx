@@ -306,7 +306,9 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     const cells = percent === undefined ? 0 : Math.round(percent / 10);
     const groups: StatusGroups = {
       state: stateToken,
-      ...(phaseLabel === undefined || pauseReason !== undefined ? {} : { phase: { text: phaseLabel } }),
+      // A paused bar keeps the phase: the reason already says why the clock stopped, and dropping the
+      // running tool would leave the one question this bar exists to answer unanswered.
+      ...(phaseLabel === undefined ? {} : { phase: { text: phaseLabel } }),
       ...(running && pauseReason === undefined ? { stop: { text: '^C' } } : {}),
       ...(sessionTotal === undefined ? {} : { session: { text: `S${money(sessionTotal)}`, color: theme.status.cost } }),
       ...(todayTotal === undefined || allTotal === undefined ? {} : { balance: { text: balance(todayTotal, allTotal), color: theme.status.cost } }),

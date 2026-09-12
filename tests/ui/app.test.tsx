@@ -708,6 +708,32 @@ test('cost coverage marks the subtotals it cannot confirm instead of rewriting t
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);
 });
 
+test('the bar names the tool that is running, including while the clock is paused', async t => {
+  const controller = new Controller('http://x1:4096', undefined);
+  const now = Date.now();
+  controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
+    sessions: [{ sessionId: 's1', running: true }] };
+  controller.state.transcript.addPage({ hasMore: false, records: [
+    { type: 'event', event: { seq: 0, type: 'turn/start', time: now - 8_000, data: { turn: 1 } } },
+    { type: 'event', event: { seq: 1, time: now - 5_000, surfaceOp: 'append', type: 'assistant/message',
+      data: { message: { content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] } } } },
+  ] });
+  const bar = (pauseReason?: 'copy' | 'dialog' | 'history') => {
+    const ui = render(<StatusBar controller={controller} pauseReason={pauseReason} />);
+    const frame = ui.lastFrame() ?? '';
+    ui.unmount(); ui.cleanup();
+    return frame;
+  };
+  // The tool runs after the assistant stream that asked for it ended, so the bar reads the open turn.
+  assert.match(bar(), /◐ 0:0\d · bash \d+s · \^C/, bar());
+  // A paused bar keeps the phase: the reason explains the frozen clock, and the running tool is the
+  // answer the bar exists to give.
+  for (const reason of ['copy', 'dialog', 'history'] as const) {
+    const frame = bar(reason);
+    assert.match(frame, new RegExp(`⏸ ${reason} 0:0\\d · bash \\d+s`), frame);
+  }
+});
+
 test('an idle bar re-reads the clock so the day subtotal rolls over at midnight', async t => {
   const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
   const fixture = await host(); t.after(() => fixture.close());
