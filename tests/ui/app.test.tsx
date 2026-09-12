@@ -1355,22 +1355,25 @@ test('approval numbers and arrows require explicit selection and preserve comman
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.state.transcript.ready);
   const results = () => fixture.calls.filter(call => call.method === '$events/result');
+  // A draft written before the request arrived is parked, so the dialog answers without the user
+  // having to clear it, and the draft is handed back once the request is settled.
+  await until(() => controller.state.online && !controller.state.busy);
+  await pressKey(ui, 'half-written message');
+  await until(() => ui.lastFrame()?.includes('half-written message') === true);
   for (const [index, keys] of [['1'], ['\u001b[B', '\u001b[B']].entries()) {
     fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: `numbered-${index}`, agentId: 's1', request: { toolName: 'bash', reason: 'Confirm operation' } });
     await until(() => ui.lastFrame()?.includes('Approval required') === true);
     const expected = await readFile(new URL('../expected/approval-options.txt', import.meta.url), 'utf8');
     for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
+    assert.equal(ui.lastFrame()!.includes('half-written message'), false, ui.lastFrame());
     await pressKey(ui, '\r');
     assert.equal(results().length, index);
-    if (index === 0) {
-      await pressKey(ui, '/allow'); await pressKey(ui, '2');
-      assert.match(ui.lastFrame()!, /❯ \/allow2/);
-      await pressKey(ui, '\u0003');
-    }
     for (const key of keys) await pressKey(ui, key);
     assert.equal(results().length, index);
     await pressKey(ui, '\r');
     await until(() => controller.state.pending.length === 0 && !controller.state.busy);
+    // Settling the last request hands the parked draft back.
+    await until(() => ui.lastFrame()?.includes('half-written message') === true);
     const result = object(object(results().at(-1)!.payload).args);
     assert.equal(object(result.outcome).value, index === 0 ? 'allowed-once' : 'rejected');
   }
@@ -1453,7 +1456,8 @@ test('questions and approvals take precedence over the pending-input picker', as
   assert.deepEqual(object(answer.outcome).value, { answers: [{ id: 'q', selected: ['Change'] }] });
   fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'approval-with-queue', agentId: 's1', request: { description: 'Confirm operation' } });
   await until(() => ui.lastFrame()?.includes('Approval required') === true);
-  await pressKey(ui, '/allow'); await pressKey(ui, '\r');
+  // The approval owns the keyboard, so it is answered from its own list rather than by a command.
+  await pressKey(ui, '1'); await pressKey(ui, '\r');
   await until(() => controller.state.pending.length === 0 && !controller.state.busy);
   const approval = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
   assert.equal(object(approval.outcome).value, 'allowed-once');
@@ -1550,7 +1554,7 @@ test('questions, approvals and model dialogs retain recent context above the com
   fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'context-approval', agentId: 's1', request: { description: 'Confirm operation' } });
   await until(() => ui.lastFrame()?.includes('Approval required') === true);
   assert.match(ui.lastFrame()!, /Recent decision context/);
-  await pressKey(ui, '/deny'); await pressKey(ui, '\r');
+  await pressKey(ui, '2'); await pressKey(ui, '\r');
   await until(() => controller.state.pending.length === 0 && !controller.state.busy);
   await pressKey(ui, '/model'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Choose model') === true);

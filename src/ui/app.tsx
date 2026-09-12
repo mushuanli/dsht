@@ -169,6 +169,25 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // leave the arrows with the history, and Ctrl+P/N reach it from every surface.
   const recallBlocked = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || (statusExpanded && statusOverflow));
   const questionKeysActive = !!question && options.length > 0 && !choiceState.custom && !copyMode && !panelBlocksKeys;
+  // A dialog that demands an answer owns the keyboard until it is settled: the draft being written is
+  // parked rather than typed into, and comes back when the last one closes. A question switches to
+  // the composer itself for a free-text or "Other" answer, so it keeps the keys then.
+  const answerPending = !!pending && (pending.event === 'approval/request' || options.length > 0 && !choiceState.custom);
+  const parkedDraft = useRef('');
+  useEffect(() => {
+    if (answerPending) {
+      if (draft.current === '') return;
+      parkedDraft.current = draft.current;
+      draft.current = ''; updateInput(''); setCursor(0);
+      return;
+    }
+    if (pending || parkedDraft.current === '') return;
+    // Restoring writes the states directly: the draft was neither recalled from history nor a new
+    // message, so it must not move a reader's scroll position.
+    const restore = parkedDraft.current;
+    parkedDraft.current = '';
+    draft.current = restore; updateInput(restore); setCursor(restore.length);
+  }, [answerPending, pending]);
   const approvalKeysActive = pending?.event === 'approval/request' && !copyMode && !panelBlocksKeys;
   const approvalIndex = approvalSelection?.eventId === eventId ? approvalSelection.index : -1;
   const answerQuestion = async (selected: string[], custom?: string) => {
@@ -584,16 +603,17 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           <Text dimColor>{choiceState.custom ? 'Type your answer below · Esc returns to options' : question?.multiSelect === true
             ? '↑ ↓ move · Space / 1–9 toggle · Enter confirm' : '↑ ↓ / 1–9 select · Enter confirm'}</Text>
         </Box>}
-        <Text dimColor>{question ? 'Text answers supported · Ctrl+C clears · /cancel stops' : '/allow approves once · /deny rejects · /cancel stops'}</Text>
+        <Text dimColor>{question ? 'Choose "Other answer" to type · the draft is kept while this is open'
+          : 'Esc keeps this pending · the draft is kept while this is open'}</Text>
       </Box>}
     </>}
         </Box>
         {!queueOpen && !pending && state.screen === 'chat' && queued.length > 0 && <QueuedPreview queued={queued} width={width} />}
         <Box flexShrink={0}>
-        <Text color={theme.accent}>❯ </Text>
+        <Text color={answerPending ? theme.colors.muted : theme.accent}>❯ </Text>
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(draft.current); }}
           reservedKeys={approvalKeysActive ? ['1','2','3'] : queueOpen && !pending ? ['d'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
-          focus={state.online && !state.busy && !copyMode} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
+          focus={state.online && !state.busy && !copyMode && !answerPending} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
         </Box>
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
       </Box>

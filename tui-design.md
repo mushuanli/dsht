@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,448 行；`tests/` 26 个测试文件；186 项测试 |
+| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,468 行；`tests/` 26 个测试文件；186 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -829,7 +829,7 @@ C4Dynamic
 
 投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。终端**不维护第二份队列**，排队项全部来自 `session/control`；`/queue` 的删除动作调用 `session/updateQueue`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。
 
-交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`；审批选择激活时数字键由选择器保留，输入框中的普通草稿不受影响。Esc 与 Ctrl+C 保留待答交互，只有 `/cancel` 或显式回答才终结它。
+交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如 `/cancel` 用于终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。Esc 与 Ctrl+C 保留待答交互，只有显式回答才终结它。
 
 ```mermaid
 sequenceDiagram
@@ -1301,7 +1301,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 58 个模块、6,448 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 58 个模块、6,468 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1344,7 +1344,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 606 | `App` |
+| `ui/app.tsx` | 626 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
