@@ -42,6 +42,22 @@ test('a save is refused while the directory already holds a newer cut', async t 
   assert.equal(await cutOf(join(directory, name('s1'))), 9);
 });
 
+test('an older engine cannot seal its rates over a slice a newer engine decided', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-ledger-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const priced = (cut: number, engine: number | undefined): SavedCost => ({ version: 2, sessionId: 's1', cut, charges: [
+    { key: '0', provider: 'deepseek-official', model: 'deepseek-v4-flash', amount: 2, priceId: 'flash', ...(engine === undefined ? {} : { engine }) }] });
+  assert.equal(await saveLedger(directory, priced(3, 2)), true);
+  // The process that loaded the old table keeps it in memory, so its newer cut arrives with no engine.
+  assert.equal(await saveLedger(directory, priced(9, undefined)), false);
+  assert.equal(await readFile(join(directory, name('s1')), 'utf8'), `${JSON.stringify(priced(3, 2))}\n`);
+  // The same engine may still advance the slice, and so may a later one.
+  assert.equal(await saveLedger(directory, priced(9, 2)), true);
+  assert.equal(await saveLedger(directory, priced(10, 3)), true);
+  // A slice with nothing priced cannot replace priced amounts either.
+  assert.equal(await saveLedger(directory, { version: 2, sessionId: 's1', cut: 11,
+    charges: [{ key: '0', provider: 'deepseek-official', model: 'deepseek-v4-flash', reason: 'no price version' }] }), false);
+});
+
 test('cut files under the replaced name migrate to the fixed name and are removed', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-ledger-')); t.after(() => rm(directory, { recursive: true, force: true }));
   await writeFile(join(directory, `${name('s1').slice(0, -5)}-2.json`), JSON.stringify(slice('s1', 2)));

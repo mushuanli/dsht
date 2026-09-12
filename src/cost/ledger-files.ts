@@ -67,9 +67,33 @@ export async function loadLedgers(directory: string | undefined): Promise<{ sess
 export async function saveLedger(directory: string, saved: SavedCost): Promise<boolean> {
   const path = join(directory, ledgerName(saved.sessionId));
   const existing = await readText(path);
-  if (existing !== undefined && persistedCut(existing) > saved.cut) return false;
+  if (existing !== undefined) {
+    if (persistedCut(existing) > saved.cut) return false;
+    // A process that loaded an older rate table keeps it in memory for its whole life, so its next
+    // scan would seal yesterday's rates over today's decisions. An amount decided by a newer engine
+    // is never replaced by an older one; the stale writer simply persists nothing.
+    if (persistedEngine(existing) > sliceEngine(saved)) return false;
+  }
   await writePrivateFile(path, JSON.stringify(saved) + '\n');
   return true;
+}
+
+/** Engine version of the newest decision in one persisted slice, or 0 when it holds none.
+ * @param raw - File contents read from the ledger directory.
+ * @returns The highest engine version recorded, or 0 when the file carries no decision.
+ */
+function persistedEngine(raw: string): number {
+  try { const saved = parseLedger(raw); return saved === undefined ? 0 : sliceEngine(saved); }
+  catch { return 0; }
+}
+
+/** Engine version of the newest decision in one slice, or 0 when it holds none.
+ * @param saved - Slice about to be written.
+ * @returns The highest engine version it records, or 0 when it carries no decision.
+ */
+function sliceEngine(saved: SavedCost): number {
+  // A decision recorded before the engine was stamped counts as the first engine.
+  return saved.charges.reduce((highest, charge) => Math.max(highest, charge.amount === undefined ? 0 : charge.engine ?? 1), 0);
 }
 
 /** The cut already persisted in one file, or -1 when it holds no decision worth keeping.
