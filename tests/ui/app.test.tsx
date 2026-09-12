@@ -680,6 +680,24 @@ test('Esc closes an open command panel and keeps the draft beside it', async t =
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
+test('/history expires on its own and closes immediately on Esc', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} panelLifetimeMs={150} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '/history'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('History · loaded records') === true);
+  // A forgotten lookup releases the composer without another keystroke.
+  await until(() => ui.lastFrame()?.includes('History · loaded records') === false, 2000);
+  await pressKey(ui, '/history'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('History · loaded records') === true);
+  await pressKey(ui, '\u001b');
+  await until(() => ui.lastFrame()?.includes('History · loaded records') === false);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
 test('cost coverage marks the subtotals it cannot confirm instead of rewriting them', async t => {
   const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
   const fixture = await host(); t.after(() => fixture.close());

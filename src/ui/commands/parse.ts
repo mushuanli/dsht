@@ -27,6 +27,7 @@ export type Submission =
   | { kind: 'hostCommand'; line: string }
   | { kind: 'export'; destination?: string }
   | { kind: 'exportHtml'; destination?: string }
+  | { kind: 'coredump'; tag?: string }
   | { kind: 'answer'; text: string }
   | { kind: 'error'; message: string }
   | { kind: 'prompt'; text: string };
@@ -122,6 +123,11 @@ export function classifySubmission(raw: string, context: SubmissionContext): Sub
     if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
     const destination = value.slice(12).trim().replace(/^(["'])(.*)\1$/, '$2');
     return { kind: 'exportHtml', ...(destination ? { destination } : {}) };
+  }
+  if (/^\/coredump(?:\s|$)/.test(value)) {
+    // A diagnostic of this client's own heap needs neither a session nor a connected host.
+    const tag = value.slice(9).trim().replace(/^(["'])(.*)\1$/, '$2');
+    return { kind: 'coredump', ...(tag ? { tag } : {}) };
   }
   if (context.question) return { kind: 'answer', text: value };
   if (context.pending) return { kind: 'error', message: 'Answer the approval with /allow or /deny' };

@@ -32,6 +32,7 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/feedback', usage: 'text', description: 'Record feedback about the session' },
   { command: '/export', usage: '[local.zip]', description: 'Save the session log ZIP to a new local file' },
   { command: '/export-html', usage: '[local.html]', description: 'Save loaded conversation with diagrams and math as offline HTML' },
+  { command: '/coredump', usage: '[tag]', description: 'Write a V8 heap snapshot for memory diagnosis' },
   { command: '/allow', description: 'Approve the pending request once' },
   { command: '/deny', description: 'Reject the pending request' },
   { command: '/status', description: 'Show full session status details' },

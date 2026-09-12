@@ -174,7 +174,7 @@ C4Component
   title 业务域与依赖方向（自下而上，无反向依赖）
 
   Component(root, "共享契约", "src/state.ts", "State 与 ControllerStore")
-  Component(storage, "storage/", "3 文件 132 行", "全部文件系统操作：私有读写、原子替换、独占创建与流式写入")
+  Component(storage, "storage/", "4 文件 177 行", "全部文件系统操作：私有读写、原子替换、独占创建、流式写入与堆快照")
   Component(transport, "transport/", "5 文件 359 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
   Component(session, "session/", "14 文件 2082 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "8 文件 638 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
@@ -444,7 +444,7 @@ class Controller implements ControllerStore, ConnectionListener {
   interrupt / pinHistory / showPicker / removalTarget / removeTarget
   pickWorkspace / switchWorkspace / switchSession / enterPath / createWorkspace / createSession
   selectSession / waitForHistory / searchSessions / references / command / removeQueued / exportLog
-  prompt / cancelTurn / older / searchHistory / historyAt / historyThrough / answer / approve
+  heapSnapshot(tag?) / prompt / cancelTurn / older / searchHistory / historyAt / historyThrough / answer / approve
 }
 ```
 
@@ -570,12 +570,17 @@ function removeFile(path: string): Promise<void>
 function ensureDirectory(path: string): Promise<void>
 function ensurePrivateDirectory(path: string, label: string): Promise<void>
 function listEntries(path: string): Promise<string[]>
+
+// heap-snapshot.ts
+function heapSnapshotName(tag: string, time: number): string
+function writeHeapSnapshot(directory: string, tag?: string, write?: (file: string) => string): string
 ```
 
 | 文件 | 职责 |
 | --- | --- |
 | `files.ts` | 读取、私有读取（拒绝符号链接／非本人属主／组或其他权限）、原子替换写入、独占创建、独占流式写入与删除 |
 | `directories.ts` | 目录创建、私有目录校验与目录项列举 |
+| `heap-snapshot.ts` | 由采样标签与时间生成单目录内的安全文件名，并调用 `v8.writeHeapSnapshot` 写出 `.heapsnapshot`；`write` 可注入以便测试 |
 | `index.ts` | 域 barrel；`transport/`、`session/`、`cost/`、`cli/` 通过它访问 |
 
 `readPrivateFile` 与 `ensurePrivateDirectory` 的错误信息带上调用方传入的 `label`，因此 Cookie 相关的文案与重构前完全一致。`writeExclusiveStream` 先以 `wx` 创建目标文件、之后才调用 `source`，所以目标已存在时不会先访问宿主，而来源失败或取消都会删除残留文件。
@@ -668,7 +673,7 @@ dsht [options] [list workspaces|list sessions]
 
 ### 3.4 Slash 命令接口
 
-`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 27 条：
+`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 28 条：
 
 | 命令 | 参数 | 行为 |
 | --- | --- | --- |
@@ -692,6 +697,7 @@ dsht [options] [list workspaces|list sessions]
 | `/feedback` | `text` | 记录会话反馈 |
 | `/export` | `[local.zip]` | 把会话日志 ZIP 保存为新文件 |
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
+| `/coredump` | `[tag]` | 在客户端当前工作目录写出 V8 堆快照（`<tag>-<Date.now()>.heapsnapshot`，`tag` 默认 `snapshot`），供 Chrome DevTools 分析内存增长；写入同步执行，期间客户端暂停 |
 | `/allow` | — | 一次性批准待答请求 |
 | `/deny` | — | 拒绝待答请求 |
 | `/status` | — | 展开完整状态详情；相关值合并成行且计数用紧凑单位（46 列常见 11 行、一屏可显示；带长会话 ID 与长错误约 14 行），窄屏按宽度换行，`↑`/`↓` 逐行滚动、`PgUp`/`PgDn` 翻屏 |
@@ -701,6 +707,8 @@ dsht [options] [list workspaces|list sessions]
 | `/quit` | — | 退出 dsht |
 
 补全规则：仅当草稿以 `/` 开头且不含空格时生效；唯一匹配补全为 `命令 + 空格`，多匹配则扩展到公共前缀。
+
+面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。
 
 ### 3.5 配置与状态路径
 

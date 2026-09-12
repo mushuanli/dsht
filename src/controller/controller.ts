@@ -1,5 +1,6 @@
 /** Application facade: composes the connection, session, catalog and cost domains. */
 import { Client } from '../transport/client.ts';
+import { writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, type Json, type ObjectValue } from '../transport/wire.ts';
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from '../session/memory.ts';
 import { layoutStats } from '../session/history.ts';
@@ -355,6 +356,12 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @returns Absolute saved filename.
    */
   async exportHtml(path: string | undefined, signal: AbortSignal): Promise<string> { return this.session.exportHtml(path, signal); }
+
+  /** Write a V8 heap snapshot into this client's working directory; the write pauses the client.
+   * @param tag - Sampling-point label naming the file, such as `after-stress`.
+   * @returns Absolute path of the written snapshot.
+   */
+  heapSnapshot(tag?: string): string { return writeHeapSnapshot(process.cwd(), tag); }
 
   /** Admit text once as steering while running, or a new turn while idle.
    * @param text - Composed prompt text.

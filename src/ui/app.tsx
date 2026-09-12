@@ -114,6 +114,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const timer = setTimeout(() => setNotice(undefined), panelLifetimeMs);
     return () => clearTimeout(timer);
   }, [notice, panelLifetimeMs, copyMode]);
+  // `/history` is a lookup rather than a panel to read, so it expires with the notice lifetime;
+  // Esc closes it sooner, and its own content search stays open until the reader leaves it.
+  useEffect(() => {
+    if (copyMode || contentSearch || historyQuery === undefined) return;
+    const timer = setTimeout(() => { setHistoryQuery(undefined); setHistoryMatches(undefined); }, panelLifetimeMs);
+    return () => clearTimeout(timer);
+  }, [historyQuery, contentSearch, panelLifetimeMs, copyMode]);
   const pending = state.pending[0];
   const queued = controller.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
   useEffect(() => { setQueueOpen(false); }, [state.sessionId, pending?.eventId]);
@@ -214,7 +221,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       return;
     }
     if (key.ctrl && _value === 's') { setCopyMode(true); return; }
-    if ((key.escape || key.ctrl && _value === 'c') && historyAbort.current) { historyAbort.current.abort(); return; }
+    if ((key.escape || key.ctrl && _value === 'c') && historyAbort.current) {
+      historyAbort.current.abort();
+      // Esc also leaves a history list that was already on screen when the load was aborted.
+      if (key.escape && historyQuery !== undefined) { setHistoryQuery(undefined); setHistoryMatches(undefined); }
+      return;
+    }
     if ((key.escape || key.ctrl && _value === 'c') && controller.state.pending.length) {
       if (key.ctrl && draft.current) setInput('');
       if (key.escape) {
@@ -398,6 +410,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           return;
         case 'exportHtml':
           await historyOperation(async signal => { setNotice(`Saved loaded conversation: ${await controller.exportHtml(submission.destination, signal)}`); }, 'Exporting loaded conversation…');
+          return;
+        case 'coredump':
+          // V8 serializes the heap synchronously, so the client stalls until the file is written;
+          // the path is reported afterwards so the snapshot can be opened in DevTools.
+          await historyOperation(async () => {
+            setNotice(`Heap snapshot saved: ${controller.heapSnapshot(submission.tag)}`);
+          }, 'Writing heap snapshot…');
           return;
         case 'answer': await answerQuestion(question!.multiSelect === true ? choiceState.selected : [], submission.text); return;
         case 'error': throw new Error(submission.message);
