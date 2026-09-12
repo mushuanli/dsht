@@ -1254,6 +1254,74 @@ test('question options support numbers, arrows, multi-selection and numeric cust
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt' || call.method === 'session/cancel'), false);
 });
 
+test('Escape dismisses the whole question set as a rejection, discarding partial answers', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'dismiss-me', agentId: 's1', request: { questions: [
+    { id: 'one', header: 'Destination', question: 'Choose a target', options: [{ label: 'First' }, { label: 'Second' }] },
+    { id: 'two', question: 'And then?', options: [{ label: 'Third' }] },
+  ] } }];
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => ui.lastFrame()?.includes('Choose a target') === true);
+  // The first question is answered locally, so the dismissal has partial state to throw away.
+  await pressKey(ui, '1');
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('And then?') === true);
+  assert.match(ui.lastFrame()!, /Esc dismisses/);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+  await pressKey(ui, '\u001b');
+  await until(() => controller.state.pending.length === 0);
+  const reply = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
+  assert.equal(reply.eventId, 'dismiss-me');
+  assert.deepEqual(object(reply.outcome), { kind: 'rejected', error: {
+    name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED',
+  } });
+  // Dismissal is not a turn cancellation, and the dialog is gone from the frame.
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+  assert.doesNotMatch(ui.lastFrame()!, /And then\?|Choose a target/);
+});
+
+test('Escape steps out of the free-text row before it dismisses the question', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'two-step', agentId: 's1', request: { questions: [
+    { id: 'only', question: 'Pick one', options: [{ label: 'Default' }] },
+  ] } }];
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => ui.lastFrame()?.includes('Pick one') === true);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Esc returns to options') === true);
+  // The first Escape only leaves the custom row; the request stays pending and nothing is sent.
+  await pressKey(ui, '\u001b');
+  await until(() => ui.lastFrame()?.includes('Enter confirm') === true);
+  assert.equal(controller.state.pending.length, 1);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+  // The second Escape dismisses the set, exactly like the close button on the Web client.
+  await pressKey(ui, '\u001b');
+  await until(() => controller.state.pending.length === 0);
+  const reply = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
+  assert.deepEqual(object(reply.outcome), { kind: 'rejected', error: {
+    name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED',
+  } });
+});
+
+test('approval Escape still keeps the request pending', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.replayInteractions = [{ type: 'waterfall', event: 'approval/request', eventId: 'keep-me', agentId: 's1', request: { reason: 'Needs a decision' } }];
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => ui.lastFrame()?.includes('Needs a decision') === true);
+  await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ 1\. Allow once/);
+  await pressKey(ui, '\u001b');
+  assert.match(ui.lastFrame()!, /Esc keeps this pending/);
+  assert.equal(controller.state.pending.length, 1);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
+});
+
 test('advancing questions preserves every option label beside descriptions in a long session', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 49, hasMore: false, header: { id: 's1' }, assistantStream: { revision: 0 },

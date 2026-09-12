@@ -852,7 +852,7 @@ C4Dynamic
 
 投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。终端**不维护第二份队列**，排队项全部来自 `session/control`；`/queue` 的删除动作调用 `session/updateQueue`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。
 
-交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如 `/cancel` 用于终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。Esc 与 Ctrl+C 保留待答交互，只有显式回答才终结它。
+交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如自由输入模式下用 `/cancel` 终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。提问与审批的退出语义不同：Esc 在选项模式下**放弃整组问题**——与 Web 客户端关闭按钮同一语义，以 `{ kind: 'rejected', error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } }` 结算该 waterfall，因此本地已收集的部分答案一并作废，宿主记为取消而不是回答；在 `Other answer` 里 Esc 仍先回到选项，再按一次才放弃。审批没有"取消"这个动作（与 Web 端的拒绝／允许两个按钮一致），Esc 仍只清除高亮；Ctrl+C 在两个对话框上都只清空草稿、保留待答交互。只有显式回答（审批的 1/2/3、提问的选项或自由文本）或提问上的 Esc 才终结它。
 
 输入框的多行几何：composer 是"绝不吞掉对话区"的一段固定预算，而不是随内容增长的区域。`app.tsx` 由终端行数算出 body 高度（扣除根框、页眉、状态栏与一行瞬时提示），内容窗口取 `clamp(floor(body/3), 2, 5)` 再受 `body - 7` 约束，剩余行永远留给对话；列数不参与高度计算，因此横屏或宽终端只减少折行。输入内容本身保留用户粘贴的换行与制表符：`editInput` 只把 `CRLF`/`CR` 归一为 `LF` 并剥离其他控制字符，制表符在**显示**时按制表位展开、发送时保持原字节。显示行、光标行与折叠块都由 `src/ui/input/viewport.ts` 在每次渲染时从文本推导，不保存 span，因此任何编辑都无需重定位区间——这与"投影与渲染分离"的既有决策一致。多行草稿的**未折叠**视觉行数超过窗口时，仅折叠中间行（`[N lines · X KB]`），首行与末行保持可见，光标所在行因此始终可见；判定读取未折叠高度，折叠不会反过来触发自身。折叠区间对编辑是一个对象：`←`/`→` 一次跨越，区间两端的 Backspace/Delete 一次删除整块，而 Ctrl+K/Ctrl+U 等显式剪除仍按字符工作（区间随后重新推导）。一期不检测粘贴来源、不引入 bracketed paste，也不新增任何按键；↑/↓ 仍归历史回填。
 
@@ -1203,7 +1203,7 @@ C4Component
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（16 篇）与 `feature/`（1 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（29 篇）、`bug-fix/`（4 篇）与 `feature/`（7 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 | Agent Note | 主题 |
 | --- | --- |
@@ -1224,6 +1224,7 @@ C4Component
 | `architecture/2026-09-11-terminal-approval-options` | 审批编号选择器、未选中起始、Esc 与重放重置 |
 | `architecture/2026-09-11-terminal-storage-unit` | 文件操作统一归属 `src/storage/`，由依赖门禁强制 |
 | `architecture/2026-09-11-terminal-memory-log` | 默认启用的有界运行时内存日志，区分真实保留与 V8 高水位 |
+| `feature/2026-09-12-terminal-question-dismiss` | 提问的 Esc 放弃整组问题，以 `ASK_CANCELLED` 结算 |
 
 ### 7.3 文档配对
 
@@ -1259,7 +1260,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 24 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 165 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
+- 24 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 226 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、提问的 Esc 放弃（rejected/`ASK_CANCELLED` 结算、Other 的两步退出）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。

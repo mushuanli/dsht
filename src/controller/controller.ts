@@ -419,6 +419,9 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param allowed - Whether the request is approved once.
    */
   async approve(allowed: boolean): Promise<void> { await this.session.approve(allowed); }
+
+  /** Dismiss the whole pending question set without answering it, as the Web close button does. */
+  async dismissQuestion(): Promise<void> { await this.session.dismissQuestion(); }
 }
 
 export type { HistorySearch, RemovalTarget } from '../session/types.ts';

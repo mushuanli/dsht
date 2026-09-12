@@ -230,10 +230,21 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if ((key.escape || key.ctrl && _value === 'c') && controller.state.pending.length) {
       if (key.ctrl && draft.current) setInput('');
       if (key.escape) {
-        setOptionState({ ...choiceState, custom: false });
         setApprovalSelection(undefined);
         setRemoval(undefined); setModels(undefined); setThoughtList(false); setSearchResults(undefined);
         setHistoryQuery(undefined); setHistoryMatches(undefined); setHelp(false); setCostExpanded(false); setStatusExpanded(false);
+        // A question batch is one request, so Esc leaves the whole set the way the Web client's
+        // close button does. The free-text row keeps its own step back: its first Esc returns to
+        // the options, and only the next one dismisses. Approval keeps every choice explicit.
+        if (pending?.event === 'user-questions/request' && !choiceState.custom) {
+          if (controller.state.online && !controller.state.busy && controller.state.pending[0]?.eventId === eventId) {
+            setOptionState(undefined);
+            setAnswers(previous => { const rest = { ...previous }; delete rest[eventId]; return rest; });
+            operate(() => controller.dismissQuestion());
+          }
+          return;
+        }
+        setOptionState({ ...choiceState, custom: false });
       }
       return;
     }
@@ -657,9 +668,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
               {option.description && <Text dimColor wrap="truncate-end">{'     '}{safeText(string(option.description))}</Text>}
             </Box>)}
           <Text dimColor>{choiceState.custom ? 'Type your answer below · Esc returns to options' : question?.multiSelect === true
-            ? '↑ ↓ move · Space / 1–9 toggle · Enter confirm' : '↑ ↓ / 1–9 select · Enter confirm'}</Text>
+            ? '↑ ↓ move · Space / 1–9 toggle · Enter confirm · Esc dismisses' : '↑ ↓ / 1–9 select · Enter confirm · Esc dismisses'}</Text>
         </Box>}
-        <Text dimColor>{question ? 'Choose "Other answer" to type · the draft is kept while this is open'
+        <Text dimColor>{question ? options.length > 0
+          ? 'Choose "Other answer" to type · the draft is kept while this is open'
+          : 'Esc dismisses the question · the draft is kept while this is open'
           : 'Esc keeps this pending · the draft is kept while this is open'}</Text>
       </Box>}
     </>}

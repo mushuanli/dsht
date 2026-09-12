@@ -465,6 +465,22 @@ export class SessionController {
     await this.answer(allowed ? 'allowed-once' : 'rejected');
   }
 
+  /** Dismiss the whole selected-session question set without answering it.
+   *
+   * The Web client's close button settles the same waterfall the same way — reject with
+   * `ASK_CANCELLED` — so the host records a user cancellation rather than an answer. A question
+   * batch is answered as one request, so dismissals also discard partial local answers.
+   */
+  async dismissQuestion(): Promise<void> {
+    const pending = this.store.state.pending[0];
+    if (pending?.event !== 'user-questions/request') throw new Error('No pending question');
+    await this.reply(pending, { kind: 'rejected', error: {
+      name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED',
+    } });
+    this.interactions.delete(string(pending.eventId));
+    this.store.update({});
+  }
+
   /** Add a page before the retained window using its fixed opening cut.
    * @param signal - Cancels local paging without interrupting the remote agent.
    * @param transcript - Transcript to extend; defaults to the live one.
