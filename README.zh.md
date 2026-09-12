@@ -426,7 +426,7 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 | 字段 | 值 |
 | --- | --- |
-| 名称与版本 | `@itookit/dsht` `0.3.4` |
+| 名称与版本 | `@itookit/dsht` `0.3.5` |
 | 可执行命令 | `dsht`，不安装时用 `npx @itookit/dsht` |
 | 库入口 | `@itookit/dsht` 和 `@itookit/dsht/auth` |
 | 作者 | lizlok\@gmail.com |
