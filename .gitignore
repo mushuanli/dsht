@@ -4,5 +4,8 @@ dist/
 *.log
 .venv/
 *.tgz
+old/
+tmp/
 .agents/
 .diagnostics/
+snapshot-*
