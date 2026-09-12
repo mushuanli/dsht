@@ -108,15 +108,20 @@ export function SearchResultsDialog({ query, items, hasMore, width, enabled, can
 }
 
 /** Title, current selection and confirm action for a picker screen.
- * @param props - Screen title, list identity and navigation state.
+ * @param props - Screen title, list identity, navigation state, usable width and marker key.
  * @returns The picker screen.
  */
-export function PickerScreen({ title, identity, choices, enabled, canSelect }: {
+export function PickerScreen({ title, identity, choices, enabled, canSelect, width, legend }: {
   title: string; identity: string; choices: Choice[]; enabled: boolean; canSelect(): boolean;
+  /** Columns the list may occupy inside the composer frame. */
+  width?: number;
+  /** Marker key shown above the list, for a rollup too compact to spell its states out. */
+  legend?: string;
 }) {
   return <Box flexDirection="column" marginY={1}>
     <Text bold>{title}</Text>
-    <Picker key={identity} choices={choices} enabled={enabled} canSelect={canSelect} />
+    {legend !== undefined && <Text dimColor wrap="truncate-end">{legend}</Text>}
+    <Picker key={identity} choices={choices} enabled={enabled} canSelect={canSelect} width={width} />
   </Box>;
 }
 

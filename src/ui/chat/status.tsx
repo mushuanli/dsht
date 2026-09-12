@@ -303,14 +303,17 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
       : phase.kind === 'tool' ? `${phase.name ?? 'tool'} ${phaseText(now - phase.startedAt)}`
       : `${phase.kind === 'thinking' ? 'think' : 'write'} ${phaseText(now - phase.startedAt)}`;
     // The state token reports a fact and never guesses: a paused clock is named, offline and errors
-    // take the token over, and an unknown phase simply leaves the phase group empty.
+    // take the token over, and an unknown phase simply leaves the phase group empty. An answer this
+    // client still owes outranks the paused reason, because that reason is only why the clock stopped.
     const stateToken: StatusSegment = !state.online
       ? { text: '! Offline', color: theme.status.offline }
       : state.controlError || state.modelError
         ? { text: '⚠ Error', color: theme.status.warning }
-        : pauseReason !== undefined
-          ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
-          : running ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
+        : state.pending.length > 0
+          ? { text: '? Needs you', color: theme.status.critical }
+          : pauseReason !== undefined
+            ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
+            : running ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
     // One marker covers both scopes, because either an unpriceable record or a scan that has not
     // covered every session makes the pair inexact as a reading.
     const inexact = coverage !== 'complete';
@@ -374,9 +377,11 @@ const StatusDetails = memo(function StatusDetails({ controller, theme, width, no
   const turns = count(numeric(record(view.values.sessionStats).turns));
   const duration = since === undefined ? 'unknown duration' : elapsedTime(now - since);
   const detail: StatusDetail[] = [
-    { key: 'activity', color: running ? theme.colors.context : theme.colors.muted, text: running
-      ? `◐ Working · ${duration}${state.transcript.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
-      : '● Ready · Ctrl+C exit' },
+    { key: 'activity', color: state.pending.length > 0 ? theme.status.critical : running ? theme.colors.context : theme.colors.muted, text: state.pending.length > 0
+      ? '? Needs you · answer the request above to continue'
+      : running
+        ? `◐ Working · ${duration}${state.transcript.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
+        : '● Ready · Ctrl+C exit' },
     { key: 'host', text: `${safeText(controller.base)} · ${safeText(state.status)}${!state.online ? ' · offline, last known status' : ''}` },
     ...state.sessionId
       ? [{ key: 'session', text: `Session ${safeText(state.sessionId)}${controller.sessionMode ? ` · ${safeText(controller.sessionMode)}` : ''}` }] : [],

@@ -20,7 +20,7 @@ import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, QueueDialog, Queue
 import { COMMAND_HINTS, completeCommand as completeDraft, suggestedCommands } from './commands/registry.ts';
 import { classifySubmission } from './commands/parse.ts';
 import { Controller, type HistorySearch, type RemovalTarget } from '../controller/controller.ts';
-import { sessionLabel, sessionStatus, workspaceStatus } from '../session/navigation.ts';
+import { ROLLUP_LEGEND, sessionLabel, sessionStatus, workspaceCounts, workspaceDetail, workspaceSegments, workspaceStatus, type RollupState, type RollupStyle } from '../session/navigation.ts';
 import { array, errorText, object, safeText, string, type ObjectValue } from '../transport/wire.ts';
 
 /** Transient notices expire; interactive panels remain open until dismissed. */
@@ -429,17 +429,37 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (accepted) setInput('');
   };
 
+  const width = Math.max(10, (stdout.columns ?? 80) - 2);
   // Session activity is a list-level fact, so both pickers read it without loading any history.
   const listAge = Date.now();
+  // Unanswered interactions are held per session already; a list only has to read the counts.
+  const pendingCounts = controller.pendingCounts();
+  const isPending = (session: ObjectValue): boolean => (pendingCounts.get(string(session.sessionId)) ?? 0) > 0;
   const sessionsOf = (workspace: ObjectValue): ObjectValue[] => {
     const ids = new Set(array(workspace.sessionIds).map(string));
     return state.sessions.filter(session => ids.has(string(session.sessionId)));
   };
+  // `width` counts only the frame's outer padding, so the list subtracts the composer border and
+  // padding it renders inside; measured against the wider value a long row would still wrap.
+  const pickerWidth = Math.max(16, width - 4);
+  // Words explain themselves. Badges fit a narrow terminal but need the marker key beside them.
+  const rollupStyle: RollupStyle = pickerWidth >= 80 ? 'words' : 'badges';
+  // Needs-you is the one state that asks for action, so it outranks working; ready stays quiet.
+  const stateColor: Record<RollupState, string> = { needs: theme.status.critical, running: theme.status.working, idle: theme.colors.muted };
   const choices: Choice[] = state.screen === 'workspaces' ? [
-    ...state.workspaces.map(workspace => ({ key: string(workspace.workspaceId),
-      label: `${[workspaceStatus(sessionsOf(workspace)), string(workspace.title), string(workspace.path)].filter(Boolean).join('  ')}`,
-      remove: () => setRemoval({ kind: 'workspace', id: string(workspace.workspaceId), name: string(workspace.title), path: string(workspace.path) }),
-      action: () => controller.pickWorkspace(string(workspace.workspaceId)) })),
+    ...state.workspaces.map(workspace => {
+      const counts = workspaceCounts(sessionsOf(workspace), new Set(pendingCounts.keys()));
+      const name = string(workspace.title);
+      const title = name || string(workspace.path);
+      // A path only earns a column when words are affordable and the title does not already say it.
+      const detail = rollupStyle === 'words' && name ? workspaceDetail(string(workspace.path), name) : '';
+      return { key: string(workspace.workspaceId),
+        label: [workspaceStatus(counts, rollupStyle), title].filter(Boolean).join('  '), title,
+        cells: workspaceSegments(counts, rollupStyle).map(segment => ({ text: segment.text, color: stateColor[segment.state] })),
+        ...(detail ? { detail } : {}),
+        remove: () => setRemoval({ kind: 'workspace', id: string(workspace.workspaceId), name: string(workspace.title), path: string(workspace.path) }),
+        action: () => controller.pickWorkspace(string(workspace.workspaceId)) };
+    }),
     { key: '@all', label: 'All sessions', action: () => operate(() => controller.switchSession('all')) },
     // The directory this client runs in is the one case where no path has to be typed, and offering
     // it only while the host has not registered it keeps the row from repeating itself.
@@ -450,12 +470,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   ] : [
     ...(state.workspaceId && !state.showAllSessions ? [{ key: '@new', label: '+ New session', action: () => operate(() => controller.createSession()) }] : []),
     ...controller.visibleSessions.map(session => ({ key: string(session.sessionId),
-      label: `${sessionStatus(session, listAge)} ${sessionLabel(session)}  ${session.sessionId}`,
+      label: `${sessionStatus(session, listAge, isPending(session))} ${sessionLabel(session)}  ${session.sessionId}`,
       remove: () => operate(() => requestRemoval('session', string(session.sessionId))),
       action: () => { setScroll(0); operate(() => controller.selectSession(string(session.sessionId))); } })),
     { key: '@back', label: '← Workspaces', action: () => operate(() => controller.showPicker('workspaces')) },
   ];
-  const width = Math.max(10, (stdout.columns ?? 80) - 2);
   const layout = useMemo(() => historyLayout(displayTranscript, width, reasoning, reasoningOverrides, liveReasoning),
     [displayTranscript, displayTranscript.version, width, reasoning, reasoningOverrides, liveReasoning]);
   const { length, first } = layout;
@@ -600,7 +619,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       onOpen={sessionId => operate(() => openSearchSession(sessionId, searchResults.query))}
       onClose={() => setSearchResults(undefined)} /> : state.screen === 'workspaces' || state.screen === 'sessions' ? <PickerScreen
       title={state.screen === 'workspaces' ? 'Choose workspace' : state.showAllSessions ? 'Choose session · All workspaces' : 'Choose session'}
-      identity={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices}
+      identity={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices} width={pickerWidth}
+      // A rollup of badges is read through the key beside it; spelled-out states need no key, and a
+      // terminal too narrow for the whole key gets the badges alone rather than half a legend.
+      legend={state.screen === 'workspaces' && rollupStyle === 'badges' && pickerWidth >= 40 ? ROLLUP_LEGEND : undefined}
       enabled={state.online && !state.busy && !input}
       canSelect={() => !draft.current && controller.state.online && !controller.state.busy} /> : <>
       {thoughtList && <ThoughtsDialog identity={`thoughts:${state.sessionId}`} options={thoughtOptions} empty={!thoughtEntries?.length && !liveThought}

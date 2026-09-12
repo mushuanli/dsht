@@ -104,6 +104,23 @@ export class SessionController {
     return [...this.interactions.values()].filter(frame => frame.agentId === state.sessionId);
   }
 
+  /** Unanswered interactions by session, so a list can show who is waiting without opening them.
+   *
+   * The host delivers approval and question waterfalls for every session on one stream, and this
+   * client already retains them to answer later, so the counts are a fact of this generation rather
+   * than a new subscription. They live only as long as the connection: a reconnect clears the map
+   * until the host replays the pending waterfalls.
+   * @returns One count per session holding at least one unanswered interaction.
+   */
+  pendingCounts(): ReadonlyMap<string, number> {
+    const counts = new Map<string, number>();
+    for (const frame of this.interactions.values()) {
+      if (typeof frame.agentId !== 'string') continue;
+      counts.set(frame.agentId, (counts.get(frame.agentId) ?? 0) + 1);
+    }
+    return counts;
+  }
+
   /** Retain a recognized host waterfall; unknown events stay with the connection to delegate.
    * @param frame - One decoded waterfall frame.
    * @returns Whether this domain retained the frame for an answer.

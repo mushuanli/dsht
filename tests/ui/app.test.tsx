@@ -12,6 +12,7 @@ import { COMMAND_HINTS, commonPrefix } from '../../src/ui/commands/registry.ts';
 import { Controller } from '../../src/controller/controller.ts';
 import { array, object, type ObjectValue } from '../../src/transport/wire.ts';
 import { host, snapshot, until } from '../support/host.ts';
+import { renderAt } from '../support/tty.ts';
 import { StatusBar } from '../../src/ui/chat/status.tsx';
 
 function assertInsideComposer(frame: string, label: string) {
@@ -842,14 +843,47 @@ test('the pickers show each session state and a workspace rollup from the list s
   let ui!: ReturnType<typeof render>;
   await act(async () => { ui = render(<App controller={controller} />); });
   t.after(() => { ui.unmount(); ui.cleanup(); });
-  // The workspace row rolls its sessions up by state, running first.
-  assert.match(ui.lastFrame()!, /◐ 1  ● 1  ○ 1  Project α  \/host\/project/, ui.lastFrame());
+  // The workspace row spells the states out in attention order, drops the blank session entirely, and
+  // keeps the path in its own right-aligned column beside the title.
+  assert.match(ui.lastFrame()!, /❯ Project α\s+◐ 1 working · ● 1 ready\s+\/host\/project/, ui.lastFrame());
+  // An unanswered approval is the state the user has to act on, so it leads the rollup.
+  await act(async () => { controller.session.waterfall({ event: 'approval/request', eventId: 'a1', agentId: 's1', request: { description: 'Confirm' } }); });
+  assert.match(ui.lastFrame()!, /\? 1 needs you · ◐ 1 working/, ui.lastFrame());
   controller.state = { ...controller.state, screen: 'sessions', workspaceId: 'w1', showAllSessions: false };
   await act(async () => { ui.rerender(<App controller={controller} />); });
   const frame = ui.lastFrame()!;
+  // The session rows read the same three states with the same markers, so the list needs one key only.
   assert.match(frame, /◐ 2m Running one  s2/, frame);
-  assert.match(frame, /● 5m Idle one  s1/, frame);
+  assert.match(frame, /\? 5m Idle one  s1/, frame);
   assert.match(frame, /○ Blank one  s3/, frame);
+});
+
+test('the bar names an answer the user still owes ahead of the running clock', () => {
+  const controller = new Controller('http://x1:4096', undefined);
+  controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
+    sessions: [{ sessionId: 's1', running: true }],
+    pending: [{ eventId: 'a1', event: 'approval/request', agentId: 's1', request: { description: 'Confirm' } }] };
+  const ui = render(<StatusBar controller={controller} pauseReason="dialog" />);
+  const frame = ui.lastFrame()!;
+  ui.unmount(); ui.cleanup();
+  // The paused reason only explains the frozen clock; the owed answer is what the user has to act on.
+  assert.match(frame, /\? Needs you/, frame);
+  assert.equal(frame.includes('⏸ dialog'), false, frame);
+});
+
+test('a narrow workspace picker keeps the markers and spells them out once', async t => {
+  const controller = new Controller('http://x1:4096', undefined);
+  controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
+    workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2'] }],
+    sessions: [{ sessionId: 's1', running: true }, { sessionId: 's2', blank: true }] };
+  // 46 columns leave the list inside the composer frame too narrow for words but roomy enough for a key.
+  const ui = renderAt(<App controller={controller} />, 46, 24);
+  t.after(() => ui.close());
+  const frame = ui.lastFrame()!;
+  assert.match(frame, /● ready · ◐ working · \? needs you/, frame);
+  assert.match(frame, /❯ Project α\s+◐1/, frame);
+  // The path column is the first thing to go, because the title is what the row is for.
+  assert.equal(frame.includes('/host/project'), false, frame);
 });
 
 test('Tab completes a slash command and stops at an ambiguous shared prefix', async t => {
