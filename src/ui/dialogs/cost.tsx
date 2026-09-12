@@ -25,6 +25,7 @@ export function CostPanel({ controller }: { controller: Controller }) {
       : costs.coverage === 'partial' ? 'Partial totals · awaiting a complete scan'
       : costs.scannedAt ? `Last refresh: ${new Date(costs.scannedAt).toISOString()}`
       : 'Cached totals from the previous run'}</Text>
+    {costs.customPrices && <Text color={theme.colors.context}>Rates come from prices.json, not the shipped table.</Text>}
     <Text dimColor>Recorded settlement time determines tariff; * means a subtotal is not exact. Provider invoices are authoritative.</Text>
     {costs.error && <Text color={theme.colors.context}>Partial totals: {safeText(costs.error)}</Text>}
     {costs.missing().slice(0, 6).map(reason => <Text key={reason} color={theme.colors.context}>{safeText(reason)}</Text>)}

@@ -4,7 +4,7 @@ import { MISSING_USAGE, type PriceDecision, type PriceVersion, type Rates, type 
 
 const clocks = new Map<string, Intl.DateTimeFormat>();
 
-/** Published rates verified on 2026-09-10; preceding dates require historical configuration.
+/** Published rates verified on 2026-09-12; preceding dates require historical configuration.
  * Flash and Pro are priced independently, and a separate cache write uses the cache-miss input rate.
  */
 const OFFICIAL_PRICING = 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/';
@@ -17,14 +17,52 @@ export const DEFAULT_PRICES: PriceVersion[] = [
   { id: 'deepseek-2026-09-10-flash', provider: 'deepseek-official', model: 'deepseek-flash',
     from: '2026-09-10T00:00:00+08:00', currency: 'CNY', source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai',
     ...PEAK_SCHEDULE, ...FLASH_RATES },
+  // The published table keeps V4 Pro available after 2026-09-14 at these rates, so the interval
+  // stays open until a later page names an end.
   { id: 'deepseek-2026-09-10-pro', provider: 'deepseek-official', model: 'deepseek-v4-pro',
-    from: '2026-09-10T00:00:00+08:00', until: '2026-09-14T12:00:00+08:00', currency: 'CNY',
-    source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai', ...PEAK_SCHEDULE, ...PRO_RATES },
-  // The provider bills `deepseek-v4-pro` requests at Flash rates once V4 Pro is retired.
-  { id: 'deepseek-2026-09-14-pro-served-by-flash', provider: 'deepseek-official', model: 'deepseek-v4-pro',
-    from: '2026-09-14T12:00:00+08:00', currency: 'CNY', source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai',
-    ...PEAK_SCHEDULE, ...FLASH_RATES },
+    from: '2026-09-10T00:00:00+08:00', currency: 'CNY', source: OFFICIAL_PRICING, timezone: 'Asia/Shanghai',
+    ...PEAK_SCHEDULE, ...PRO_RATES },
 ];
+
+/** Revision of the shipped table, recorded beside a seeded file so a correction can replace it. */
+export const PRICES_REVISION = '2026-09-12';
+
+/** Rates the first published revision charged, rebuilt with the same arithmetic so the values compare equal.
+ * It only recognizes that seed; it never prices a request.
+ */
+const UNCORRECTED_SEED_RATES: Record<string, { peak: Rates; offPeak: Rates }> = Object.fromEntries(
+  ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'].map(model => {
+    const scale = model === 'deepseek-v4-pro' ? 3 : 1;
+    return [`deepseek-2026-09-10-${model}`, {
+      peak: { input: 3 * scale, cacheRead: 0.1 * scale, cacheWrite: 3 * scale, output: 9 * scale },
+      offPeak: { input: 1.5 * scale, cacheRead: 0.05 * scale, cacheWrite: 1.5 * scale, output: 4.5 * scale },
+    }];
+  }));
+
+/** Whether a table is the seed an earlier revision wrote, which a corrected ship must replace.
+ *
+ * `prices.json` overrides the shipped table, so an install seeded before the Flash rates were
+ * corrected keeps charging 1.5x for input and 2.5x for cache reads for as long as that file lives.
+ * Only an exact match to the superseded revision qualifies, so a rate the user chose is never rewritten.
+ * @param prices - Table loaded from the configuration file.
+ * @returns True when every entry carries the superseded revision's rates.
+ */
+export function isUncorrectedSeed(prices: readonly PriceVersion[]): boolean {
+  const superseded = Object.keys(UNCORRECTED_SEED_RATES);
+  return prices.length === superseded.length && prices.every(price => {
+    const legacy = UNCORRECTED_SEED_RATES[price.id];
+    return legacy !== undefined && sameRates(price.peak, legacy.peak) && sameRates(price.offPeak, legacy.offPeak);
+  });
+}
+
+/** Compare two rate sets, allowing the representation error a JSON round trip can introduce.
+ * @param a - One rate set.
+ * @param b - The other rate set.
+ * @returns True when every rate agrees.
+ */
+function sameRates(a: Rates, b: Rates): boolean {
+  return (['input', 'cacheRead', 'cacheWrite', 'output'] as const).every(bucket => Math.abs(a[bucket] - b[bucket]) < 1e-9);
+}
 
 /** Validate user-maintained price versions, rejecting ambiguous overlapping intervals.
  * @param value - Parsed prices.json array.

@@ -38,16 +38,20 @@ test('tariffs use Beijing weekdays and half-open morning/afternoon windows', () 
   assert.throws(() => pricesFrom([{ ...prices[0], windows: [[720, 540]] }]), /schedule/);
 });
 
-test('bundled rates match the published tables, including the V4 Pro handover to Flash billing', () => {
+test('bundled rates match the published tables, and V4 Pro keeps its own rates', () => {
   const prices = pricesFrom(DEFAULT_PRICES);
   const rates = (model: string, date: string) => priceAt(prices, 'deepseek-official', model, at(date))?.rates;
   assert.deepEqual(rates('deepseek-flash', '2026-09-10T10:00:00'), { input: 2, cacheRead: 0.04, cacheWrite: 2, output: 8 });
   assert.deepEqual(rates('deepseek-flash', '2026-09-10T20:00:00'), { input: 1, cacheRead: 0.02, cacheWrite: 1, output: 4 });
   assert.deepEqual(rates('deepseek-v4-pro', '2026-09-10T10:00:00'), { input: 9, cacheRead: 0.3, cacheWrite: 9, output: 27 });
   assert.deepEqual(rates('deepseek-v4-pro', '2026-09-10T20:00:00'), { input: 4.5, cacheRead: 0.15, cacheWrite: 4.5, output: 13.5 });
-  // 2026-09-14T12:00+08:00 is the announced handover: the same model name is then billed as Flash.
-  assert.deepEqual(rates('deepseek-v4-pro', '2026-09-14T11:59:59'), { input: 9, cacheRead: 0.3, cacheWrite: 9, output: 27 });
-  assert.deepEqual(rates('deepseek-v4-pro', '2026-09-15T10:00:00'), { input: 2, cacheRead: 0.04, cacheWrite: 2, output: 8 });
+  // The published table keeps V4 Pro on its own rates past 2026-09-14, so the interval stays open.
+  assert.deepEqual(rates('deepseek-v4-pro', '2026-09-15T10:00:00'), { input: 9, cacheRead: 0.3, cacheWrite: 9, output: 27 });
+  assert.deepEqual(rates('deepseek-v4-pro', '2026-10-01T20:00:00'), { input: 4.5, cacheRead: 0.15, cacheWrite: 4.5, output: 13.5 });
+  // Superseded model names stay callable and are served by V4.1-Flash at Flash rates.
+  for (const alias of ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4.1-flash-expires-on-0910']) {
+    assert.deepEqual(rates(alias, '2026-09-10T20:00:00'), { input: 1, cacheRead: 0.02, cacheWrite: 1, output: 4 }, alias);
+  }
 });
 
 test('an unlisted model uses its name family, and an unlisted provider stays unpriced', () => {
@@ -55,7 +59,7 @@ test('an unlisted model uses its name family, and an unlisted provider stays unp
   assert.equal(priceAt(prices, 'deepseek-official', 'some-FLASH-preview', at('2026-09-10T10:00:00'))?.rates.input, 2);
   assert.equal(priceAt(prices, 'deepseek-official', 'some-Pro-preview', at('2026-09-10T10:00:00'))?.rates.input, 9);
   assert.equal(priceAt(prices, 'other', 'deepseek-flash', at('2026-09-10T10:00:00')), undefined);
-  assert.deepEqual(lowestPrice(prices, 'deepseek-official', 'deepseek-v4-pro')?.rates, { input: 1, cacheRead: 0.02, cacheWrite: 1, output: 4 });
+  assert.deepEqual(lowestPrice(prices, 'deepseek-official', 'deepseek-v4-pro')?.rates, { input: 4.5, cacheRead: 0.15, cacheWrite: 4.5, output: 13.5 });
   assert.equal(lowestPrice(prices, 'other', 'deepseek-flash'), undefined);
 });
 

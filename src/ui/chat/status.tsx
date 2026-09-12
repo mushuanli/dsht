@@ -247,8 +247,10 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
   const since = controller.workingSince;
   useEffect(() => {
     setNow(Date.now());
-    if (!running || paused) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    if (paused) return;
+    // An idle bar still re-reads the clock, so a day rollover reaches the cost it reports without
+    // waiting for an unrelated render; a running bar keeps its per-second clock.
+    const timer = setInterval(() => setNow(Date.now()), running ? 1000 : 60_000);
     return () => clearInterval(timer);
   }, [running, since, paused]);
   const state = controller.state;

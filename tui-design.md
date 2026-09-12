@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 57 个模块（8 个业务域 + 共享契约），约 6,037 行；`tests/` 25 个测试文件；166 项测试 |
+| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,182 行；`tests/` 26 个测试文件；172 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -652,6 +652,7 @@ dsht [options] [list workspaces|list sessions]
 | `--json` | `list` 输出 `{ "items": [...] }` |
 | `--memory-log <path>` | 运行时内存日志路径，默认 `<state>/memory.log`；空值报错 |
 | `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 先建好 `.diagnostics/` 再以 `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics` 启动，可在平台期用 `kill -USR2 <pid>` 把堆快照写进该目录（快照目录必须先存在，否则信号会让进程崩溃） |
+| `--reprice` | 用当前价目表重新决定每一笔已记录的账（无终端时只做修复并打印笔数） |
 | `--help` | 打印帮助 |
 
 约束与行为：
@@ -1041,7 +1042,8 @@ C4Component
 - **命名与保留**：每个会话一个固定文件 `<sha256(sessionId)>.json`，`cut` 存在文件内容里，因此一个会话在磁盘上只有一份切片。旧命名 `<sha256(sessionId)>-<cut>.json` 仍可读入，并在加载时迁移到固定名字。
 - **写入**（`CostLedger.replace`）：若内存中已有 `cut >=` 新值则整次跳过；否则先读现有文件，仅当其中记录的 `cut` 不高于待写值时才落盘——先写 `<uuid>.tmp`（`wx`，0600）再 `rename`——并由 `saveLedger` 返回是否写入。未写入时 `replace` 不改动内存切片，使内存与磁盘停在同一切片上。
 - **读取**（`CostLedger.load`）：启动时枚举目录内 `*.json`，逐字段校验 `key`/`provider`/`model`/`usage`/`time`/`amount`/`estimated`/`reason`/`priceId`；同一会话保留 `cut` 最大者（两种命名一起比较），`ENOENT` 跳过。代数不是 2 的文件、内容读不出的文件、以及旧命名下已被取代的文件都属于"下一次扫描会重建"的残片，加载时删除；旧命名里最新的一份先按固定名字重写再删除。不属于本单元的文件名不动。
-- **固化规则**：`priceId` 与 `amount` 是首次计价时写下的决定。后续扫描重放同样的样本时直接复用该决定；只有 `reason === 'missing usage'` 的样本保持开放，等待宿主报告 token。已计价、已估算与未计价的其余情况一律终局。
+- **固化规则**：`priceId` 与 `amount` 是首次计价时写下的决定。后续扫描重放同样的样本时直接复用该决定；只有 `reason === 'missing usage'` 的样本保持开放，等待宿主报告 token。已计价、已估算与未计价的其余情况一律终局。`CostLedger.reprice()`（`--reprice`）是唯一的例外：它依据每笔账保存的样本按当前价目表重新决定，用于修正错误价目表下封存的金额。
+- **价目表来源**：`loadPrices` 在 `prices.json` 缺失时用随包 `DEFAULT_PRICES` 种下并写下 `prices.seed.json`（版本 + 内容摘要）。文件仍与该摘要一致时视为工具所有，会用当前随包表重写（因此费率修正能触达旧安装）；一旦内容被编辑，文件即为权威、永不覆盖，`/cost` 会标明「Rates come from prices.json, not the shipped table」。没有戳记的旧文件仅在与被取代的种子完全一致时被替换。
 - **内存镜像**：`sessions: Map<sessionId, SavedCost>` 是读取路径的实际数据源，`totals: Map<cacheKey, CostTotal>` 在每次 `replace` 时清空并惰性重建；`CostController` 另外在内存中记录 `(sessionId, updatedAt)` 以跳过未变化的空闲会话。磁盘只用于跨进程存活，不参与每次查询。
 - **访问事件流**：`CostController.refresh` 以 `session/list` 枚举会话，经 `scanner.sessionCostHistory` 用 `session/follow` 取 snapshot 与 `cursor`、用 `session/page` 逐页向更早回退，最后由 `ledger.replace` 落盘。跳过标记只存在内存中，因此每次重启都会重新读取全部会话，但只为其后新出现的请求决定金额。
 
@@ -1101,7 +1103,7 @@ C4Component
 | --- | --- | --- | --- | --- | --- |
 | 启动令牌 | 环境变量 / URL / 内存 | `endpoint()` | — | 首次登录、Cookie 过期后重新登录 | `GET /?token=` |
 | 认证 Cookie | 磁盘 + 内存 | `CookieStore.load` | `CookieStore.save` | 自动登录与 401 回退 | `GET /?token=`、`session/list` 探测 |
-| 价格版本 | 磁盘 `prices.json` | `pricesFrom` → `CostLedger` | 首次 `wx` 创建；用户手工编辑 | `/cost`、状态栏费用、`/status` | 无（纯本地配置） |
+| 价格版本 | 磁盘 `prices.json` | `loadPrices`（种子 + `prices.seed.json` 戳记）→ `CostLedger` | 首次 `wx` 创建；未编辑时随随包价目表刷新；用户编辑后即为权威；`--reprice` 重新决定已封存金额 | `/cost`、状态栏费用、`/status` | 无（纯本地配置） |
 | 定价后的 charges | 磁盘 cut 文件 | `CostLedger.load` | `CostLedger.replace` | `/cost`、状态栏 `~¥` | `session/list` → `session/follow` → `session/page` |
 | 合计与覆盖度 | 内存 `totals` | `CostLedger.total`、`coverage` | `replace` 清空 | 状态栏、`/cost`、`/status` | 无（本地折叠） |
 | 扫描跳过标记 | `CostController` 的内存映射 | `CostController.refresh` | `CostController.refresh` | 增量刷新 | `session/list.updatedAt` |
@@ -1294,7 +1296,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 57 个模块、6,037 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 58 个模块、6,182 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1322,14 +1324,15 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/math.ts` | 67 | `renderMath` |
 | `session/export-html.ts` | 42 | `saveTranscriptHtml` |
 | `session/index.ts` | 17 | 域 barrel |
-| `cost/pricing.ts` | 129 | `DEFAULT_PRICES`、`pricesFrom`、`priceAt`、`lowestPrice`、`chargeFor`、`costDay` |
+| `cost/pricing.ts` | 167 | `DEFAULT_PRICES`、`PRICES_REVISION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`lowestPrice`、`chargeFor`、`costDay` |
+| `cost/config.ts` | 70 | `loadPrices`（种子、戳记与迁移） |
 | `cost/records.ts` | 62 | `costRecords`、`foldSamples` |
 | `cost/ledger-files.ts` | 107 | `loadLedgers`、`saveLedger` |
-| `cost/ledger.ts` | 129 | `CostLedger`、`costText` |
+| `cost/ledger.ts` | 159 | `CostLedger`、`costText` |
 | `cost/scanner.ts` | 77 | `costAddresses`、`sessionCostHistory` |
 | `cost/controller.ts` | 95 | `CostController`、`CostHost` |
 | `cost/types.ts` | 38 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
-| `cost/index.ts` | 9 | 域 barrel |
+| `cost/index.ts` | 10 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
 | `controller/controller.ts` | 405 | `Controller` |
@@ -1344,17 +1347,17 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/commands/parse.ts` | 131 | `Submission`、`SubmissionContext`、`classifySubmission` |
 | `ui/dialogs/picker.tsx` | 42 | `Picker`、`Choice` |
 | `ui/dialogs/index.tsx` | 189 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
-| `ui/dialogs/cost.tsx` | 32 | `CostPanel` |
+| `ui/dialogs/cost.tsx` | 33 | `CostPanel` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 21 | `HistoryViewport` |
-| `ui/chat/status.tsx` | 406 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
+| `ui/chat/status.tsx` | 408 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
 | `ui/input/history.ts` | 38 | `InputHistory` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
 | `ui/theme/index.ts` | 27 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
-| `cli/index.tsx` | 111 | 可执行入口（无导出） |
+| `cli/index.tsx` | 115 | 可执行入口（无导出） |
 
 ```mermaid
 C4Component

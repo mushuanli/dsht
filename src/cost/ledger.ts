@@ -29,7 +29,9 @@ export class CostLedger {
   error = '';
   /** Work the last completed scan performed, so a memory sample can attribute its allocation. */
   lastScan?: { sessions: number; pages: number; events: number };
-  constructor(readonly prices: PriceVersion[] = DEFAULT_PRICES, readonly directory?: string) {}
+  constructor(readonly prices: PriceVersion[] = DEFAULT_PRICES, readonly directory?: string,
+    /** Whether the table came from a file the user maintains, rather than the shipped one. */
+    readonly customPrices = false) {}
 
   /** Cached charges count as complete; only a failed scan or an empty ledger is partial.
    * @returns Coverage of the current totals, so callers can mark them without re-deriving the rule.
@@ -46,6 +48,34 @@ export class CostLedger {
     for (const [sessionId, saved] of await loadLedgers(this.directory)) {
       if ((this.sessions.get(sessionId)?.cut ?? -2) <= saved.cut) this.sessions.set(sessionId, saved);
     }
+  }
+
+  /** Decide every stored charge again with the table loaded now.
+   *
+   * A stored charge keeps the sample it was decided from, so it can be decided again without the
+   * host's history. This is the repair for a table that was wrong when the decisions were sealed,
+   * and the way a corrected table reaches amounts that were already recorded. Charges without usage
+   * keep their record, because their request never reported tokens to decide from.
+   * @returns How many charges now carry a different amount or price identity.
+   */
+  async reprice(): Promise<number> {
+    let changed = 0;
+    for (const [sessionId, saved] of [...this.sessions]) {
+      let touched = false;
+      const charges = saved.charges.map(charge => {
+        if (charge.usage === undefined) return charge;
+        const decided: Charge = { ...charge, ...chargeFor(this.prices, charge.provider, charge.model, charge.time, charge.usage) };
+        if (decided.amount === charge.amount && decided.priceId === charge.priceId) return charge;
+        changed++; touched = true;
+        return decided;
+      });
+      if (!touched) continue;
+      const next: SavedCost = { ...saved, charges };
+      if (this.directory) await saveLedger(this.directory, next);
+      this.sessions.set(sessionId, next);
+    }
+    if (changed > 0) this.totals.clear();
+    return changed;
   }
 
   /** Replace one session using all billing events through the opening snapshot cut.

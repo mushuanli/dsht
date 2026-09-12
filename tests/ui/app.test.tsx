@@ -708,6 +708,30 @@ test('cost coverage marks the subtotals it cannot confirm instead of rewriting t
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);
 });
 
+test('an idle bar re-reads the clock so the day subtotal rolls over at midnight', async t => {
+  const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
+  const fixture = await host(); t.after(() => fixture.close());
+  const ledger = new CostLedger();
+  await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T23:00:00+08:00'),
+    type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]));
+  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  controller.state = { ...controller.state, sessionId: 's1', online: true };
+  // A model makes the row wide enough to carry the day total beside the session slice.
+  controller.telemetry.accept({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
+    modelSelection: { lastUsed: { provider: 'p', model: 'deepseek-flash' } } } } }, queues: {}, jobs: {} } });
+  // Nothing else touches the bar, so only the bar's own timer can move the calendar day it reports.
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.parse('2026-09-10T23:59:30+08:00') });
+  const ui = render(<StatusBar controller={controller} />);
+  t.after(() => { ui.unmount(); ui.cleanup(); });
+  // The wide reading replaces the session slice, so the day total is the money on the row.
+  assert.match(ui.lastFrame()!, /flash · ¥: 1\.00 \(1\.00\)/, ui.lastFrame());
+  t.mock.timers.tick(60_000);
+  await new Promise(resolve => setImmediate(resolve));
+  // The calendar day moved with nothing else happening, so only today's figure changes.
+  assert.match(ui.lastFrame()!, /flash · ¥: 0\.00 \(1\.00\)/, ui.lastFrame());
+});
+
 test('Tab completes a slash command and stops at an ambiguous shared prefix', async t => {
   assert.equal(commonPrefix(['/ws', '/wsearch']), '/ws');
   assert.equal(commonPrefix(['/help']), '/help');

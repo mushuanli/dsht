@@ -2,7 +2,8 @@
 export { CostController } from './controller.ts';
 export type { CostHost } from './controller.ts';
 export { CostLedger, costText } from './ledger.ts';
-export { chargeFor, costDay, DEFAULT_PRICES, lowestPrice, priceAt, pricesFrom } from './pricing.ts';
+export { loadPrices } from './config.ts';
+export { chargeFor, costDay, DEFAULT_PRICES, isUncorrectedSeed, lowestPrice, priceAt, PRICES_REVISION, pricesFrom } from './pricing.ts';
 export { costRecords, foldSamples } from './records.ts';
 export { costAddresses, sessionCostHistory } from './scanner.ts';
 export { MISSING_USAGE } from './types.ts';

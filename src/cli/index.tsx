@@ -3,10 +3,10 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, pricesFrom } from '../cost/index.ts';
+import { CostLedger, loadPrices } from '../cost/index.ts';
 import { parseArgs } from 'node:util';
 import { mount } from '../ui/mount.tsx';
-import { createPrivateFile, ensureDirectory, readText } from '../storage/index.ts';
+import { ensureDirectory } from '../storage/index.ts';
 import { sessionLabel } from '../session/navigation.ts';
 import { CookieStore, login } from '../transport/auth.ts';
 import { Client } from '../transport/client.ts';
@@ -27,6 +27,7 @@ With no command, choose a workspace and session interactively.
   --history-mb <n>      Soft history payload budget in MiB (default 16)
   --memory-log <path>   Append runtime memory samples; a failing log stops itself
   --no-memory-log       Disable the runtime memory log (default: enabled)
+  --reprice            Re-decide every stored charge with the current price table
   --json               Print machine-readable list output
   --help               Show this help
 
@@ -36,6 +37,7 @@ Cookies are saved per server origin and reused on later starts. Tokens are never
 /cost shows session, today and three-day CNY estimates.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
+prices.json overrides the shipped rates and is seeded on first use; --reprice re-decides recorded charges.
 Examples:
   npx @itookit/dsht
   dsht list workspaces --json
@@ -46,7 +48,7 @@ async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     url: { type: 'string', default: process.env.DSH_URL ?? 'http://127.0.0.1:3080' },
     'history-records': { type: 'string' }, 'history-mb': { type: 'string' },
-    workspace: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
+    workspace: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' }, reprice: { type: 'boolean' },
     'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
@@ -73,18 +75,20 @@ async function main(): Promise<void> {
     } finally { await client.close(); }
     return;
   }
-  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
   const config = process.env.DSHT_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'dsht');
   await ensureDirectory(config);
-  const pricePath = join(config, 'prices.json');
-  await createPrivateFile(pricePath, JSON.stringify(DEFAULT_PRICES, null, 2) + '\n');
-  const raw = await readText(pricePath);
-  if (raw === undefined) throw new Error(`Price configuration disappeared: ${pricePath}`);
-  const prices = pricesFrom(JSON.parse(raw));
+  const { prices, custom } = await loadPrices(config);
   const stateRoot = process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht');
   const costDirectory = join(stateRoot, 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
-  const costs = new CostLedger(prices, costDirectory);
+  const costs = new CostLedger(prices, costDirectory, custom);
   await costs.load();
+  // A corrected or replaced table only reaches recorded amounts when they are decided again.
+  if (values.reprice) {
+    const changed = await costs.reprice();
+    // Without a terminal the repair is the whole run, so a script can apply it and read the count.
+    if (!process.stdin.isTTY || !process.stdout.isTTY) { process.stdout.write(`Repriced ${changed} charges\n`); return; }
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
   const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits, memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']));
   const app = mount(controller);
   const terminate = () => app.unmount();
