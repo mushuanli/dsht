@@ -68,10 +68,8 @@ export interface StatusGroups {
   phase?: StatusSegment;
   /** How to stop the running turn. */
   stop?: StatusSegment;
-  /** This session's cost, the only cost a narrow bar can show beside its other groups. */
-  session?: StatusSegment;
-  /** Today's cost with the all-time total in parentheses; replaces the session cost where it fits. */
-  balance?: StatusSegment;
+  /** This session's cost with today's spend in parentheses, the only money the bar reports. */
+  cost?: StatusSegment;
   /** Context share, labelled because a bare percentage next to money reads as a budget. */
   context?: StatusSegment;
   /** The same share drawn as a bar; used only where it still fits beside every other kept group. */
@@ -84,6 +82,27 @@ export interface StatusGroups {
   turns?: StatusSegment;
   /** Cumulative tokens. */
   tokens?: StatusSegment;
+  /** Cache-hit share of billed prompt input; it restates the token total, so the packer drops it first. */
+  cache?: StatusSegment;
+}
+
+/** Cache-hit share of billed prompt input, without reporting a partial hit as a full one.
+ *
+ * A prefix served from cache is what the provider charges least for, so the share is the reading
+ * that explains a cheap session; rounding it up to `100%` would instead claim that input stopped
+ * being billed, so the display gains precision until the number it shows is below a full hit.
+ * @param cacheReadTokens - Prompt tokens the provider served from cache.
+ * @param billedInputTokens - Uncached input, cache read and cache write, the prompt tokens that were billed.
+ * @returns Percentage text, or undefined when no prompt input has been billed yet.
+ */
+export function cacheHitText(cacheReadTokens: number | undefined, billedInputTokens: number | undefined): string | undefined {
+  if (cacheReadTokens === undefined || billedInputTokens === undefined || billedInputTokens <= 0) return undefined;
+  if (cacheReadTokens >= billedInputTokens) return '100%';
+  for (let digits = 0; digits <= 3; digits++) {
+    const text = (cacheReadTokens / billedInputTokens * 100).toFixed(digits);
+    if (Number(text) < 100) return `${text}%`;
+  }
+  return '<100%';
 }
 
 /** Elapsed time as `m:ss`, adding hours only when they exist.
@@ -120,45 +139,44 @@ export function compactStatusRows(groups: StatusGroups, width: number): StatusSe
   // Remote text reaches this bar, so every group is stripped of control characters before packing.
   const clean = (group: StatusSegment | undefined): StatusSegment | undefined =>
     group === undefined ? undefined : { ...group, text: safeText(group.text).replace(/[\r\n\t]+/g, ' ') };
-  groups = { state: clean(groups.state)!, phase: clean(groups.phase), stop: clean(groups.stop), session: clean(groups.session),
-    balance: clean(groups.balance), context: clean(groups.context), contextBar: clean(groups.contextBar),
-    model: clean(groups.model), effort: clean(groups.effort), turns: clean(groups.turns), tokens: clean(groups.tokens) };
+  groups = { state: clean(groups.state)!, phase: clean(groups.phase), stop: clean(groups.stop), cost: clean(groups.cost),
+    context: clean(groups.context), contextBar: clean(groups.contextBar),
+    model: clean(groups.model), effort: clean(groups.effort), turns: clean(groups.turns), tokens: clean(groups.tokens),
+    cache: clean(groups.cache) };
   const cluster = [groups.state, groups.phase, groups.stop].filter(Boolean) as StatusSegment[];
-  // The bar carries one cost slot: the session slice where the ledger has one, otherwise today's cost
-  // with the all-time total, because that is then the only cost there is to show.
-  const money = groups.session ?? groups.balance;
+  // The cost is one group carrying two scopes: this session's spend, with today's in parentheses.
   // Display order reads the model beside its effort and the money after the share it sits next to;
-  // keep order is by value, so a narrow bar holds the cost and the share before a model it cannot show.
-  const order = [groups.model, groups.effort, groups.context, money, groups.turns, groups.tokens].filter(Boolean) as StatusSegment[];
-  const rank = [money, groups.context, groups.model, groups.effort, groups.turns, groups.tokens].filter(Boolean) as StatusSegment[];
-  // One row while enough of the sequence fits; each step drops the least valuable group first.
-  // The cost is never dropped, only moved to the second row, so the search stops above it.
-  const floor = money === undefined ? 0 : 1;
+  // keep order is by value, so a narrow bar holds the cost and the share before a model it cannot
+  // show, and the cache share goes before the token total it restates.
+  const order = [groups.model, groups.effort, groups.context, groups.cost, groups.turns, groups.tokens, groups.cache].filter(Boolean) as StatusSegment[];
+  const rank = [groups.cost, groups.context, groups.model, groups.effort, groups.turns, groups.tokens, groups.cache].filter(Boolean) as StatusSegment[];
+  // One row while enough of the sequence fits; each step drops the least valuable group first. The
+  // cost is never dropped while a row can hold it, only moved to the second one, so the search stops
+  // above it; a second row that cannot hold even the cost is not opened.
+  const floor = groups.cost === undefined ? 0 : 1;
   for (let keep = rank.length; keep >= floor; keep--) {
     const kept = new Set(rank.slice(0, keep));
     const row = pack(cluster, order.filter(group => kept.has(group)));
-    // A bar that has dropped every other group is the compact layout, where the cost keeps the
-    // session scope: the day total with the all-time total is the wider reading of the same money.
     if (measure(row) <= width) return [keep > floor ? widen(row, groups, width) : row];
   }
-  if (money === undefined && measure(pack(cluster, [])) > width) return [fitCluster(cluster, width)];
+  if (groups.cost === undefined && measure(pack(cluster, [])) > width) return [fitCluster(cluster, width)];
   // Not even the state cluster and the cost share a row, so the cost opens the second one.
-  return [fitCluster(cluster, width), widen(packGreedy(rank, width), groups, width)];
+  const first = fitCluster(cluster, width);
+  const second = widen(packGreedy(rank, width), groups, width);
+  return second.length === 0 ? [first] : [first, second];
 }
 
-/** Offer the clearer reading of two groups already on the row: the two-scope cost, then the bar.
+/** Offer the clearer reading of a group already on the row: the ten-cell context share.
  *
- * Both are renderings of a value the row already carries, not additional groups, so neither
- * displaces a group that fits: below the width that holds the reading, the plain form keeps its place.
+ * The bar is a rendering of the same share the plain percentage reports, not an additional group, so
+ * it never displaces a group that fits: below the width that holds it, the plain form keeps its place.
  * @param row - A packed row that already fits.
- * @param groups - Cleaned groups, used to find each pair by identity.
+ * @param groups - Cleaned groups, used to find the pair by identity.
  * @param width - Available terminal columns.
- * @returns The row with the readings that fit.
+ * @returns The row with the reading that fits.
  */
 function widen(row: StatusSegment[], groups: StatusGroups, width: number): StatusSegment[] {
-  // The cost's scope answers more than the shape of the share, so it is offered first.
-  const cost = swap(row, groups.session, groups.balance, width);
-  return swap(cost, groups.context, groups.contextBar, width);
+  return swap(row, groups.context, groups.contextBar, width);
 }
 
 /** Replace one group with its fuller rendering where the whole row still fits.
@@ -258,7 +276,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
   const view = controller.telemetry.view(state.sessionId);
   const costs = controller.costs;
   const sessionCost = costs?.hasSession(state.sessionId) ? costText(costs.total(state.sessionId)) : '?';
-  const todayCost = costs ? costText(costs.total(undefined, 1, Date.now())) : '?';
+  const todayCost = costs ? costText(costs.today()) : '?';
   // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
   const coverage = costs?.coverage ?? 'complete';
   const label = workspace ? `${workspace.title} · ${workspace.path}` : 'none selected';
@@ -274,6 +292,10 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     const usage = record(view.values.tokenUsage);
     const buckets = [usage.uncachedInputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].map(numeric);
     const total = buckets.every(value => value !== undefined) ? (buckets as number[]).reduce((a, b) => a + b, 0) : undefined;
+    // Billed prompt input is the three disjoint prompt buckets; a provider that reports no cache
+    // write has not billed one, which is how the ledger reads the same projection.
+    const billed = buckets[0] === undefined || buckets[2] === undefined ? undefined : buckets[0] + buckets[2] + (buckets[3] ?? 0);
+    const hit = cacheHitText(buckets[2], billed);
     const compactCount = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
     const phase = state.transcript.livePhase;
     const clock = running && since !== undefined ? ` ${clockText(now - since)}` : '';
@@ -289,16 +311,12 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
         : pauseReason !== undefined
           ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
           : running ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
-    // The marker names the scope it belongs to: a subtotal is inexact when a record could not be
-    // priced, or when the scan has not covered every session yet.
+    // One marker covers both scopes, because either an unpriceable record or a scan that has not
+    // covered every session makes the pair inexact as a reading.
     const inexact = coverage !== 'complete';
-    const money = (value: CostTotal): string => `¥${value.amount.toFixed(2)}${value.unknown || inexact ? '*' : ''}`;
-    // One marker covers both scopes, because either an unpriceable record or an estimate in the day
-    // or in the all-time total makes the pair inexact as a reading.
-    const balance = (today: CostTotal, all: CostTotal): string =>
-      `¥: ${today.amount.toFixed(2)} (${all.amount.toFixed(2)})${today.unknown || all.unknown || inexact ? '*' : ''}`;
-    const todayTotal = costs === undefined ? undefined : costs.total(undefined, 1, Date.now());
-    const allTotal = costs === undefined ? undefined : costs.total();
+    const money = (session: CostTotal | undefined, today: CostTotal): string =>
+      `¥: ${session === undefined ? '?' : session.amount.toFixed(2)}(${today.amount.toFixed(2)})${session?.unknown || today.unknown || inexact ? '*' : ''}`;
+    const todayTotal = costs?.today();
     const sessionTotal = costs !== undefined && costs.hasSession(state.sessionId) ? costs.total(state.sessionId) : undefined;
     const contextColor = percent === undefined ? theme.status.usage
       : percent >= 95 ? theme.status.critical : percent >= 80 ? theme.status.warning : theme.status.context;
@@ -307,11 +325,11 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     const groups: StatusGroups = {
       state: stateToken,
       // A paused bar keeps the phase: the reason already says why the clock stopped, and dropping the
-      // running tool would leave the one question this bar exists to answer unanswered.
-      ...(phaseLabel === undefined ? {} : { phase: { text: phaseLabel } }),
+      // running tool would leave the one question this bar exists to answer unanswered. A ready bar
+      // has none: the transcript keeps the last event it saw, and only the host knows the turn ended.
+      ...(phaseLabel === undefined || !running ? {} : { phase: { text: phaseLabel } }),
       ...(running && pauseReason === undefined ? { stop: { text: '^C' } } : {}),
-      ...(sessionTotal === undefined ? {} : { session: { text: `S${money(sessionTotal)}`, color: theme.status.cost } }),
-      ...(todayTotal === undefined || allTotal === undefined ? {} : { balance: { text: balance(todayTotal, allTotal), color: theme.status.cost } }),
+      ...(todayTotal === undefined ? {} : { cost: { text: money(sessionTotal, todayTotal), color: theme.status.cost } }),
       ...(percent === undefined ? {} : {
         context: { text: `ctx ${percent}%`, color: contextColor },
         contextBar: { text: `ctx: ${'█'.repeat(cells)}${'░'.repeat(10 - cells)} ~${percent}%`, color: contextColor } }),
@@ -319,6 +337,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
       ...(model === undefined || effort === undefined ? {} : { effort: { text: effort, color: theme.status.model } }),
       ...(numeric(record(view.values.sessionStats).turns) === undefined ? {} : { turns: { text: `${count(numeric(record(view.values.sessionStats).turns))} turns`, color: theme.status.usage } }),
       ...(total === undefined ? {} : { tokens: { text: `${compactCount(total)} tok`, color: theme.status.usage } }),
+      ...(hit === undefined ? {} : { cache: { text: `hit ${hit}`, color: theme.status.usage } }),
     };
     const rows = compactStatusRows(groups, width ?? Math.max(1, (stdout.columns ?? 80) - 2));
     if (rows.length !== reported) { setReported(rows.length); onRows?.(rows.length); }
@@ -344,7 +363,7 @@ const StatusDetails = memo(function StatusDetails({ controller, theme, width, no
   const view = controller.telemetry.view(state.sessionId);
   const costs = controller.costs;
   const sessionCost = costs?.hasSession(state.sessionId) ? costText(costs.total(state.sessionId)) : '?';
-  const todayCost = costs ? costText(costs.total(undefined, 1, Date.now())) : '?';
+  const todayCost = costs ? costText(costs.today()) : '?';
   // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
   const coverage = costs?.coverage ?? 'complete';
   const label = workspace ? `${workspace.title} · ${workspace.path}` : 'none selected';

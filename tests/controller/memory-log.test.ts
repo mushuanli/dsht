@@ -37,7 +37,7 @@ test('a memory sample records the reclamation state and appends one bounded line
   assert.equal(sample.pending, 0);
   assert.equal(typeof sample.retainedBytes, 'number');
   assert.ok(Number(sample.rss) > 0 && Number(sample.heapUsed) > 0);
-  assert.ok(!('ledgerCharges' in sample));
+  assert.ok(!('ledgerRecords' in sample));
   if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 

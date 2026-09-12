@@ -38,7 +38,9 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   constructor(readonly base: string, token: string | undefined, private readonly initialSession?: string,
     makeClient: () => Client = () => new Client(base),
-    authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS, readonly memoryLogPath?: string) {
+    authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS, readonly memoryLogPath?: string,
+    /** Directory this client runs in, offered as a workspace when the host has not registered it. */
+    readonly localDirectory: string = process.cwd()) {
     const options: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
     this.connection = new ConnectionController(this, options, this);
     this.session = new SessionController(this, this.connection, this.connection, historyLimits);
@@ -147,7 +149,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       scanning: this.costs?.scanning ?? false,
       ...(this.costs?.lastScan === undefined ? {} : { scanSessions: this.costs.lastScan.sessions,
         scanPages: this.costs.lastScan.pages, scanEvents: this.costs.lastScan.events }),
-      ...(ledger === undefined ? {} : { ledgerSessions: ledger.sessions, ledgerCharges: ledger.charges, ledgerUnpriced: ledger.unpriced }),
+      ...(ledger === undefined ? {} : { ledgerSessions: ledger.sessions, ledgerRecords: ledger.records, ledgerUnpriced: ledger.unpriced }),
     };
   }
 

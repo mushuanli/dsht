@@ -1,20 +1,23 @@
 # dsht 计费实现方案（评审用）
 
-本文只描述**当前已实现**的费率决定方案，以及它在真实账本上的表现和已知风险，供评审决定是否改。代码位置：`src/cost/pricing.ts`（费率与决策）、`src/cost/config.ts`（价目表来源）、`src/cost/ledger.ts`（封存与重算）、`src/cost/records.ts`（token 桶折叠）、`src/cost/scanner.ts`（历史读取）。
+本文只描述**当前已实现**的费率决定方案，以及它在真实账本上的表现和已知风险，供评审决定是否改。代码位置：`src/cost/pricing.ts`（费率与决策）、`src/cost/config.ts`（价目表来源）、`src/cost/ledger.ts`（折叠与查询）、`src/cost/ledger-files.ts`（按会话落盘）、`src/cost/records.ts`（token 桶折叠）、`src/cost/scanner.ts`（历史读取）。
 
 ## 1. 数据流：一笔请求怎么变成金额
 
 ```
 宿主会话日志                 dsht
 session/follow + session/page
-   ↓ costRecords()  只保留 4 类计费事件（request/context、assistant/message、assistant/attempt、llm/retry-started、session/end-seed）
+   ↓ costRecords()  只保留计费事件（request/context、assistant/message、assistant/attempt、llm/retry-started、session/end-seed、compaction/summary）
    ↓ foldSamples()  每个 attempt 折叠成一个样本：{ key: 首个事件 seq, time, provider, model, usage }
-   ↓ chargeFor()    用当前价目表决定 { priceId, amount } 或 { reason }
-   ↓ CostLedger.replace()  写入 <state>/cost/<sha256(origin)>/<sha256(sessionId)>.json（SavedCost v2）
-   ↓ total(sessionId?, days?, now)  内存折叠 + 记忆化 → /cost 面板、状态栏、/status
+   ↓ chargeFor()    用当前价目表得到 { amount } 或 { reason }
+   ↓ CostLedger.replace()  累加成会话总额与「本次扫描当天」分桶，写入 <state>/cost/<sha256(origin)>/<sha256(sessionId)>.json（SavedCost v3）
+   ↓ total(sessionId) / today(now)  内存记忆化 → /cost 面板、状态栏、/status
 ```
 
-关键点：**金额在第一次决定时就被封存**（`priceId` + `amount` 落盘），之后扫描重放同样样本时直接复用，改 `prices.json` 不影响历史金额。唯一的例外是 `CostLedger.reprice()`（`--reprice`），它按每笔账保存的样本重新决定。
+关键点：**账本是宿主日志与价目表的投影**。落盘的只有每个会话的汇总（会话金额、请求数与未计价数、当天分桶、规则版本与价目表摘要），**不保存逐请求记录**。因此下一次扫描会用当时加载的价格表重新决定整个历史：修正价目表会在下一次扫描生效，此前没有条目覆盖的请求也会在出现覆盖后自动计价。
+
+这样做的代价与收益：金额不再"一次决定、永不改变"，改表会移动历史总额（这正是自动修复）；账本文件从"每笔请求约 174 字节"降到"每会话约 200 字节"，本机 11,932 笔请求的账本从约 2 MB 降到几 KB。
+
 
 ## 2. 价目表结构
 
@@ -76,24 +79,19 @@ amount = (input * rates.input + output * rates.output
 
 第二条意味着 **`inputTokens` 是"未命中缓存的输入"，四个桶互斥**。这与宿主 `packages/llm/token-meter` 的 `normalizeUsage()` 一致（它要求 `input + cacheRead + cacheWrite === totalTokens - output`），所以公式不会把命中部分按未命中价重复计费。
 
-## 5. 没有金额的情形与状态机（已按 R20/R23 改造）
+## 5. 没有金额的情形
 
-| `reason` | 触发条件 | 是否终局 |
+| `reason` | 触发条件 | 下一次扫描 |
 |---|---|---|
-| `missing usage` | 样本没有合法 token 桶（请求还没报完） | **不终局**：下次扫描拿到 token 后定价 |
-| `missing time` | 事件没有结算时间（真实宿主日志里计费事件 100% 带 `time`，出现即数据异常） | **不终局**：有 `time` 后定价 |
-| `unsupported usage` | `deepseek-official` 且 `cacheWriteTokens != 0`：官方价目表只有缓存命中/未命中/输出三维，第四维说明 usage 映射有误 | **不终局** |
-| `no price version` | 没有 `provider + model + 时间区间` 命中（含非官方 provider、早于 `from` 的请求） | **不终局**：表覆盖后可自动定价 |
-| `invalid estimate` | 金额非有限数 | **不终局** |
+| `missing usage` | 样本没有合法 token 桶（请求还没报完） | 拿到 token 后定价 |
+| `missing time` | 事件没有结算时间（真实宿主日志里计费事件 100% 带 `time`，出现即数据异常） | 有 `time` 后定价 |
+| `unsupported usage` | `deepseek-official` 且 `cacheWriteTokens != 0`：官方价目表只有缓存命中/未命中/输出三维，第四维说明 usage 映射有误 | 表覆盖该桶后定价 |
+| `no price version` | 没有 `provider + model + 时间区间` 命中（含非官方 provider、早于 `from` 的请求） | 表覆盖后可自动定价 |
+| `invalid estimate` | 金额非有限数 | 重新决定 |
 
-`decide()` 的新规则只有一条：
+整个决定规则只有一条：**每次扫描用当前加载的价格表重新决定每个样本**（`CostLedger.replace()` → `chargeFor()`）。没有"已定价即终局"的状态，也没有 `--reprice`：一次普通扫描就是一次重新决定。未计价请求因此自动受益于后来覆盖它的表，修正后的表也自动改写历史。
 
-```ts
-if (previous?.amount !== undefined) return previous;   // 已定价 = 终局
-return { ...sample, ...chargeFor(...) };               // 其余每次扫描重算
-```
-
-即**只有已定价的金额被封存**；未定价的请求保持开放，因此"表后来覆盖了该模型"或"表被修正"都能自动生效，不需要 `--reprice`。`--reprice` 仍是唯一的移动已封存金额的途径。
+**客户端离线期间的账由下一次扫描补齐。** `dsht` 只是客户端，它不运行时宿主照常工作，因此"这个会话的更新时间没变"并不能证明这期间没有新用量：每个连接世代开始时 `CostController` 丢弃跳过表（`start()` 里 `updates.clear()`），第一次扫描把全部会话的历史重读一遍；进程重启后这张表本来就是空的。跳过表只用于让同一次连接内每 60 秒的定时扫描不必重读没有变化的空闲会话。`tests/cost/cost.test.ts` 用"宿主在断开期间写入、却不改更新时间"的固定用例锁住这条恢复路径。
 
 **已删除**：`lowestPrice()` 与 `estimated` 语义。旧实现给无结算时间的请求取"最低空闲价"作下限并计入 lifetime，却不计入任何按天区间，于是 `Σ 每日 ≠ 总计`；现在这类请求记为 `missing time`、不产生金额，只计入 `unknown`。`CostTotal` 因此不再有 `estimated` 字段（面板与状态栏同步）。
 
@@ -127,40 +125,41 @@ return { ...sample, ...chargeFor(...) };               // 其余每次扫描重�
 | **R5** | `cacheWrite` 按输入价计费 | **已修**：`deepseek-official` 且 `cacheWrite != 0` → `unsupported usage` |
 | **R6** | `from: 2026-09-10` 之前的请求无价 | **保持**：`no price version`，由 `/cost` 报告 |
 | **R7** | 用户表整体覆盖，缺家族时整族无价 | **部分**：面板已按 `unknown` 计数（尚无按模型聚合的明细） |
-| **R8** | 改表不移动已封存金额；运行中进程持旧表会写回旧值 | **已修一半**：未定价请求现在会自动重定价；仍保留显式 `--reprice` 作为移动已封存金额的唯一途径 |
+| **R8** | 改表不移动已封存金额；运行中进程持旧表会写回旧值 | **改为按投影处理**：改表在下一次扫描重算历史总额；`saveLedger` 仍拒绝较低 cut 或较低 `engine` 的写入，持旧表的进程无法覆盖较新的一次 |
 | **R9** | 离线补账 | **确认无需修**：每次扫描全量重读 + 幂等替换，离线期间请求按原始时间入账 |
 | **R10** | fork seed 重复计费 | **原本已实现**：`inheritedCut` 跳过继承请求 |
 | **R11** | **`compaction/summary.usage` 未计费**（新发现） | **已修**：纳入 `BILLING_EVENTS`，按 summary 自带的 provider/model/usage 计价；无 usage 的模板摘要不算请求 |
-| **R12** | **`loadLedgers` 删除无法解析的账本**（新发现，等价静默 reprice） | **已修**：改为移到 `<name>.unreadable` 保留字节并在面板计数 |
+| **R12** | **`loadLedgers` 删除无法解析的账本**（新发现，等价静默 reprice） | **随投影模型消失**：切片只存汇总，读不出的文件由下一次扫描重建，不再有需要抢救的字节 |
 | **R13** | `request/header` 不能当逐请求时间锚点 | **证实**：真实日志 2,224 次请求只有 5 个 `request/header`、1 个 `request/context` |
 | **R14** | `step/start` ≠ 每次请求（retry 在同一 step 内） | **证实**：`step()` 内部 `while (true)` 重试；若将来改锚点，首次 attempt 用 `step/start.time`、重试用 `llm/retry-started.time` |
 | **R15** | fork/retry 的样本身份 | 保持 `key = 首个事件 seq`；将来迁 SQLite 时更名 `attempt_key_seq`，与 cursor 区分 |
 
 ## 9. 现有测试覆盖
 
-- `tests/cost/cost.test.ts`：官方费率逐项断言（含被取代的别名必须能定价）、高峰/空闲边界（08:59/09:00/12:00/14:00/18:00、周六）、未声明模型不被猜测、`pro` 子串不再决定费率、规范化（含全角句点与大小写）、`matchedBy`/`engine`/`catalog` 落盘、改价后 digest 变化、`cacheWrite` 不被定价、无时间样本不计金额且 `Σ 每日 = 总计`、压缩摘要按其自身路由计费、未定价请求在表覆盖后自动定价而已定价金额不动（`--reprice` 例外）。
-- `tests/cost/config.test.ts`：首次种下、未编辑文件随随包表刷新、已编辑文件被保留、被取代种子被替换、无戳记的手写表不动、只读目录、`reprice` 会持久化且不触碰无用量的请求。
-- `tests/ui/app.test.tsx`：状态栏把日花费与历史总计并列、`prices.json` 自定义时的标注。
+- `tests/cost/cost.test.ts`：官方费率逐项断言（含被取代的别名必须能定价）、高峰/空闲边界（08:59/09:00/12:00/14:00/18:00、周六）、未声明模型不被猜测、`pro` 子串不再决定费率、规范化（含全角句点与大小写）、决策只返回金额或原因、价目表摘要随费率变化、`cacheWrite` 不被定价、无时间样本只计未计价、未计价请求在表覆盖后自动定价、改表在下一次扫描重算历史、切片文件只含汇总字段且不含提示词/供应商/用量。
+- `tests/cost/config.test.ts`：首次种下、未编辑文件随随包表刷新、已编辑文件被保留、被取代种子被替换、无戳记的手写表不动、只读目录。
+- `tests/cost/ledger-files.test.ts`：较旧 cut 与较旧 `engine` 的写入被拒绝、其他代数与外来文件被忽略、陈旧扫描无法覆盖较新切片。
+- `tests/ui/app.test.tsx`：状态栏显示会话费用与括号内当天合计、`prices.json` 自定义时的标注、跨零点只移动当天分桶。
 
 ## 10. 结论与阶段状态
 
-会审结论：**先修计费语义，再迁 SQLite；SQLite 是账本简化与增量扫描优化的手段，不是离线补账正确性的前提。**
+会审结论（2026-09-12 复核）：**账本改为宿主日志与价目表的投影后，落盘只保留会话汇总；原先"账本原子是一笔 attempt"的前提由"金额已封存、只能靠导入迁移"支撑，现在不再成立。**
 
 ```
-① 计费语义（已完成）  aliases / 不猜 / NFKC / cacheWrite unsupported / matchedBy /
-                      engine+catalog / 状态机 / missing time / compaction 计费 / 不删账本
+① 计费语义（已完成）  aliases / 不猜 / NFKC / cacheWrite unsupported / missing time /
+                      compaction 计费 / 自动重定价
                               ↓
-② JSON → SQLite       导入已封存的 sealed 金额（不重扫）＋ 不引入增量 cursor
+② 账本投影（已完成）  每会话只存 会话总额 + 当天分桶 + cut/engine/catalog + 未计价原因；
+                      逐请求记录、priceId/matchedBy/engine/catalog 逐笔审计、--reprice 全部删除
                               ↓
-③ 增量扫描            scanner_checkpoint(safe_seq∈完整 step 边界, provider/model,
-                      seed_end_seq, scanner_version)＋小范围重扫 + UPSERT
+③ JSON → SQLite      可选：投影可重建，因此只需导入汇总；导入前后金额由同一张表决定
                               ↓
-④ 汇总表              不做：SUM + 索引足够
+④ 增量扫描            未做：需要"安全 cut"（完整 step 边界）与小范围重扫，风险高一个量级
 ```
 
-原则（第二轮会审确认）：
+原则（复核后确认）：
 
-- **Harness 事件日志是事实源**；SQLite 账本是可重建 projection，不是第二份 Session 数据库。
-- **usage 投影是可重建缓存，sealed 金额是账本**——后者不能只靠宿主日志重建，所以迁移必须导入而不是重扫。
-- **账本原子是一笔 attempt**；session／day／总计只是查询维度，不建汇总表。
-- **存储重构与增量扫描分两次做**：后者把"纯函数全量重建"变成"有状态增量 fold"，风险高一个量级。
+- **Harness 事件日志是事实源**；账本是可重建的 projection，不是第二份 Session 数据库。落盘的汇总是缓存，删掉只会让下一次扫描重算。
+- **金额由"当前加载的价格表 + 宿主日志"决定**，因此改表即改历史；这是自动修复的代价，也是它被接受的原因。
+- **状态是每会话一行汇总**（会话总额、当天分桶、cut、规则版本、价目表摘要）；session／day 是仅有的两个查询维度，不再需要汇总表。
+- **增量扫描与存储重构分离**：后者已完成，前者会把"纯函数全量重建"变成"有状态增量 fold"，风险高一个量级。

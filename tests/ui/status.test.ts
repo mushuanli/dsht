@@ -2,7 +2,7 @@
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
-import { clockText, compactStatusRows, metricLines, elapsedTime, phaseText, type StatusGroups } from '../../src/ui/chat/status.tsx';
+import { cacheHitText, clockText, compactStatusRows, metricLines, elapsedTime, phaseText, type StatusGroups } from '../../src/ui/chat/status.tsx';
 import wrapAnsi from 'wrap-ansi';
 import stringWidth from 'string-width';
 import { Telemetry } from '../../src/session/telemetry.ts';
@@ -62,9 +62,9 @@ test('working duration handles minutes, hours and clock skew', () => {
 function groups(overrides: Partial<StatusGroups> = {}): StatusGroups {
   const segment = (text: string) => ({ text });
   return {
-    state: segment('◐ 0:08'), phase: segment('bash 12s'), stop: segment('^C'), session: segment('S¥1.23*'),
-    balance: segment('¥: 5.00 (12.34)'), context: segment('ctx 25%'), contextBar: segment('ctx: ███░░░░░░░ ~25%'), model: segment('v4.1-flash'), effort: segment('high'),
-    turns: segment('42 turns'), tokens: segment('166.2M tok'), ...overrides,
+    state: segment('◐ 0:08'), phase: segment('bash 12s'), stop: segment('^C'), cost: segment('¥: 1.23(5.00)'),
+    context: segment('ctx 25%'), contextBar: segment('ctx: ███░░░░░░░ ~25%'), model: segment('v4.1-flash'), effort: segment('high'),
+    turns: segment('42 turns'), tokens: segment('166.2M tok'), cache: segment('hit 92%'), ...overrides,
   };
 }
 
@@ -77,27 +77,33 @@ test('the status bar drops its least valuable group first and never drops the co
   const ready = groups({ state: { text: '● Ready' }, phase: undefined, stop: undefined });
   assert.equal([text(compactStatusRows(full, 140)), text(compactStatusRows(ready, 140))].join('\n') + '\n',
     readFileSync(new URL('../expected/status-compact.txt', import.meta.url), 'utf8'));
-  // A bar and a two-scope cost are clearer readings of groups the row already carries, so neither
-  // appears where it would displace one: the bar gives way below its own width, and the day total
-  // gives way below its own, while neither ever takes a group from the row it joins.
-  assert.match(text(compactStatusRows(full, 109)), /ctx: ███░░░░░░░ ~25%/);
-  assert.match(text(compactStatusRows(full, 100)), /ctx 25% · ¥: 5\.00 \(12\.34\)/);
-  assert.equal(text(compactStatusRows(full, 100)).includes('166.2M tok'), true);
-  assert.match(text(compactStatusRows(full, 94)), /¥: 5\.00 \(12\.34\)/);
-  // Below the day total's own width the session scope stands, and the compact layout keeps it.
-  assert.match(text(compactStatusRows(full, 93)), /S¥1\.23\*/);
-  assert.equal(text(compactStatusRows(full, 93)).includes('¥: '), false);
-  assert.equal(text(compactStatusRows(full, 40)).includes('¥: '), false);
-  // Dropping order: tokens, turns, effort, model, context — the cost stays to the last.
-  assert.equal(text(compactStatusRows(full, 80)), '◐ 0:08 · bash 12s · ^C │ v4.1-flash · high · ctx 25% · S¥1.23* · 42 turns');
-  assert.equal(text(compactStatusRows(full, 60)), '◐ 0:08 · bash 12s · ^C │ v4.1-flash · ctx 25% · S¥1.23*');
-  assert.equal(text(compactStatusRows(full, 46)), '◐ 0:08 · bash 12s · ^C │ ctx 25% · S¥1.23*');
-  assert.equal(text(compactStatusRows(full, 40)), '◐ 0:08 · bash 12s · ^C │ S¥1.23*');
+  // The ten-cell share is a fuller reading of a group the row already carries, so it appears only
+  // where it displaces nothing: below its own width the plain percentage keeps its place.
+  assert.match(text(compactStatusRows(full, 115)), /ctx: ███░░░░░░░ ~25%/);
+  assert.equal(text(compactStatusRows(full, 114)).includes('ctx: '), false);
+  // The cache-hit share restates the usage the token count already reports, so it is the first group
+  // the packer gives up and it survives only while the widest row does.
+  assert.match(text(compactStatusRows(full, 102)), /166\.2M tok · hit 92%/);
+  assert.equal(text(compactStatusRows(full, 101)).includes('hit 92%'), false);
+  assert.equal(text(compactStatusRows(full, 101)).includes('166.2M tok'), true);
+  // The cost is one group for both scopes, and it is the last thing a narrow bar gives up.
+  assert.match(text(compactStatusRows(full, 92)), /¥: 1\.23\(5\.00\)/);
+  assert.match(text(compactStatusRows(full, 65)), /¥: 1\.23\(5\.00\)/);
+  assert.equal(text(compactStatusRows(full, 37)).includes('│ ¥: '), false);
+  assert.match(text(compactStatusRows(full, 37)), /^◐ 0:08 · bash 12s · \^C\n¥: 1\.23\(5\.00\)/);
+  // Dropping order: cache, tokens, turns, effort, model, context — the cost stays to the last.
+  assert.equal(text(compactStatusRows(full, 68)), '◐ 0:08 · bash 12s · ^C │ v4.1-flash · high · ctx 25% · ¥: 1.23(5.00)');
+  assert.equal(text(compactStatusRows(full, 61)), '◐ 0:08 · bash 12s · ^C │ v4.1-flash · ctx 25% · ¥: 1.23(5.00)');
+  assert.equal(text(compactStatusRows(full, 48)), '◐ 0:08 · bash 12s · ^C │ ctx 25% · ¥: 1.23(5.00)');
+  assert.equal(text(compactStatusRows(full, 38)), '◐ 0:08 · bash 12s · ^C │ ¥: 1.23(5.00)');
   // Below the widest one-row form the cost opens a second row instead of being dropped.
-  assert.equal(text(compactStatusRows(full, 24)), '◐ 0:08 · bash 12s · ^C\nS¥1.23* · ctx 25%');
-  assert.equal(text(compactStatusRows(full, 12)), '◐ 0:08\nS¥1.23*');
-  // Below the width of the state cluster itself, the phase and the stop hint give way first.
-  assert.equal(text(compactStatusRows(full, 8)), '◐ 0:08\nS¥1.23*');
+  assert.equal(text(compactStatusRows(full, 24)), '◐ 0:08 · bash 12s · ^C\n¥: 1.23(5.00) · ctx 25%');
+  // Below the width of the state cluster itself the phase and the stop hint give way first, and the
+  // cost keeps its own row.
+  assert.equal(text(compactStatusRows(full, 13)), '◐ 0:08\n¥: 1.23(5.00)');
+  // A second row that cannot hold the cost is not opened at all, so no width renders a blank row.
+  assert.equal(text(compactStatusRows(full, 12)), '◐ 0:08');
+  assert.equal(text(compactStatusRows(full, 8)), '◐ 0:08');
   // Nothing overflows, at any width, including a wide-character model name.
   for (const width of [1, 10, 18, 24, 35, 40, 46, 60, 80, 100, 140]) {
     const rows = compactStatusRows(groups({ model: { text: '中文模型名称很长很长' } }), width);
@@ -106,6 +112,22 @@ test('the status bar drops its least valuable group first and never drops the co
   // Remote text cannot smuggle a control character or a line break into the bar.
   assert.equal(text(compactStatusRows(groups({ model: { text: 'name\nnewline\tvalue' } }), 140)).includes('name newline value'), true);
   assert.equal(text(compactStatusRows(full, 0)), '');
+});
+
+test('the cache-hit share never rounds a partial hit up to a full one', () => {
+  assert.equal(cacheHitText(0, 100), '0%');
+  assert.equal(cacheHitText(300, 800), '38%');
+  assert.equal(cacheHitText(996, 1_000), '99.6%');
+  assert.equal(cacheHitText(9_996, 10_000), '99.96%');
+  assert.equal(cacheHitText(99_999, 100_000), '99.999%');
+  assert.equal(cacheHitText(1_000, 1_000), '100%');
+  // A share that cannot be shown below a full hit says so instead of claiming one.
+  assert.equal(cacheHitText(1_000_000 - 1, 1_000_000), '<100%');
+  // Nothing to report yet, and a bucket set that claims more hits than billed input.
+  assert.equal(cacheHitText(undefined, 100), undefined);
+  assert.equal(cacheHitText(100, undefined), undefined);
+  assert.equal(cacheHitText(0, 0), undefined);
+  assert.equal(cacheHitText(5, 4), '100%');
 });
 
 test('the working clock and the phase age use the compact forms the bar shows', () => {

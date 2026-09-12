@@ -1,13 +1,10 @@
-/** Price-configuration seeding, the superseded-seed migration, and re-deciding sealed amounts. */
+/** Price-configuration seeding and the superseded-seed migration. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, PRICES_REVISION, isUncorrectedSeed, loadPrices, costRecords, pricesFrom } from '../../src/cost/index.ts';
-import type { ObjectValue } from '../../src/transport/wire.ts';
-
-const at = (date: string) => Date.parse(date + '+08:00');
+import { DEFAULT_PRICES, PRICES_REVISION, isUncorrectedSeed, loadPrices, pricesFrom } from '../../src/cost/index.ts';
 
 /** The table shipped before the Flash rates were corrected, as it reached disk. */
 const SUPERSEDED = ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'].map(model => {
@@ -82,53 +79,5 @@ test('the superseded seed is recognized and replaced, and any other unstamped ta
     const kept = await loadPrices(directory);
     assert.equal(kept.custom, true);
     assert.equal(kept.prices[0]!.peak.input, 1.25);
-  });
-});
-
-test('a repair decides the file a newer scan wrote instead of being dropped as stale', async () => {
-  const record = (seq: number): ObjectValue => ({ type: 'event', event: { seq, time: at('2026-09-10T10:00:00'),
-    type: 'assistant/message', data: { turn: 1, step: seq, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      message: { source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } } } });
-  const events = costRecords([record(0)]);
-  await inConfig(async directory => {
-    // A private copy: pricesFrom returns the array it is given, so splicing it would change the fixture.
-    const superseded = pricesFrom(SUPERSEDED.map(price => ({ ...price })));
-    const repair = new CostLedger(superseded, directory);
-    await repair.replace('s1', 4, events);
-    // Another process scans and writes a newer cut under the superseded table before the repair saves.
-    const scanning = new CostLedger(superseded, directory);
-    await scanning.replace('s1', 5, events);
-    repair.prices.splice(0, repair.prices.length, ...DEFAULT_PRICES.map(price => ({ ...price })));
-    assert.equal(await repair.reprice(), 1);
-    // The newer file was re-decided rather than left holding the superseded amount.
-    const reloaded = new CostLedger(DEFAULT_PRICES, directory);
-    await reloaded.load();
-    assert.equal(Number(reloaded.total('s1').amount.toFixed(4)), 2);
-    assert.equal(Number(reloaded.total('s1').records), 1);
-  });
-});
-
-test('repricing re-decides recorded amounts, persists them, and leaves token-less requests alone', async () => {
-  const record = (seq: number, usage: ObjectValue | undefined): ObjectValue => ({ type: 'event', event: { seq,
-    time: at('2026-09-10T10:00:00'), type: 'assistant/message', data: { turn: 1, step: seq,
-      ...(usage === undefined ? {} : { usage }),
-      message: { source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, content: [{ type: 'text', text: 'PRIVATE' }] } } } });
-  const million = { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-  await inConfig(async directory => {
-    // The table is held by reference, so replacing it in place is what a corrected reload looks like.
-    const prices = pricesFrom(SUPERSEDED);
-    const ledger = new CostLedger(prices, directory);
-    await ledger.replace('s1', 4, costRecords([record(0, million), record(1, undefined)]));
-    assert.equal(Number(ledger.total('s1').amount.toFixed(4)), 3);
-    assert.deepEqual({ unknown: ledger.total('s1').unknown, records: ledger.total('s1').records }, { unknown: 1, records: 2 });
-    assert.equal(await ledger.reprice(), 0, 'the same table must not move a recorded amount');
-    prices.splice(0, prices.length, ...DEFAULT_PRICES.map(price => ({ ...price })));
-    assert.equal(await ledger.reprice(), 1);
-    assert.equal(Number(ledger.total('s1').amount.toFixed(4)), 2);
-    // The repair is durable: a later run reads the corrected amounts without deciding again.
-    const reloaded = new CostLedger(DEFAULT_PRICES, directory);
-    await reloaded.load();
-    assert.equal(Number(reloaded.total('s1').amount.toFixed(4)), 2);
-    assert.equal(await reloaded.reprice(), 0);
   });
 });

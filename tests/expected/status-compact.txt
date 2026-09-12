@@ -1,2 +1,2 @@
-◐ 0:08 · bash 12s · ^C │ v4.1-flash · high · ctx: ███░░░░░░░ ~25% · ¥: 5.00 (12.34) · 42 turns · 166.2M tok
-● Ready │ v4.1-flash · high · ctx: ███░░░░░░░ ~25% · ¥: 5.00 (12.34) · 42 turns · 166.2M tok
+◐ 0:08 · bash 12s · ^C │ v4.1-flash · high · ctx: ███░░░░░░░ ~25% · ¥: 1.23(5.00) · 42 turns · 166.2M tok · hit 92%
+● Ready │ v4.1-flash · high · ctx: ███░░░░░░░ ~25% · ¥: 1.23(5.00) · 42 turns · 166.2M tok · hit 92%

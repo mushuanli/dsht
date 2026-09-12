@@ -62,6 +62,39 @@ test('startup status refreshes after connection and reconnect while copy mode re
   }
 });
 
+test('the workspace picker offers this client directory, and Esc leaves the typed-path screen', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const here = '/local/checkout';
+  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined, undefined, undefined, undefined, here);
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => ui.lastFrame()?.includes('Project α') === true);
+  // The row names the directory it would register, so the common case needs no typing at all.
+  await until(() => ui.lastFrame()?.includes(`+ Add workspace (this directory)  ${here}`) === true);
+  // A typed host path is a screen of its own: Esc goes back to the picker instead of trapping it.
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B');
+  await pressKey(ui, '\r');
+  await until(() => controller.state.screen === 'path' && ui.lastFrame()?.includes('Absolute directory path on host') === true);
+  // A half-typed path is dropped with the screen: the picker ignores keys while a draft exists, so
+  // leaving the text behind would leave the picker dead.
+  await pressKey(ui, '/srv/partial');
+  await pressKey(ui, '\u001b');
+  await until(() => controller.state.screen === 'workspaces' && ui.lastFrame()?.includes('Choose workspace') === true);
+  assert.equal(ui.lastFrame()?.includes('/srv/partial'), false);
+  // Choosing the local row registers exactly the directory this client runs in.
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B');
+  await pressKey(ui, '\r');
+  await until(() => fixture.calls.some(call => call.method === 'workspace/create'));
+  const created = object(object(object(fixture.calls.find(call => call.method === 'workspace/create')!.payload).args).request);
+  assert.equal(created.path, here);
+  // Once the host reports that directory as a workspace, the row stops repeating it.
+  fixture.baseline = [{ workspaceId: 'w1', title: 'Project α', path: here, sessionIds: ['s1'] }];
+  await controller.showPicker('workspaces');
+  await until(() => ui.lastFrame()?.includes('Choose workspace') === true);
+  assert.equal(ui.lastFrame()?.includes('+ Add workspace (this directory)'), false);
+});
+
 test('startup requires workspace and session selection before showing the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token');
@@ -233,7 +266,8 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
   controller.start();
   await until(() => controller.state.transcript.ready && ui.lastFrame()?.includes('1K tok') === true);
   const compact = ui.lastFrame()!.split('\n').find(line => line.includes('1K tok'))!;
-  assert.match(compact, /● Ready │ chat · ctx: ███░░░░░░░ ~25% · 42 turns · 1K tok/);
+  // The three prompt buckets are disjoint, so the share is the cache read over all billed input.
+  assert.match(compact, /● Ready │ chat · ctx: ███░░░░░░░ ~25% · 42 turns · 1K tok · hit 38%/);
   assert.equal(ui.lastFrame()?.includes('Workspace:'), false);
   assert.match(ui.lastFrame()!, /First conversation/);
   await pressKey(ui, '/status');
@@ -525,7 +559,7 @@ test('search loads old messages, opens cross-session matches and cancels local p
   release!();
 });
 
-test('/cost displays cached session, daily and three-day estimates without submitting a prompt', async t => {
+test('/cost displays cached session and daily estimates without submitting a prompt', async t => {
   const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
   const fixture = await host(); t.after(() => fixture.close());
   const ledger = new CostLedger();
@@ -542,7 +576,7 @@ test('/cost displays cached session, daily and three-day estimates without submi
   const expected = await readFile(new URL('../expected/cost.txt', import.meta.url), 'utf8');
   for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()?.includes(line), ui.lastFrame());
   // The open panel pauses the clock, and the bar names that reason instead of freezing silently.
-  assert.match(ui.lastFrame()!, /⏸ dialog │ chat · ¥: 0\.00 \(0\.00\)\*/);
+  assert.match(ui.lastFrame()!, /⏸ dialog │ chat · ¥: 0\.00\(0\.00\)\*/);
   assert.equal(fixture.calls.some(c => c.method === 'session/prompt'), false);
 });
 
@@ -710,19 +744,25 @@ test('cost coverage marks the subtotals it cannot confirm instead of rewriting t
     ui.unmount(); ui.cleanup();
     return frame;
   };
-  // With nothing cached the day subtotal stands in for the session slice and is marked incomplete.
+  // A session the ledger has not priced reads as unknown inside the pair, and the parenthesized
+  // figure is the day's, so neither can be mistaken for the other.
   assert.match(bar(), /● Ready/);
-  assert.match(bar(), /¥: 0\.00 \(0\.00\)\*/);
-  assert.doesNotMatch(bar(), /S¥/);
+  assert.match(bar(), /● Ready │ ¥: \?\(0\.00\)\*/);
   await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T10:00:00+08:00'),
     type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
       message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]));
   // Charges cached by an earlier run already cover the history, so the bar stops warning.
   const cached = bar();
-  assert.match(cached, /S¥2\.00(?!\*)/);
+  assert.match(cached, /¥: 2\.00\(0\.00\)(?!\*)/);
   assert.match(bar(true), /Cost ~¥2\.0000 session/);
+  // A freshly opened session reports its own zero in the pair, never the day's spend as its own cost.
+  controller.state = { ...controller.state, sessionId: 's2' };
+  assert.match(bar(), /● Ready │ ¥: \?\(0\.00\)/);
+  await ledger.replace('s2', 1, []);
+  assert.match(bar(), /● Ready │ ¥: 0\.00\(0\.00\)/);
+  controller.state = { ...controller.state, sessionId: 's1' };
   ledger.error = 'scan failed';
-  assert.match(bar(), /S¥2\.00\*/);
+  assert.match(bar(), /¥: 2\.00\(0\.00\)\*/);
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);
 });
 
@@ -750,6 +790,19 @@ test('the bar names the tool that is running, including while the clock is pause
     const frame = bar(reason);
     assert.match(frame, new RegExp(`⏸ ${reason} 0:0\\d · bash \\d+s`), frame);
   }
+  // The result arriving does not clear the phase: the bar times the current event until a newer one
+  // starts, so the quiet stretch after a command is still time the turn spent working.
+  controller.state.transcript.addPage({ hasMore: false, records: [
+    { type: 'event', event: { seq: 2, time: now - 1_000, surfaceOp: 'append', type: 'tool/result',
+      data: { message: { content: [{ type: 'tool-result', toolCallId: 'c1', isError: false }] } } } },
+  ] });
+  assert.match(bar(), /◐ 0:0\d · bash \d+s · \^C/, bar());
+  // A ready bar has no phase at all: the transcript keeps the last event it saw, and only the host
+  // knows that the turn ended.
+  controller.state = { ...controller.state, sessions: [{ sessionId: 's1', running: false }] };
+  const ready = bar();
+  assert.match(ready, /● Ready/);
+  assert.equal(ready.includes('bash'), false);
 });
 
 test('an idle bar re-reads the clock so the day subtotal rolls over at midnight', async t => {
@@ -758,7 +811,7 @@ test('an idle bar re-reads the clock so the day subtotal rolls over at midnight'
   const ledger = new CostLedger();
   await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T23:00:00+08:00'),
     type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]));
+      message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]), Date.parse('2026-09-10T23:59:30+08:00'));
   const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
   controller.state = { ...controller.state, sessionId: 's1', online: true };
   // A model makes the row wide enough to carry the day total beside the session slice.
@@ -768,12 +821,12 @@ test('an idle bar re-reads the clock so the day subtotal rolls over at midnight'
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.parse('2026-09-10T23:59:30+08:00') });
   const ui = render(<StatusBar controller={controller} />);
   t.after(() => { ui.unmount(); ui.cleanup(); });
-  // The wide reading replaces the session slice, so the day total is the money on the row.
-  assert.match(ui.lastFrame()!, /flash · ¥: 1\.00 \(1\.00\)/, ui.lastFrame());
+  // The pair carries the session cost and the day's, so the row answers both scopes at once.
+  assert.match(ui.lastFrame()!, /flash · ¥: 1\.00\(1\.00\)/, ui.lastFrame());
   t.mock.timers.tick(60_000);
   await new Promise(resolve => setImmediate(resolve));
-  // The calendar day moved with nothing else happening, so only today's figure changes.
-  assert.match(ui.lastFrame()!, /flash · ¥: 0\.00 \(1\.00\)/, ui.lastFrame());
+  // The calendar day moved with nothing else happening, so only the parenthesized figure changes.
+  assert.match(ui.lastFrame()!, /flash · ¥: 1\.00\(0\.00\)/, ui.lastFrame());
 });
 
 test('the pickers show each session state and a workspace rollup from the list summary', async t => {

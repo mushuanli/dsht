@@ -1,65 +1,44 @@
-/** Atomic per-session persistence for the immutable charge ledger. */
+/** Atomic per-session persistence for folded cost totals. */
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { ensureDirectory, listEntries, readText, removeFile, renameFile, writePrivateFile } from '../storage/index.ts';
-import type { Charge, SavedCost } from './types.ts';
+import { ensureDirectory, listEntries, readText, writePrivateFile } from '../storage/index.ts';
+import type { CostTotal, DayTotal, SavedCost } from './types.ts';
 
-/** Current on-disk ledger generation. Files of another generation are ignored, not migrated. */
-const LEDGER_VERSION = 2;
+/** Current on-disk ledger generation. A file of another generation is ignored: the next scan rebuilds it. */
+const LEDGER_VERSION = 3;
 
-/** Every file this unit owns: the fixed per-session name, or the `<session>-<cut>.json` it replaced. */
-const OWNED_FILE = /^[0-9a-f]{64}(?:-\d+)?\.json$/;
-
-/** The one file that holds a session's newest cut; the cut itself lives inside the file. */
+/** The one file that holds a session's totals: the fixed per-session name. */
 function ledgerName(sessionId: string): string {
   return `${createHash('sha256').update(sessionId).digest('hex')}.json`;
 }
 
-/** Load every session's newest cut, leaving one fixed file per session.
- *
- * A cut file superseded by the newer fixed name is rewritten under that name and the copy is
- * removed, which preserves its decisions. A file this build cannot read is set aside under a
- * `.unreadable` name and counted, never deleted: it holds sealed amounts the host log alone cannot
- * reproduce, so removing it would silently re-price them under today's table while destroying the
- * only copy of what was recorded. Files this unit does not own are left where they are.
+/** Load every session's stored totals; a file this build cannot read is left for the next scan.
  * @param directory - Origin-scoped ledger directory, or undefined when persistence is disabled.
- * @returns The newest saved slice per session identity, and how many files could not be read.
+ * @returns The newest saved slice per session identity.
  */
-export async function loadLedgers(directory: string | undefined): Promise<{ sessions: Map<string, SavedCost>; unreadable: number }> {
+export async function loadLedgers(directory: string | undefined): Promise<Map<string, SavedCost>> {
   const sessions = new Map<string, SavedCost>();
-  const unreadable: string[] = [];
-  if (!directory) return { sessions, unreadable: 0 };
+  if (!directory) return sessions;
   await ensureDirectory(directory);
-  const superseded: { path: string; sessionId: string }[] = [];
   for (const name of await listEntries(directory)) {
-    if (!OWNED_FILE.test(name)) continue;
+    if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
     const path = join(directory, name);
     const raw = await readText(path);
     // A file removed between listing and reading is simply absent.
     if (raw === undefined) continue;
     const saved = parseLedger(raw);
-    // A file this build cannot read is kept: it holds sealed amounts that the host log alone cannot
-    // reproduce, so deleting it would silently re-price them under today's table. The count is
-    // reported instead, and the next scan of that session only adds decisions it does not have.
-    if (saved === undefined) {
-      unreadable.push(name);
-      await renameFile(path, `${path}.unreadable`);
-      continue;
-    }
+    // A slice is a projection of the host log: one this build cannot use costs a rescan, not data.
+    if (saved === undefined) continue;
     if ((sessions.get(saved.sessionId)?.cut ?? -2) <= saved.cut) sessions.set(saved.sessionId, saved);
-    if (name !== ledgerName(saved.sessionId)) superseded.push({ path, sessionId: saved.sessionId });
   }
-  for (const { path, sessionId } of superseded) {
-    await writePrivateFile(join(directory, ledgerName(sessionId)), JSON.stringify(sessions.get(sessionId)) + '\n');
-    await removeFile(path);
-  }
-  return { sessions, unreadable: unreadable.length };
+  return sessions;
 }
 
-/** Write one session cut unless the directory already holds a newer one.
+/** Write one session's totals unless the directory already holds a newer scan.
  *
  * The file is the system of record across processes, so a scan that opened an older snapshot must
- * not replace a cut another scan already persisted.
+ * not replace a cut another scan already persisted, and a process holding older decision rules must
+ * not seal its totals over newer ones.
  * @param directory - Origin-scoped ledger directory.
  * @param saved - Complete slice to persist.
  * @returns Whether the directory now holds this slice.
@@ -68,75 +47,45 @@ export async function saveLedger(directory: string, saved: SavedCost): Promise<b
   const path = join(directory, ledgerName(saved.sessionId));
   const existing = await readText(path);
   if (existing !== undefined) {
-    if (persistedCut(existing) > saved.cut) return false;
-    // A process that loaded an older rate table keeps it in memory for its whole life, so its next
-    // scan would seal yesterday's rates over today's decisions. An amount decided by a newer engine
-    // is never replaced by an older one; the stale writer simply persists nothing.
-    if (persistedEngine(existing) > sliceEngine(saved)) return false;
+    const previous = parseLedger(existing);
+    if (previous !== undefined && (previous.cut > saved.cut || previous.engine > saved.engine)) return false;
   }
   await writePrivateFile(path, JSON.stringify(saved) + '\n');
   return true;
 }
 
-/** Engine version of the newest decision in one persisted slice, or 0 when it holds none.
- * @param raw - File contents read from the ledger directory.
- * @returns The highest engine version recorded, or 0 when the file carries no decision.
- */
-function persistedEngine(raw: string): number {
-  try { const saved = parseLedger(raw); return saved === undefined ? 0 : sliceEngine(saved); }
-  catch { return 0; }
-}
-
-/** Engine version of the newest decision in one slice, or 0 when it holds none.
- * @param saved - Slice about to be written.
- * @returns The highest engine version it records, or 0 when it carries no decision.
- */
-function sliceEngine(saved: SavedCost): number {
-  // A decision recorded before the engine was stamped counts as the first engine.
-  return saved.charges.reduce((highest, charge) => Math.max(highest, charge.amount === undefined ? 0 : charge.engine ?? 1), 0);
-}
-
-/** The cut already persisted in one file, or -1 when it holds no decision worth keeping.
- * @param raw - File contents read from the ledger directory.
- * @returns The persisted cut.
- */
-function persistedCut(raw: string): number {
-  try { return parseLedger(raw)?.cut ?? -1; }
-  // A file of another generation or an unreadable shape carries no decision, so the new cut replaces it.
-  catch { return -1; }
-}
-
-/** Validate one persisted ledger; another generation or an unreadable shape is absent. */
+/** Validate one persisted slice; another generation or an unreadable shape is absent. */
 function parseLedger(raw: string): SavedCost | undefined {
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return undefined; }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   if (record.version !== LEDGER_VERSION) return undefined;
-  if (typeof record.sessionId !== 'string' || !Number.isSafeInteger(record.cut) || !Array.isArray(record.charges)) {
-    throw new Error('Invalid cost ledger');
-  }
-  const charges = record.charges as unknown[];
-  if (!charges.every(validCharge)) throw new Error('Invalid cost ledger');
-  return { version: LEDGER_VERSION, sessionId: record.sessionId, cut: record.cut as number, charges: charges as Charge[] };
+  if (typeof record.sessionId !== 'string' || !Number.isSafeInteger(record.cut)) throw new Error('Invalid cost ledger');
+  if (!Number.isSafeInteger(record.engine) || typeof record.catalog !== 'string') throw new Error('Invalid cost ledger');
+  const total = validTotal(record.total);
+  const day = validDay(record.day);
+  if (total === undefined || day === undefined) throw new Error('Invalid cost ledger');
+  if (!Array.isArray(record.unpriced) || record.unpriced.some(reason => typeof reason !== 'string')) throw new Error('Invalid cost ledger');
+  return { version: LEDGER_VERSION, sessionId: record.sessionId, cut: record.cut as number, engine: record.engine as number,
+    catalog: record.catalog, total, day, unpriced: record.unpriced as string[] };
 }
 
-/** One charge is valid when every recorded field is present with the type the fold writes. */
-function validCharge(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const c = value as Record<string, unknown>;
-  if (typeof c.key !== 'string' || typeof c.provider !== 'string' || typeof c.model !== 'string') return false;
-  if (c.priceId !== undefined && typeof c.priceId !== 'string') return false;
-  if (c.reason !== undefined && typeof c.reason !== 'string') return false;
-  if (c.amount !== undefined && (typeof c.amount !== 'number' || !Number.isFinite(c.amount) || c.amount < 0)) return false;
-  if (c.matchedBy !== undefined && c.matchedBy !== 'exact' && c.matchedBy !== 'alias') return false;
-  if (c.engine !== undefined && (!Number.isSafeInteger(c.engine) || (c.engine as number) < 1)) return false;
-  if (c.catalog !== undefined && (typeof c.catalog !== 'string' || !/^[0-9a-f]{12}$/.test(c.catalog))) return false;
-  if (c.time !== undefined && (typeof c.time !== 'number' || !Number.isFinite(c.time) || c.time < 0 || c.time > 8.64e15)) return false;
-  if (c.usage !== undefined) {
-    if (typeof c.usage !== 'object' || c.usage === null || Array.isArray(c.usage)) return false;
-    const buckets = Object.values(c.usage as Record<string, unknown>);
-    if (buckets.length === 0 || buckets.some(n => typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0)) return false;
-  }
-  return true;
+/** Accept one stored subtotal only when the amount is finite and the counts are whole.
+ * Costs are fractional, so only the counts are required to be integers. */
+function validTotal(value: unknown): CostTotal | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const total = value as Record<string, unknown>;
+  const amount = total.amount;
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) return undefined;
+  const counts = [total.unknown, total.records];
+  if (!counts.every(count => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)) return undefined;
+  return { amount, unknown: total.unknown as number, records: total.records as number };
+}
+
+/** Accept one stored day bucket only when it also names the Beijing day it covers. */
+function validDay(value: unknown): DayTotal | undefined {
+  const total = validTotal(value);
+  const day = (value as Record<string, unknown> | null)?.day;
+  return total === undefined || typeof day !== 'string' || day === '' ? undefined : { day, ...total };
 }

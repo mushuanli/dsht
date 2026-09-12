@@ -16,7 +16,7 @@ export function CostPanel({ controller }: { controller: Controller }) {
   const id = controller.state.sessionId;
   const rows = [
     ['Session', id && costs.hasSession(id) ? costs.total(id) : undefined],
-    ['Today', costs.total(undefined, 1)], ['3 days (today + previous 2)', costs.total(undefined, 3)],
+    ['Today', costs.today()],
   ] as const;
   return <Box flexDirection="column" borderStyle="single" paddingX={1}>
     <Text bold>Cost · CNY estimate · Asia/Shanghai · /cost closes</Text>
@@ -28,7 +28,6 @@ export function CostPanel({ controller }: { controller: Controller }) {
     {costs.customPrices && <Text color={theme.colors.context}>Rates come from prices.json, not the shipped table.</Text>}
     <Text dimColor>Recorded settlement time determines tariff; * means a subtotal is not exact. Provider invoices are authoritative.</Text>
     {costs.error && <Text color={theme.colors.context}>Partial totals: {safeText(costs.error)}</Text>}
-    {costs.unreadableFiles > 0 && <Text color={theme.colors.context}>{costs.unreadableFiles} ledger file(s) could not be read and were kept; their sessions need a fresh scan.</Text>}
     {costs.missing().slice(0, 6).map(reason => <Text key={reason} color={theme.colors.context}>{safeText(reason)}</Text>)}
   </Box>;
 }

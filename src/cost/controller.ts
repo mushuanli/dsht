@@ -27,14 +27,22 @@ export class CostController {
   private updates = new Map<string, number>();
   constructor(readonly ledger: CostLedger, private readonly host: CostHost) {}
 
-  /** Scan immediately, then once a minute while online. */
+  /** Scan immediately, then once a minute while online.
+   *
+   * Every generation starts with no skip bookkeeping, because the host keeps running while this
+   * client is not connected: an update time this client already recorded cannot prove that nothing
+   * happened during the gap, so the first scan of the generation reads every session's history
+   * again. Within that generation the recorded times keep the minute timer from re-reading idle
+   * sessions.
+   */
   start(): void {
     if (this.timer) return;
+    this.updates.clear();
     void this.refresh().catch(() => undefined);
     this.timer = setInterval(() => { if (this.host.online()) void this.refresh().catch(() => undefined); }, REFRESH_INTERVAL_MS);
   }
 
-  /** Stop the timer and wait for an in-flight scan; the ledger keeps its cached charges. */
+  /** Stop the timer and wait for an in-flight scan; the ledger keeps its folded totals. */
   async stop(): Promise<void> {
     clearInterval(this.timer); this.timer = undefined;
     await this.task;

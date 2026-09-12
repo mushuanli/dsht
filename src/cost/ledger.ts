@@ -1,52 +1,30 @@
-/** Immutable CNY ledger: a charge is priced once and never follows later price configuration. */
+/** CNY estimates folded from host history: per-session totals, re-decided by every scan. */
 import type { ObjectValue } from '../transport/wire.ts';
-import { chargeFor, costDay, DEFAULT_PRICES } from './pricing.ts';
+import { chargeFor, costDay, DEFAULT_PRICES, pricesDigest, PRICING_ENGINE_VERSION } from './pricing.ts';
 import { foldSamples } from './records.ts';
 import { loadLedgers, saveLedger } from './ledger-files.ts';
-import { MISSING_USAGE, type Charge, type ChargeSample, type CostTotal, type Coverage, type PriceVersion, type SavedCost } from './types.ts';
+import { MISSING_USAGE, type CostTotal, type Coverage, type DayTotal, type PriceVersion, type SavedCost } from './types.ts';
 
-/** Whether a decided charge differs from the one it replaces in any recorded field.
- * @param a - Decision decided now.
- * @param b - Decision recorded before.
- * @returns True when every recorded field agrees.
- */
-function sameDecision(a: Charge, b: Charge): boolean {
-  return a.amount === b.amount && a.priceId === b.priceId && a.reason === b.reason
-    && a.matchedBy === b.matchedBy && a.engine === b.engine && a.catalog === b.catalog;
-}
+/** Reasons one slice keeps at most, so a broken table cannot grow the ledger without bound. */
+const UNPRICED_LIMIT = 8;
 
-/** Attach the current decision for a sample, or keep the amount an earlier scan sealed.
- *
- * Only an amount is final: a request that was unpriced stays open, so a table that later covers its
- * model — or a corrected table — prices it without a reprice, and a request that had not reported
- * tokens yet is priced when it does. The recorded rates travel with the amount, so re-deciding an
- * unpriced request cannot move a sealed one.
- * @param prices - Price table loaded now.
- * @param sample - Sample folded from the host history.
- * @param previous - Decision an earlier scan recorded for the same sample, when there was one.
- * @returns The sealed amount, or a fresh decision.
- */
-function decide(prices: PriceVersion[], sample: ChargeSample, previous: Charge | undefined): Charge {
-  if (previous?.amount !== undefined) return previous;
-  return { ...sample, ...chargeFor(prices, sample.provider, sample.model, sample.time, sample.usage) };
-}
-
-/** Per-origin cache of decided request charges; each scan replaces a session at a fixed cut. */
+/** Per-origin cache of folded session totals; every scan replaces a session at its cut. */
 export class CostLedger {
   private sessions = new Map<string, SavedCost>();
   private totals = new Map<string, CostTotal>();
+  private readonly catalog: string;
   scannedAt?: number;
   scanning = false;
   error = '';
-  /** Ledger files kept but not read, so a panel can say that recorded amounts were left in place. */
-  unreadableFiles = 0;
   /** Work the last completed scan performed, so a memory sample can attribute its allocation. */
   lastScan?: { sessions: number; pages: number; events: number };
   constructor(readonly prices: PriceVersion[] = DEFAULT_PRICES, readonly directory?: string,
     /** Whether the table came from a file the user maintains, rather than the shipped one. */
-    readonly customPrices = false) {}
+    readonly customPrices = false) {
+    this.catalog = pricesDigest(prices);
+  }
 
-  /** Cached charges count as complete; only a failed scan or an empty ledger is partial.
+  /** Cached totals count as complete; only a failed scan or an empty ledger is partial.
    * @returns Coverage of the current totals, so callers can mark them without re-deriving the rule.
    */
   get coverage(): Coverage {
@@ -55,79 +33,45 @@ export class CostLedger {
     return this.scannedAt !== undefined || this.sessions.size > 0 ? 'complete' : 'partial';
   }
 
-  /** Load the newest complete cut per session; recorded amounts load without re-pricing. */
+  /** Load the newest cut per session; a stored total is read as it was decided. */
   async load(): Promise<void> {
     this.totals.clear();
-    const loaded = await loadLedgers(this.directory);
-    this.unreadableFiles = loaded.unreadable;
-    for (const [sessionId, saved] of loaded.sessions) {
-      if ((this.sessions.get(sessionId)?.cut ?? -2) <= saved.cut) this.sessions.set(sessionId, saved);
-    }
-  }
-
-  /** Decide every stored charge again with the table loaded now.
-   *
-   * A stored charge keeps the sample it was decided from, so it can be decided again without the
-   * host's history. This is the repair for a table that was wrong when the decisions were sealed,
-   * and the way a corrected table reaches amounts that were already recorded. Charges without usage
-   * keep their record, because their request never reported tokens to decide from.
-   * @returns How many charges now carry a different amount or price identity.
-   */
-  async reprice(): Promise<number> {
-    let changed = 0;
-    for (const [sessionId, saved] of [...this.sessions]) {
-      let touched = false;
-      const charges = saved.charges.map(charge => {
-        if (charge.usage === undefined) return charge;
-        const decided: Charge = { ...charge, ...chargeFor(this.prices, charge.provider, charge.model, charge.time, charge.usage) };
-        // Every field of the decision counts, so a table change that only adds the audit fields still
-        // reaches a charge whose amount happens to be right.
-        if (sameDecision(decided, charge)) return charge;
-        changed++; touched = true;
-        return decided;
-      });
-      if (!touched) continue;
-      this.sessions.set(sessionId, await this.persist({ ...saved, charges }, sessionId));
-    }
-    if (changed > 0) this.totals.clear();
-    return changed;
-  }
-
-  /** Write one slice, or decide again what another process wrote meanwhile.
-   *
-   * `saveLedger` refuses a slice older than the one on disk, which is how a stale scan is kept from
-   * overwriting a newer one. A repair is not a scan: the newer file also needs deciding, so its own
-   * charges are read back, decided, and written under its own cut instead of the repair being dropped.
-   * @param slice - Repaired slice.
-   * @param sessionId - Session the slice belongs to.
-   * @returns The slice this session now holds.
-   */
-  private async persist(slice: SavedCost, sessionId: string): Promise<SavedCost> {
-    if (this.directory === undefined) return slice;
-    if (await saveLedger(this.directory, slice)) return slice;
-    const current = (await loadLedgers(this.directory)).sessions.get(sessionId);
-    if (current === undefined) return slice;
-    const charges = current.charges.map(charge => charge.usage === undefined ? charge
-      : { ...charge, ...chargeFor(this.prices, charge.provider, charge.model, charge.time, charge.usage) });
-    const newer: SavedCost = { ...current, charges };
-    await saveLedger(this.directory, newer);
-    return newer;
+    this.sessions = await loadLedgers(this.directory);
   }
 
   /** Replace one session using all billing events through the opening snapshot cut.
    *
-   * Sampling is replayed, but a charge that an earlier scan already decided keeps its recorded
-   * `priceId` and `amount`, so editing `prices.json` only affects requests decided afterwards.
+   * The fold is the projection: every sample is decided again with the table loaded now, so a
+   * corrected table reaches history on the next scan and a request no table covered yet is priced
+   * as soon as one does. Only the totals are kept, and the cut and engine keep an older scan from
+   * replacing a newer one.
    * @param sessionId - Host session identity.
    * @param cut - Opening cursor, preventing a stale scan from overwriting a newer scan.
    * @param events - Minimal events returned by `costRecords`, across all history pages.
+   * @param now - Clock that names the calendar day the day bucket covers.
    */
-  async replace(sessionId: string, cut: number, events: ObjectValue[]): Promise<void> {
+  async replace(sessionId: string, cut: number, events: ObjectValue[], now = Date.now()): Promise<void> {
     const current = this.sessions.get(sessionId);
     if ((current?.cut ?? -2) > cut) return;
-    const previous = new Map<string, Charge>((current?.charges ?? []).map(charge => [charge.key, charge]));
-    const charges = foldSamples(events).map(sample => decide(this.prices, sample, previous.get(sample.key)));
-    const saved: SavedCost = { version: 2, sessionId, cut, charges };
+    const day = costDay(now);
+    const total: CostTotal = { amount: 0, unknown: 0, records: 0 };
+    const today: DayTotal = { day, amount: 0, unknown: 0, records: 0 };
+    const unpriced = new Set<string>();
+    for (const sample of foldSamples(events)) {
+      const decision = chargeFor(this.prices, sample.provider, sample.model, sample.time, sample.usage);
+      // A request belongs to the day it settled on, so the day bucket only counts the requests of
+      // the calendar day this scan is running on; another day reads as nothing spent today. A request
+      // with no settlement time belongs to no day, so it is counted as unknown wherever it is read.
+      const buckets = sample.time === undefined || costDay(sample.time) === day ? [total, today] : [total];
+      for (const bucket of buckets) {
+        bucket.records++;
+        if (decision.amount === undefined) bucket.unknown++;
+        else bucket.amount += decision.amount;
+      }
+      if (decision.amount === undefined && unpriced.size < UNPRICED_LIMIT) unpriced.add(`${sample.provider}/${sample.model}: ${decision.reason}`);
+    }
+    const saved: SavedCost = { version: 3, sessionId, cut, engine: PRICING_ENGINE_VERSION, catalog: this.catalog,
+      total, day: today, unpriced: [...unpriced] };
     // Another process may have persisted a newer cut of this session since it was last read.
     if (this.directory && !await saveLedger(this.directory, saved)) return;
     this.sessions.set(sessionId, saved);
@@ -135,55 +79,55 @@ export class CostLedger {
   }
 
   /** Count the retained ledger so a memory sample can separate it from the transcript window.
-   * @returns Sessions and charges currently held, and how many charges carry no amount.
+   * @returns Sessions, requests and unpriced requests currently held.
    */
-  summary(): { sessions: number; charges: number; unpriced: number } {
-    let charges = 0, unpriced = 0;
-    for (const session of this.sessions.values()) {
-      charges += session.charges.length;
-      unpriced += session.charges.filter(charge => charge.amount === undefined).length;
-    }
-    return { sessions: this.sessions.size, charges, unpriced };
+  summary(): { sessions: number; records: number; unpriced: number } {
+    let records = 0, unpriced = 0;
+    for (const session of this.sessions.values()) { records += session.total.records; unpriced += session.total.unknown; }
+    return { sessions: this.sessions.size, records, unpriced };
   }
 
   /** Whether this session has a complete cached scan.
-   * @param sessionId - Selected session identity.
-   * @returns True when a complete scan is available.
+   * @param sessionId - Selected session identity, which may be unset before one is picked.
+   * @returns True when a complete scan is available, narrowing the identity to a string.
    */
-  hasSession(sessionId?: string): boolean { return sessionId !== undefined && this.sessions.has(sessionId); }
+  hasSession(sessionId: string | undefined): sessionId is string { return sessionId !== undefined && this.sessions.has(sessionId); }
 
   /** Describe unpriced model/usage combinations without exposing conversation content.
    * @returns Unique reasons across cached sessions.
    */
-  missing(): string[] {
-    return [...new Set([...this.sessions.values()].flatMap(s => s.charges.filter(c => c.amount === undefined).map(c => `${c.provider}/${c.model}: ${c.reason}`)))];
+  missing(): string[] { return [...new Set([...this.sessions.values()].flatMap(s => s.unpriced))]; }
+
+  /** One session's stored totals.
+   * @param sessionId - Session identity to report.
+   * @returns The total a scan folded for it, or zeros when no scan has covered it.
+   */
+  total(sessionId: string): CostTotal {
+    const cached = this.totals.get(`s:${sessionId}`);
+    if (cached) return cached;
+    const session = this.sessions.get(sessionId);
+    const result: CostTotal = session === undefined ? { amount: 0, unknown: 0, records: 0 } : { ...session.total };
+    this.totals.set(`s:${sessionId}`, result);
+    return result;
   }
 
-  /** Summarize recorded requests across one session or Beijing calendar days.
+  /** Every session's requests on one Beijing calendar day.
    *
-   * Every amount is attributed to the Beijing calendar day of its settlement time, so a dated range
-   * adds exactly the records it contains and the day subtotals always add up to the lifetime total.
-   * @param sessionId - Optional session restriction.
-   * @param days - Today or today plus the preceding two calendar days.
-   * @param now - Clock used for date attribution.
-   * @returns Known subtotal, unpriceable count, and how many requests the range covers.
+   * A slice keeps only the day its last scan ran on, so another day reads as nothing spent today
+   * rather than as the last day that was scanned.
+   * @param now - Clock that names the day to report.
+   * @returns The day's total across cached sessions.
    */
-  total(sessionId?: string, days?: 1 | 3, now = Date.now()): CostTotal {
-    const cacheKey = JSON.stringify([sessionId, days, days ? costDay(now) : '']);
-    const cached = this.totals.get(cacheKey);
+  today(now = Date.now()): CostTotal {
+    const day = costDay(now);
+    const cached = this.totals.get(`d:${day}`);
     if (cached) return cached;
     const result: CostTotal = { amount: 0, unknown: 0, records: 0 };
-    const end = costDay(now); const start = costDay(now - ((days ?? 1) - 1) * 86400_000);
     for (const session of this.sessions.values()) {
-      if (sessionId !== undefined && session.sessionId !== sessionId) continue;
-      for (const charge of session.charges) {
-        if (days && charge.time !== undefined && (costDay(charge.time) < start || costDay(charge.time) > end)) continue;
-        result.records++;
-        if (charge.amount === undefined) { result.unknown++; continue; }
-        if (days === undefined || charge.time !== undefined) result.amount += charge.amount;
-      }
+      if (session.day.day !== day) continue;
+      result.amount += session.day.amount; result.unknown += session.day.unknown; result.records += session.day.records;
     }
-    this.totals.set(cacheKey, result);
+    this.totals.set(`d:${day}`, result);
     return result;
   }
 }

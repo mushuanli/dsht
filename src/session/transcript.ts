@@ -74,9 +74,9 @@ export interface MessagePart {
   key?: string;
 }
 
-/** The stripe of live work the unfinished attempt is in. */
+/** The stripe of work the live attempt last moved into; the status bar times it until a newer one. */
 export interface LivePhase {
-  /** Which kind of delta last moved the attempt forward. */
+  /** Which kind of work the newest event named. */
   kind: 'thinking' | 'tool' | 'output';
   /** Tool name when `kind` is `tool`, so the bar can name what is running. */
   name?: string;
@@ -116,9 +116,13 @@ export class Transcript {
   private oldestSeq: number | undefined;
   private turnMarker: { seq: number; start?: number } | undefined;
   /** Pending-tool lookup memo, keyed by the revision that produced it. */
-  private runningCache: { version: number; value: { name: string; startedAt: number } | undefined } | undefined;
+  private runningCache: { version: number; value: { id: string; name: string; startedAt: number } | undefined } | undefined;
   private attempt: string | undefined;
   private phase: (LivePhase & { key: string }) | undefined;
+  /** Whether the newest delta still extends `phase`; attempt boundaries close it without dropping it. */
+  private phaseOpen = false;
+  /** Set when an added record can change which call the open turn is still waiting on. */
+  private pendingDirty = false;
   private nextIndex = 0;
   private revision = 0;
   private legacyStream = false;
@@ -154,6 +158,7 @@ export class Transcript {
         this.oldestSeq = undefined;
         this.turnMarker = undefined;
         this.clearBlocks();
+        this.clearPhase();
         this.keysDirty = true;
         this.projectionRevision++;
         this.legacyDirty = true;
@@ -199,13 +204,14 @@ export class Transcript {
             throw new Error('Assistant stream chunk gap');
           }
           if (live.type === 'chunk') { this.chunk(object(live.chunk)); this.nextIndex++; }
-          else if (live.type === 'end') { this.attempt = undefined; this.clearBlocks(); }
+          else if (live.type === 'end') { this.attempt = undefined; this.clearBlocks(); this.settlePhase(); }
           else throw new Error('Unknown assistant stream frame');
         }
         break;
       }
       default: throw new Error('Unknown session follow frame');
     }
+    if (this.pendingDirty) { this.pendingDirty = false; this.settlePhase(); }
   }
 
   /** Add an older page without replacing the live tail. */
@@ -215,6 +221,7 @@ export class Transcript {
     const page = object(value);
     this.addRecords(array(page.records));
     this.hasMore = page.hasMore === true;
+    if (this.pendingDirty) { this.pendingDirty = false; this.settlePhase(); }
   }
 
   /** Durable read cutoff includes followed records that were not present in the opening snapshot. */
@@ -273,7 +280,7 @@ export class Transcript {
   dispose(): void {
     this.disposed = true;
     this.events.clear(); this.sizes.clear(); this.storedBytes = 0;
-    this.clearBlocks(); this.transientSeqs.clear();
+    this.clearBlocks(); this.clearPhase(); this.transientSeqs.clear();
     this.sortedSeqs = []; this.displayed = []; this.promptBeforeWindow = undefined;
     this.oldestSeq = undefined; this.turnMarker = undefined; this.attempt = undefined; this.legacyPosition = '';
     this.cursor = -1; this.throughSeq = -1; this.hasMore = false; this.ready = false;
@@ -297,27 +304,24 @@ export class Transcript {
     this.sizes.delete(seq); this.events.delete(seq);
   }
 
-  /** The stripe of work the live attempt is in: the phase of the block that last took a delta.
+  /** The stripe of work the live attempt is in: the newest event the bar can time.
    *
-   * Its age answers "what is it doing, and for how long" without inferring anything from silence.
+   * Its age answers "what is it doing, and for how long" without inferring anything from silence,
+   * so the answer outlives the stream that supplied it: a tool keeps its age while it runs and after
+   * it answers, until the next stripe starts or the turn closes. Only the turn's own boundaries
+   * withdraw the phase, because everything inside a turn is still work the bar should be timing.
    * @returns Phase kind, the tool name when the phase is a tool call, and when the phase began.
    */
   get livePhase(): LivePhase | undefined {
-    if (this.phase !== undefined && this.blocks.size > 0) {
-      const { kind, name, startedAt } = this.phase;
-      return { kind, ...(name === undefined ? {} : { name }), startedAt };
-    }
-    // A tool runs after the assistant stream that asked for it has ended, so the live block no longer
-    // covers it. Falling through to the open turn's unanswered call is what keeps a long command
-    // visible instead of showing an idle bar.
-    const tool = this.runningTool;
-    return tool === undefined ? undefined : { kind: 'tool', name: tool.name, startedAt: tool.startedAt };
+    const phase = this.phase;
+    return phase === undefined ? undefined
+      : { kind: phase.kind, ...(phase.name === undefined ? {} : { name: phase.name }), startedAt: phase.startedAt };
   }
 
   /** The tool the open turn asked for that has not answered yet, oldest first.
-   * @returns Tool name and the moment the request was recorded, or undefined when none is in flight.
+   * @returns Call id, tool name and the moment the request was recorded, or undefined when none is in flight.
    */
-  get runningTool(): { name: string; startedAt: number } | undefined {
+  get runningTool(): { id: string; name: string; startedAt: number } | undefined {
     if (this.runningCache?.version === this.version) return this.runningCache.value;
     const value = this.findPendingTool();
     this.runningCache = { version: this.version, value };
@@ -329,7 +333,7 @@ export class Transcript {
    * The host's `tool/call` event is not retained — only user-visible content is — so this reads the
    * tool-call blocks a retained assistant message carries and the results that answer them.
    */
-  private findPendingTool(): { name: string; startedAt: number } | undefined {
+  private findPendingTool(): { id: string; name: string; startedAt: number } | undefined {
     const marker = this.turnMarker;
     // A turn that ended cannot have a tool in flight, and `turn/end` clears the marker's start.
     if (marker?.start === undefined) return undefined;
@@ -346,7 +350,7 @@ export class Transcript {
       }
     }
     const pending = calls.find(call => !answered.has(call.id));
-    return pending === undefined ? undefined : { name: pending.name, startedAt: pending.startedAt };
+    return pending === undefined ? undefined : { id: pending.id, name: pending.name, startedAt: pending.startedAt };
   }
 
   /** Start of the open durable turn, when its timestamp is present in the retained window. */
@@ -527,9 +531,15 @@ export class Transcript {
       this.throughSeq = Math.max(this.throughSeq, seq);
       if ((event.type === 'turn/start' || event.type === 'turn/end') && seq >= (this.turnMarker?.seq ?? -1)) {
         this.turnMarker = { seq, start: event.type === 'turn/start' && typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : undefined };
+        // A turn is the span a phase belongs to: the closed one has nothing left running and the
+        // opening one has not moved yet, so neither may show the other's last event.
+        this.clearPhase();
       }
       const current = this.events.get(seq);
       this.storeEvent(seq, retainedEvent(event));
+      // Only these records can answer "which call is the open turn still waiting on".
+      if (event.type === 'assistant/message' || event.type === 'tool/result'
+        || event.type === 'turn/start' || event.type === 'turn/end') this.pendingDirty = true;
       if (!DISPLAY_EVENTS.has(string(event.type))) this.transientSeqs.add(seq); else this.transientSeqs.delete(seq);
       if (current === event) continue;
       added.push(event);
@@ -600,14 +610,46 @@ export class Transcript {
   private validatePackedTiming(data: ObjectValue, count: number): void {
     if (count === 0 || array(data.dt).length !== count - 1) throw new Error('Invalid packed history member count');
   }
-  /** Drop the live attempt's blocks and the phase derived from them. */
-  private clearBlocks(): void { this.blocks.clear(); this.closedBlocks.clear(); this.phase = undefined; }
+  /** Drop the live attempt's blocks; the phase they named stays until something newer replaces it. */
+  private clearBlocks(): void { this.blocks.clear(); this.closedBlocks.clear(); this.phaseOpen = false; }
 
-  /** Record the phase a delta moved the attempt into; the status bar shows its age. */
-  private notePhase(kind: LivePhase['kind'], name?: string): void {
-    const key = kind === 'tool' ? `tool:${name ?? ''}` : kind;
+  /** Withdraw the phase at a turn boundary, where no work is running under it any more. */
+  private clearPhase(): void { this.phase = undefined; this.phaseOpen = false; }
+
+  /** Move the phase to the call the open turn is still waiting on, which is work in progress.
+   *
+   * A tool runs after the assistant stream that asked for it has ended, so the live block no longer
+   * covers it; the call the host committed but did not answer is what keeps a long command visible
+   * instead of showing an idle bar. While deltas are still arriving they are the newer evidence, and
+   * a turn with nothing unanswered keeps the phase it has rather than dropping back to silence.
+   */
+  private settlePhase(): void {
+    if (this.phaseOpen) return;
+    const tool = this.runningTool;
+    if (tool === undefined) return;
+    const key = toolPhaseKey(tool.id, tool.name);
     if (this.phase?.key === key) return;
+    this.phase = { key, kind: 'tool', name: tool.name, startedAt: tool.startedAt };
+  }
+
+  /** Record the stripe a delta moved the attempt into; the status bar shows its age.
+   *
+   * A delta that continues the open stripe keeps the original start, because the phase is one
+   * stretch of work rather than one chunk. A stripe that returns after the attempt closed it — a
+   * second `think` in a later step — starts over, and the call id is what distinguishes a repeated
+   * tool from the call that already ran.
+   * @param kind - Stripe the delta belongs to.
+   * @param name - Tool name, when the stripe is a tool call.
+   * @param id - Tool call id, when the stripe is a tool call.
+   */
+  private notePhase(kind: LivePhase['kind'], name?: string, id?: string): void {
+    const key = kind === 'tool' ? toolPhaseKey(id ?? '', name) : kind;
+    if (this.phase?.key === key && this.phaseOpen) {
+      if (name !== undefined && this.phase.name !== name) this.phase = { key, kind, name, startedAt: this.phase.startedAt };
+      return;
+    }
     this.phase = { key, kind, ...(name === undefined ? {} : { name }), startedAt: Date.now() };
+    this.phaseOpen = true;
   }
 
   private chunk(chunk: ObjectValue): void {
@@ -624,8 +666,9 @@ export class Transcript {
       const index = number(chunk.index);
       const block = this.blocks.get(index);
       const name = typeof chunk.name === 'string' ? chunk.name : typeof block?.name === 'string' ? block.name : '';
-      this.blocks.set(index, { type: 'tool-call', id: string(chunk.id), name, arguments: '' });
-      this.notePhase('tool', name === '' ? undefined : name);
+      const id = typeof chunk.id === 'string' ? chunk.id : typeof block?.id === 'string' ? block.id : '';
+      this.blocks.set(index, { type: 'tool-call', id, name, arguments: '' });
+      this.notePhase('tool', name === '' ? undefined : name, id);
     } else if (chunk.type === 'block-end') {
       this.blocks.set(number(chunk.index), object(chunk.block));
       this.closedBlocks.add(number(chunk.index));
@@ -636,6 +679,11 @@ export class Transcript {
 function number(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) throw new Error('Invalid sequence number');
   return value;
+}
+
+/** Identity of one tool call, so two calls of the same tool do not share one phase. */
+function toolPhaseKey(id: string, name: string | undefined): string {
+  return `tool:${id === '' ? name ?? '' : id}`;
 }
 
 /** Keep only user-visible content in durable client memory; the host owns raw tool results. */

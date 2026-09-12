@@ -27,17 +27,17 @@ With no command, choose a workspace and session interactively.
   --history-mb <n>      Soft history payload budget in MiB (default 16)
   --memory-log <path>   Append runtime memory samples; a failing log stops itself
   --no-memory-log       Disable the runtime memory log (default: enabled)
-  --reprice            Re-decide every stored charge with the current price table
   --json               Print machine-readable list output
   --help               Show this help
 
 The default host is http://127.0.0.1:3080.
 First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
-/cost shows session, today and three-day CNY estimates.
+/cost shows the session and today CNY estimates.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
-prices.json overrides the shipped rates and is seeded on first use; --reprice re-decides recorded charges.
+prices.json overrides the shipped rates and is seeded on first use; every scan re-decides the
+history with the table loaded then, so an edited table reaches past requests on the next scan.
 Examples:
   npx @itookit/dsht
   dsht list workspaces --json
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     url: { type: 'string', default: process.env.DSH_URL ?? 'http://127.0.0.1:3080' },
     'history-records': { type: 'string' }, 'history-mb': { type: 'string' },
-    workspace: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' }, reprice: { type: 'boolean' },
+    workspace: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
     'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
@@ -82,12 +82,6 @@ async function main(): Promise<void> {
   const costDirectory = join(stateRoot, 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory, custom);
   await costs.load();
-  // A corrected or replaced table only reaches recorded amounts when they are decided again.
-  if (values.reprice) {
-    const changed = await costs.reprice();
-    // Without a terminal the repair is the whole run, so a script can apply it and read the count.
-    if (!process.stdin.isTTY || !process.stdout.isTTY) { process.stdout.write(`Repriced ${changed} charges\n`); return; }
-  }
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
   const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits, memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']));
   const app = mount(controller);

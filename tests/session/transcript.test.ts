@@ -263,17 +263,66 @@ test('a tool that is executing is the phase while its request is unanswered', ()
     message(1, 4_000, [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }]),
   ] });
   // The assistant stream that asked for the tool has ended, so the live block no longer covers it.
-  assert.deepEqual(transcript.runningTool, { name: 'bash', startedAt: 4_000 });
+  assert.deepEqual(transcript.runningTool, { id: 'c1', name: 'bash', startedAt: 4_000 });
   assert.deepEqual(transcript.livePhase, { kind: 'tool', name: 'bash', startedAt: 4_000 });
   // A second call in flight does not replace the one that has been waiting longest.
   transcript.accept(message(2, 6_000, [{ type: 'tool-call', id: 'c2', name: 'read', arguments: '{}' }]));
-  assert.deepEqual(transcript.runningTool, { name: 'bash', startedAt: 4_000 });
+  assert.deepEqual(transcript.runningTool, { id: 'c1', name: 'bash', startedAt: 4_000 });
   // Answering the first call moves the phase to the one still waiting.
   transcript.accept(answered(3, 7_000, 'c1'));
-  assert.deepEqual(transcript.runningTool, { name: 'read', startedAt: 6_000 });
+  assert.deepEqual(transcript.runningTool, { id: 'c2', name: 'read', startedAt: 6_000 });
+  // The last call answering leaves the phase standing rather than dropping the bar to silence: the
+  // bar times the current event until a newer one starts, so the gap after a tool is still work.
   transcript.accept(answered(4, 8_000, 'c2'));
   assert.equal(transcript.runningTool, undefined);
+  assert.deepEqual(transcript.livePhase, { kind: 'tool', name: 'read', startedAt: 6_000 });
+  // Closing the turn is what withdraws it, because nothing in it is running any more.
+  transcript.accept({ type: 'event', event: { seq: 5, time: 9_000, type: 'turn/end', data: { turn: 1, reason: 'completed' } } });
   assert.equal(transcript.livePhase, undefined);
+});
+
+test('a streamed phase keeps its start across the attempt boundary and yields to the next stripe', () => {
+  const transcript = new Transcript();
+  transcript.accept(snapshot);
+  const frame = (value: ObjectValue) => transcript.accept({ type: 'assistant-stream', frame: value });
+  frame({ type: 'start', attemptId: 'a', revision: 1 });
+  frame({ type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'c1', name: 'bash', argumentsDelta: '{}' } });
+  const started = transcript.livePhase;
+  assert.equal(started?.kind, 'tool');
+  assert.equal(started?.name, 'bash');
+  // A later delta of the same call is the same stretch of work, so the age does not restart.
+  frame({ type: 'chunk', attemptId: 'a', revision: 3, index: 1,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'c1', name: '', argumentsDelta: ' ' } });
+  assert.equal(transcript.livePhase?.startedAt, started?.startedAt);
+  // The stream that asked for the tool ends before the tool runs, and the phase outlives it.
+  frame({ type: 'end', attemptId: 'a', revision: 4, index: 2 });
+  assert.equal(transcript.livePhase?.startedAt, started?.startedAt);
+  // A new attempt opening does not clear it either; the next stripe is what replaces it.
+  frame({ type: 'start', attemptId: 'b', revision: 5 });
+  assert.equal(transcript.livePhase?.name, 'bash');
+  frame({ type: 'chunk', attemptId: 'b', revision: 6, index: 0,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'thinking again' } });
+  assert.equal(transcript.livePhase?.kind, 'thinking');
+});
+
+test('a stripe that returns after the attempt closed starts a new age', t => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  t.mock.timers.setTime(1_000);
+  const transcript = new Transcript();
+  transcript.accept(snapshot);
+  const frame = (value: ObjectValue) => transcript.accept({ type: 'assistant-stream', frame: value });
+  frame({ type: 'start', attemptId: 'a', revision: 1 });
+  frame({ type: 'chunk', attemptId: 'a', revision: 2, index: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'one' } });
+  assert.equal(transcript.livePhase?.startedAt, 1_000);
+  frame({ type: 'end', attemptId: 'a', revision: 3, index: 1 });
+  t.mock.timers.setTime(5_000);
+  frame({ type: 'start', attemptId: 'b', revision: 4 });
+  // The boundary closes the stripe without clearing it, so the wait before the next step stays timed.
+  assert.equal(transcript.livePhase?.startedAt, 1_000);
+  frame({ type: 'chunk', attemptId: 'b', revision: 5, index: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'two' } });
+  // Reasoning that comes back after the boundary is new work, not a continuation of the first step.
+  assert.equal(transcript.livePhase?.startedAt, 5_000);
 });
 
 test('a closed turn reports no running tool even when a request was never answered', () => {

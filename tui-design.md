@@ -26,7 +26,7 @@
 
 `dsht` 不是 SSH 客户端，也不启动 Harness。宿主 `dsh web` 是必须先存在的外部服务；`dsht` 只通过 HTTP 与 WebSocket 访问它。设计上刻意**不导入任何 Harness 包**，因此安装与启动不依赖 Harness 的 Cordis 组合，代价是必须跟随宿主尚未稳定的 wire 协议演进。
 
-除远程控制外，`dsht` 还承担成本监控角色：它按请求记录 token 用量，区分未缓存输入、缓存读取、缓存写入与输出，并结合模型、结算时间、峰谷时段与版本化价格表，给出会话、当天与最近三个自然日的 CNY 估算。
+除远程控制外，`dsht` 还承担成本监控角色：它按请求记录 token 用量，区分未缓存输入、缓存读取、缓存写入与输出，并结合模型、结算时间、峰谷时段与版本化价格表，给出会话与当天的 CNY 估算。
 
 ### 1.2 包与仓库事实
 
@@ -40,7 +40,7 @@
 | 开发依赖 | `@types/node`、`@types/react`、`@types/ws`、`ink-testing-library`、`tsx`、`typescript` |
 | 许可 / 作者 | MIT，`lizlok@gmail.com` |
 | 仓库 | `git@github.com:mushuanli/dsht.git`，分支 `main` |
-| 源码规模 | `src/` 58 个模块（8 个业务域 + 共享契约），约 6,468 行；`tests/` 26 个测试文件；186 项测试 |
+| 源码规模 | `src/` 59 个模块（8 个业务域 + 共享契约），约 6,506 行；`tests/` 28 个测试文件；195 项测试 |
 
 `tui/` 是父仓库 `deepseek-harness` 中的**独立嵌套仓库**（在父仓库中未跟踪），拥有自己的 `package.json`、`tsconfig.json`、CI 工作流与 Agent Notes，不参与父仓库的 pnpm workspace 与文档门禁。
 
@@ -135,8 +135,8 @@ C4Component
     Component(telemetry, "Telemetry", "src/session/telemetry.ts", "投影值与每键 seq 水位")
     Component(transcript, "Transcript", "src/session/transcript.ts", "持久事件与未完成 assistant 流的语义投影")
     Component(history, "historyLayout", "src/session/history.ts", "行缓存、偏移索引与视口")
-    Component(ledger, "CostLedger", "src/cost/ledger.ts", "固化 charge、合计与覆盖度")
-    Component(costmod, "cost 模块", "src/cost/pricing,records,storage,scanner", "价格决策、记录折叠、落盘与分页读取")
+    Component(ledger, "CostLedger", "src/cost/ledger.ts", "折叠总额、合计与覆盖度")
+    Component(costmod, "cost 模块", "src/cost/pricing,records,ledger-files,scanner", "价格决策、记录折叠、落盘与分页读取")
     Component(authmod, "auth 与 CookieStore", "src/transport/auth.ts", "Cookie 校验、原子持久化与登录回退")
     Component(wire, "wire", "src/transport/wire.ts", "远端 JSON 断言与终端文本清理")
   }
@@ -238,7 +238,7 @@ C4Component
 | 世代化重连 | 每次断线重建 `Telemetry`、清空 `runningUpdates` 与 `interactions`，以新基线替换 | 宿主基线是重连后的权威状态，旧世代数据不得回灌 |
 | 未知 waterfall 必须委托 | 未识别的 `waterfall` 事件一律用 `{kind:'next'}` 回应 | 否则会阻塞宿主的 Cordis 事件链 |
 | 成本按请求计价 | 折叠持久用量事件而非对遥测基线做差 | 基线差会丢失重试、fork 继承与峰谷归属 |
-| 账本不可重算 | charge 首次计价即固化 `priceId` 与 `amount`；只有缺用量的样本保持开放 | 历史金额是事实，修改 `prices.json` 只影响其后计价的请求 |
+| 账本是投影 | 每次扫描按当前价目表重新折叠整段历史，落盘只保留会话汇总 | 账本可由宿主日志重建；修改 `prices.json` 在下一次扫描重算它覆盖的请求 |
 | Controller 是门面 | 门面只负责状态发布、选择器世代与生命周期，实现分布在四个域控制器 | 防止再次长出 God Object，同时保留 UI 与测试沿用的公开 API |
 | 目录即边界 | 每个业务域一个目录，跨域导入走 `index.ts` | 目录表达架构，依赖方向可被机械检查 |
 | 公开 API 与布局解耦 | `src/index.ts` 是唯一库门面，`exports` 指向编译产物 | 内部目录调整不改变 `@itookit/dsht` 的导入路径 |
@@ -436,7 +436,7 @@ class Controller implements ControllerStore, ConnectionListener {
   readonly base: string
   readonly costs?: CostLedger
   readonly historyLimits: HistoryLimits
-  constructor(base, token, initialSession?, makeClient?, authenticate?, costs?, historyLimits?)
+  constructor(base, token, initialSession?, makeClient?, authenticate?, costs?, historyLimits?, localDirectory?)
   subscribe / snapshot / update / selection / bumpSelection
   start() / stop() / shutdown() / perform(operation)
   running / sessionName / sessionMode / workingSince / visibleSessions / telemetry / costs
@@ -509,19 +509,22 @@ class Telemetry {
 #### 3.2.5 成本模块（`src/cost/`）
 
 ```ts
-interface Charge { key, time?, provider, model; usage?: Usage
-                   priceId?: string; amount?: number; estimated?: true; reason?: string }
-interface SavedCost { version: 2; sessionId: string; cut: number; charges: Charge[] }
-interface PriceDecision { priceId?: string; amount?: number; estimated?: true; reason?: string }
+interface ChargeSample { key: string; time?: number; provider: string; model: string; usage?: Usage }
+interface CostTotal { amount: number; unknown: number; records: number }
+interface DayTotal extends CostTotal { day: string }
+interface SavedCost { version: 3; sessionId: string; cut: number; engine: number; catalog: string
+                      total: CostTotal; day: DayTotal; unpriced: string[] }
+interface PriceDecision { amount?: number; reason?: string }
 
 class CostLedger {
   scanning: boolean; error: string; scannedAt?: number
   constructor(prices?: PriceVersion[], directory?: string)
   load(): Promise<void>
-  replace(sessionId: string, cut: number, events: ObjectValue[]): Promise<void>
-  hasSession(sessionId?: string): boolean
+  replace(sessionId: string, cut: number, events: ObjectValue[], now?: number): Promise<void>
+  hasSession(sessionId: string | undefined): sessionId is string
   missing(): string[]
-  total(sessionId?: string, days?: 1 | 3, now?: number): CostTotal
+  total(sessionId: string): CostTotal
+  today(now?: number): CostTotal
   get coverage(): Coverage
 }
 class CostController {
@@ -532,7 +535,7 @@ class CostController {
 
 function pricesFrom(value): PriceVersion[]
 function priceAt(prices, provider, model, time): { price; rates } | undefined
-function lowestPrice(prices, provider, model): { price; rates } | undefined
+function pricesDigest(prices: readonly PriceVersion[]): string
 function chargeFor(prices, provider, model, time, usage): PriceDecision
 function costDay(time: number): string
 function costRecords(records: unknown): ObjectValue[]
@@ -545,13 +548,13 @@ const DEFAULT_PRICES: PriceVersion[]
 
 | 文件 | 职责 |
 | --- | --- |
-| `pricing.ts` | 价格版本校验、峰谷选择、`chargeFor` 决策 |
+| `pricing.ts` | 价格版本校验、峰谷选择、`chargeFor` 决策（只返回金额或原因）与价目表摘要 |
 | `records.ts` | 宿主事件 → 最小计费事件 → 每请求样本 |
-| `ledger-files.ts` | 第 2 代 cut 文件的命名、代数与字段校验、旧截点清理（读写本身走 `src/storage/`） |
-| `ledger.ts` | 内存账本、固化规则、合计与覆盖度 |
+| `ledger-files.ts` | 第 3 代汇总文件的命名、字段校验与 cut/engine 竞态保护（读写本身走 `src/storage/`） |
+| `ledger.ts` | 内存账本、折叠规则、合计与覆盖度 |
 | `scanner.ts` | `session/list` → `session/follow` → `session/page` 的读取与地址解析 |
 | `controller.ts` | 扫描时机、定时器、并发合并与 `publish` 回调 |
-| `types.ts` | `Charge`、`SavedCost`、`CostTotal`、`Coverage` 等类型 |
+| `types.ts` | `ChargeSample`、`PriceDecision`、`SavedCost`、`CostTotal`、`Coverage` 等类型 |
 
 跨模块消费者（UI、`cli/`、测试）通过 `src/cost/index.ts` 导入。
 
@@ -657,7 +660,6 @@ dsht [options] [list workspaces|list sessions]
 | `--json` | `list` 输出 `{ "items": [...] }` |
 | `--memory-log <path>` | 运行时内存日志路径，默认 `<state>/memory.log`；空值报错 |
 | `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 先建好 `.diagnostics/` 再以 `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics` 启动，可在平台期用 `kill -USR2 <pid>` 把堆快照写进该目录（快照目录必须先存在，否则信号会让进程崩溃） |
-| `--reprice` | 用当前价目表重新决定每一笔已记录的账（无终端时只做修复并打印笔数） |
 | `--help` | 打印帮助 |
 
 约束与行为：
@@ -894,8 +896,8 @@ C4Dynamic
   Component(controller, "CostController", "src/cost/controller.ts", "扫描时机、定时器与并发合并")
   Component(client, "Client", "src/transport/client.ts", "session/list 与 session/follow")
   Component(scanner, "scanner", "src/cost/scanner.ts", "地址解析与逐页读取")
-  Component(ledger, "CostLedger", "src/cost/ledger.ts", "charges 折叠与区间合计")
-  ComponentDb(store, "cost/<origin-hash>/", "JSON cut 文件", "每会话保留最新 cut")
+  Component(ledger, "CostLedger", "src/cost/ledger.ts", "会话总额折叠与当天分桶")
+  ComponentDb(store, "cost/<origin-hash>/", "JSON 汇总文件", "每会话一份固定文件")
   System_Ext(host, "dsh web 宿主", "历史与用量")
 
   Rel(controller, client, "1. session/list 列出全部 HTTP 可见会话")
@@ -904,12 +906,12 @@ C4Dynamic
   Rel(controller, host, "4. session/page 逐页向更早回退并校验页码前进")
   Rel(controller, scanner, "5. sessionCostHistory 折叠为最小计费事件")
   Rel(scanner, ledger, "6. replace(sessionId, cursor, events)")
-  Rel(ledger, ledger, "7. 复用已固化 charge，只为新样本调用 chargeFor")
-  Rel(ledger, store, "8. 原子写入 <prefix>-<cut>.json 并删除更旧的 cut")
-  Rel(controller, ledger, "9. total(sessionId)、total(undefined,1)、total(undefined,3)")
+  Rel(ledger, ledger, "7. 用当前价目表为每个样本调用 chargeFor 并累加")
+  Rel(ledger, store, "8. 原子写入该会话的固定汇总文件")
+  Rel(controller, ledger, "9. total(sessionId)、today()")
 ```
 
-触发时机：连接建立后、每 60 秒、回合结束（`api-session/status` 变为 false）时，以及打开 `/cost` 时。`CostController` 用自身的任务句柄合并并发调用，`/cost` 的 `AbortSignal` 会传播到正在进行的扫描；单个会话失败只累加到一个失败列表，不影响其他会话。已固化的 charge 不再参与计价，只有本次新出现的样本会调用 `chargeFor`。
+触发时机：每个连接世代建立后、每 60 秒、回合结束（`api-session/status` 变为 false）时，以及打开 `/cost` 时。每个新世代先丢弃跳过表并完整重读一次全部会话：客户端不在时宿主仍在工作，任何缓存或上一次的更新时间都不能代替这次读取。`CostController` 用自身的任务句柄合并并发调用，`/cost` 的 `AbortSignal` 会传播到正在进行的扫描；单个会话失败只累加到一个失败列表，不影响其他会话。每次扫描都重新读取整段历史并为每个样本调用 `chargeFor`：账本只保留汇总，任何样本都不带上次的决定。
 
 子代理处理：`costAddresses` 为 `origin === 'subagent'` 且带 `parentSessionId` 的行生成两种地址，先 `continuable` 后 `one-shot`，且仅当错误码为 `subagent/unauthorized` 时才重试第二种。`header.isSeeded === true` 的会话必须包含 `session/end-seed` 且 `inherited === true`，否则拒绝归属其继承用量。
 
@@ -955,7 +957,7 @@ C4Dynamic
 - 任何进入模型请求的内容都是宿主持久事件的重放；客户端只在 `blocks` 中保存尚未提交的助手流，`dispose()` 后迟到帧不得回填。
 - 重连以基线替换状态，**绝不重放用户写操作**；所有写操作单次尝试。
 - 未识别的 waterfall 一律委托 `next`。
-- 成本账本只保存会话 ID、时间、模型、token 计数、价格版本与估算，不含提示词、工具正文、凭据与 Cookie。
+- 成本账本只保存会话汇总（金额、计数、当天分桶、cut、规则版本与价目表摘要）与未计价原因，不含逐请求信息、提示词、工具正文、凭据与 Cookie。
 - 启动令牌不落盘；Cookie 文件拒绝不安全权限、非当前属主与符号链接。
 - 只有 `safeText` 清洗后的远端文本才进入终端，且着色在排版之后施加。
 
@@ -974,7 +976,7 @@ C4Component
     Component(tx, "Transcript", "内存", "会话事件窗口与未完成助手流")
     Component(lay, "LayoutIndex", "内存 WeakMap", "行缓存与序号偏移索引")
     Component(tel, "Telemetry", "内存", "投影值、排队输入与任务计数")
-    Component(led, "CostLedger", "内存镜像", "charges 与合计缓存")
+    Component(led, "CostLedger", "内存镜像", "会话汇总与合计缓存")
     Component(ih, "InputHistory", "内存", "进程内输入回填")
     Component(cl, "Client", "内存", "Cookie 副本、archivedSessionIds 与在册订阅")
     Component(exp, "export.saveSessionLog", "TypeScript", "独占创建并流式写入归档")
@@ -982,7 +984,7 @@ C4Component
 
   ContainerDb(cfg, "prices.json", "配置", "用户维护的价格版本表")
   ContainerDb(authfile, "auth/<sha256(origin)>.json", "状态", "origin 作用域 Cookie")
-  ContainerDb(cutfile, "cost/<sha256(origin)>/<sid>-<cut>.json", "状态", "定价后的请求 charges")
+  ContainerDb(cutfile, "cost/<sha256(origin)>/<sha256(sid)>.json", "状态", "折叠后的会话汇总")
   ContainerDb(zipfile, "session-<id>-<time>.zip", "导出", "会话日志归档")
   System_Ext(host, "dsh web 宿主", "会话日志、工作区、设置与凭据的唯一持久层")
 
@@ -1038,25 +1040,26 @@ C4Component
 - **写入**：`dsht` 不修改该文件；用户手工编辑后重启生效（无热加载）。
 - **使用范围**：仅交互模式读取；`list` 子命令不读价格配置也不写状态。
 
-#### 5.2.3 成本缓存 cut 文件
+#### 5.2.3 成本缓存汇总文件
 
 ```json
-{ "version": 2, "sessionId": "s1", "cut": 128, "charges": [
-  { "key": "42", "time": 1789000000000, "provider": "deepseek-official", "model": "deepseek-flash",
-    "usage": { "input": 1200, "output": 340, "cacheRead": 8000, "cacheWrite": 0 },
-    "priceId": "deepseek-2026-09-10-flash", "amount": 0.0123 } ] }
+{ "version": 3, "sessionId": "s1", "cut": 128, "engine": 2, "catalog": "9f2c1a7b40d3",
+  "total": { "amount": 12.34, "unknown": 1, "records": 42 },
+  "day": { "day": "2026-09-12", "amount": 1.55, "unknown": 0, "records": 3 },
+  "unpriced": ["deepseek-official/deepseek-v5-ultra: no price version"] }
 ```
 
-- **命名与保留**：每个会话一个固定文件 `<sha256(sessionId)>.json`，`cut` 存在文件内容里，因此一个会话在磁盘上只有一份切片。旧命名 `<sha256(sessionId)>-<cut>.json` 仍可读入，并在加载时迁移到固定名字。
-- **写入**（`CostLedger.replace`）：若内存中已有 `cut >=` 新值则整次跳过；否则先读现有文件，仅当其中记录的 `cut` 不高于待写值时才落盘——先写 `<uuid>.tmp`（`wx`，0600）再 `rename`——并由 `saveLedger` 返回是否写入。未写入时 `replace` 不改动内存切片，使内存与磁盘停在同一切片上。
-- **读取**（`CostLedger.load`）：启动时枚举目录内 `*.json`，逐字段校验 `key`/`provider`/`model`/`usage`/`time`/`amount`/`estimated`/`reason`/`priceId`；同一会话保留 `cut` 最大者（两种命名一起比较），`ENOENT` 跳过。代数不是 2 的文件、内容读不出的文件、以及旧命名下已被取代的文件都属于"下一次扫描会重建"的残片，加载时删除；旧命名里最新的一份先按固定名字重写再删除。不属于本单元的文件名不动。
-- **固化规则**：`priceId` 与 `amount` 是首次计价时写下的决定。后续扫描重放同样的样本时直接复用该决定；只有 `reason === 'missing usage'` 的样本保持开放，等待宿主报告 token。已计价、已估算与未计价的其余情况一律终局。`CostLedger.reprice()`（`--reprice`）是唯一的例外：它依据每笔账保存的样本按当前价目表重新决定，用于修正错误价目表下封存的金额。
-- **模型→费率匹配**：`priceAt` 先按 `canonicalModel()`（NFKC + CJK 句号映射 + 去空白 + 小写）精确匹配 `provider + model`，再匹配版本声明的 `aliases`（尾部 `*` 为前缀），**未声明即 `no price version`**，不再按名字子串猜家族。每条金额同时记录 `matchedBy`（`exact`/`alias`）、`engine`（`PRICING_ENGINE_VERSION`）与 `catalog`（该价格版本的 12 位摘要），因此改表改费率而不改 id 也能被审计分辨。
-- **状态机**：只有已定价的金额终局；`missing usage`／`missing time`／`unsupported usage`／`no price version`／`invalid estimate` 都会在后续扫描中重算，因此表覆盖或修正后能自动定价，`--reprice` 仍是移动已记录金额的唯一途径。
-- **已删除**：`lowestPrice()` 与 `estimated`（无结算时间不再取下限估值，改记 `missing time`，`Σ 每日 = 总计`）；`cacheWrite` 对 `deepseek-official` 非零时记 `unsupported usage`；`compaction/summary` 计入 `BILLING_EVENTS`；无法解析的账本文件移到 `<name>.unreadable` 保留而不是删除。
+- **命名与保留**：每个会话一个固定文件 `<sha256(sessionId)>.json`，一个会话在磁盘上只有一份切片；`cut` 与 `engine` 存在文件内容里。
+- **写入**（`CostLedger.replace`）：若内存中已有 `cut >=` 新值则整次跳过；否则先读现有文件，仅当其中记录的 `cut` 不高于待写值、且 `engine` 不高于本次时才落盘——先写 `<uuid>.tmp`（`wx`，0600）再 `rename`——并由 `saveLedger` 返回是否写入。未写入时 `replace` 不改动内存切片，使内存与磁盘停在同一切片上。
+- **读取**（`CostLedger.load`）：启动时枚举目录内 `<sha256>.json`，逐字段校验 `sessionId`/`cut`/`engine`/`catalog`/`total`/`day`/`unpriced`；同一会话保留 `cut` 最大者，`ENOENT` 跳过。代数不是 3 的文件、内容读不出的文件与其他文件名一律忽略、不重命名：切片只是日志的投影，下一次扫描会重建它。
+- **折叠规则**：`replace` 用当前价目表为 `foldSamples` 的每个样本调用 `chargeFor`，把金额与计数累加进会话总额；**不保存任何逐请求记录**，因此每次扫描都是一次完整的重新决定。
+- **当天分桶**：只保留本次扫描所在北京时间自然日的那一个分桶（`now` 参数即该日期的时钟）。有结算时间但不属于当天的请求只进会话总额；没有结算时间的请求属于任何一天，因此同时计入当天分桶的 `unknown`。查询另一天时该切片贡献零，`today()` 不会把上次扫描那天读成今天。
+- **模型→费率匹配**：`priceAt` 先按 `canonicalModel()`（NFKC + CJK 句号映射 + 去空白 + 小写）精确匹配 `provider + model`，再匹配版本声明的 `aliases`（尾部 `*` 为前缀），**未声明即 `no price version`**，不再按名字子串猜家族。决策只返回 `{ amount }` 或 `{ reason }`；`engine`（`PRICING_ENGINE_VERSION`）与 `catalog`（整张价目表的 12 位摘要）记录在切片上，说明这份汇总由哪套规则与哪张表得出。
+- **开放状态**：没有金额的请求只计入 `unknown`，不产生金额；由于每次扫描都重新决定，`missing usage`／`missing time`／`unsupported usage`／`no price version`／`invalid estimate` 都会在表覆盖或数据补齐后自动定价。没有 `--reprice`：一次普通扫描就是一次重新决定。
+- **已删除**：`lowestPrice()` 与 `estimated`（无结算时间不再取下限估值，改记 `missing time`）；`cacheWrite` 对 `deepseek-official` 非零时记 `unsupported usage`；`compaction/summary` 计入 `BILLING_EVENTS`；逐请求 `charges`、逐笔 `priceId`/`matchedBy`/`engine`/`catalog` 审计与 `--reprice` 随投影模型一并删除。
 - **价目表来源**：`loadPrices` 在 `prices.json` 缺失时用随包 `DEFAULT_PRICES` 种下并写下 `prices.seed.json`（版本 + 内容摘要）。文件仍与该摘要一致时视为工具所有，会用当前随包表重写（因此费率修正能触达旧安装）；一旦内容被编辑，文件即为权威、永不覆盖，`/cost` 会标明「Rates come from prices.json, not the shipped table」。没有戳记的旧文件仅在与被取代的种子完全一致时被替换。
-- **内存镜像**：`sessions: Map<sessionId, SavedCost>` 是读取路径的实际数据源，`totals: Map<cacheKey, CostTotal>` 在每次 `replace` 时清空并惰性重建；`CostController` 另外在内存中记录 `(sessionId, updatedAt)` 以跳过未变化的空闲会话。磁盘只用于跨进程存活，不参与每次查询。
-- **访问事件流**：`CostController.refresh` 以 `session/list` 枚举会话，经 `scanner.sessionCostHistory` 用 `session/follow` 取 snapshot 与 `cursor`、用 `session/page` 逐页向更早回退，最后由 `ledger.replace` 落盘。跳过标记只存在内存中，因此每次重启都会重新读取全部会话，但只为其后新出现的请求决定金额。
+- **内存镜像**：`sessions: Map<sessionId, SavedCost>` 是读取路径的实际数据源，`totals: Map<key, CostTotal>` 在每次 `replace` 时清空并惰性重建；`CostController` 另外在内存中记录 `(sessionId, updatedAt)` 以跳过未变化的空闲会话，但该跳过表只在同一个连接世代内有效——新世代开始时清空，因为客户端断开期间宿主仍在运行，已记录的更新时间无法证明这期间什么都没发生。磁盘只用于跨进程存活，不参与每次查询。
+- **访问事件流**：`CostController.refresh` 以 `session/list` 枚举会话，经 `scanner.sessionCostHistory` 用 `session/follow` 取 snapshot 与 `cursor`、用 `session/page` 逐页向更早回退，最后由 `ledger.replace` 落盘。跳过标记只存在内存中，因此每次重启都会重新读取全部会话。
 
 #### 5.2.4 导出归档
 
@@ -1072,7 +1075,9 @@ C4Component
 
 选择器状态：`/ws` 与 `/resume` 的每一行都从 `session/list` 摘要读状态，不加载会话历史——会话行前缀是 `◐`（运行中）、`●`（空闲）或 `○`（未使用）加最近活动时间（`now`／分／时／天），工作区行前缀是同样标记的计数（运行中在前）。状态只取 `running` 与 `blank`，不从沉默推断停滞；「等待确认」需要宿主侧的列表投影，目前拿不到。
 
-单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都从不从静默推断· `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00 (13.00)` · 回合 · token。ctx 与费用各带两种读法：整行仍放得下时画条状与「今天花费（历史总计）」，否则退回 `ctx 30%` 与只报本会话的 `S¥3.00*`，账本没有本会话切片时费用槽直接用今天花费；宽度不足时按 token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
+工作区选择器最后两项都是注册入口：`+ Add workspace (this directory)` 直接用 `Controller.localDirectory`（进程启动目录，默认为 `process.cwd()`）注册 `dsht` 自身所在目录，并且只在服务端没有同路径工作区时出现——常见的同机场景因此不必手输路径；`+ Add workspace (host directory)` 进入输入界面，输入的服务端绝对路径可以与本机文件系统不同。输入界面是独立 screen（`state.screen === 'path'`），因此 Esc 通过 `showPicker('workspaces')` 退回选择器并清空草稿：选择器的按键在草稿非空时被禁用，留下草稿会让它再也无法操作。
+
+单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。阶段是**当前事件**的名字与年龄，只在下一段工作开始或回合关闭时改变：工具回答之后、下一次增量到达之前它仍显示上一个工具，因此命令行之后的静默期仍被算作这个回合的工作时间，而 `● Ready` 不显示阶段——只有宿主知道回合已经结束。暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都从不从静默推断· `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00(13.00)` · 回合 · token · 缓存命中率（`hit 92%`）。命中率是缓存读取占三个互斥提示侧桶（未命中输入、缓存读取、缓存写入）之和的比例；部分命中不得四舍五入成 `100%`，先增加小数位，仍显示不出就报 `<100%`。ctx 与费用各带两种读法：ctx 只在整行仍放得下时画条状，否则退回 `ctx 30%`；费用是**一个分组里的两个作用域**——`¥: 3.00(13.00)` 的 `3.00` 是本会话，括号内的 `13.00` 是今日合计；账本还没扫到本会话时第一个数如实写 `?`。两者互不替代：用一个槽位让当日总额顶替本会话费用，会让新开的会话报出当天别处的花费。宽度不足时按命中率、token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
 
 展开的 `/status` 面板把相关值合并成行并采用短标签（连接／活动、会话与模式、工作区、三行指标、费用与回合、排队与任务各一行），计数采用与单行状态栏相同的紧凑单位（`400.6K/1M`、`229.7M tok`），因此 46 列下常见 11 行、24 行终端一屏可显示；错误各自占行。换行与滚动仍作为小终端的兜底。
 
@@ -1094,7 +1099,7 @@ C4Component
 | 模型目录与 preset 名单 | `State.defaultModel/presets` | `/model`、状态栏、模式标签 | `refreshCatalog`、`loadPresetNames` | 世代与 `catalogRevision` 守卫 |
 | 输入回填 | `InputHistory` | `move()` | `record()`、会话加载时种子 | 200 条 / 256 KiB 淘汰；切换会话重建 |
 | Cookie 与在册订阅 | `Client.cookie/expiresAt/listeners` | `call`、`subscribe` | `restoreCookie`、`authenticate`、`subscribe` | `close()` 结束全部订阅 |
-| 成本 charges 镜像与合计 | `CostLedger.sessions/totals` | `total`、`hasSession`、`missing` | `load`、`replace` | `replace` 清空合计缓存 |
+| 成本汇总镜像与合计 | `CostLedger.sessions/totals` | `total`、`today`、`hasSession`、`missing` | `load`、`replace` | `replace` 清空合计缓存 |
 
 ### 5.4 宿主持久层（只经协议访问）
 
@@ -1116,13 +1121,13 @@ C4Component
 | --- | --- | --- | --- | --- | --- |
 | 启动令牌 | 环境变量 / URL / 内存 | `endpoint()` | — | 首次登录、Cookie 过期后重新登录 | `GET /?token=` |
 | 认证 Cookie | 磁盘 + 内存 | `CookieStore.load` | `CookieStore.save` | 自动登录与 401 回退 | `GET /?token=`、`session/list` 探测 |
-| 价格版本 | 磁盘 `prices.json` | `loadPrices`（种子 + `prices.seed.json` 戳记）→ `CostLedger` | 首次 `wx` 创建；未编辑时随随包价目表刷新；用户编辑后即为权威；`--reprice` 重新决定已封存金额 | `/cost`、状态栏费用、`/status` | 无（纯本地配置） |
-| 定价后的 charges | 磁盘 cut 文件 | `CostLedger.load` | `CostLedger.replace` | `/cost`、状态栏 `~¥` | `session/list` → `session/follow` → `session/page` |
-| 合计与覆盖度 | 内存 `totals` | `CostLedger.total`、`coverage` | `replace` 清空 | 状态栏、`/cost`、`/status` | 无（本地折叠） |
+| 价格版本 | 磁盘 `prices.json` | `loadPrices`（种子 + `prices.seed.json` 戳记）→ `CostLedger` | 首次 `wx` 创建；未编辑时随随包价目表刷新；用户编辑后即为权威；改表在下一次扫描重算历史 | `/cost`、状态栏费用、`/status` | 无（纯本地配置） |
+| 折叠后的会话汇总 | 磁盘汇总文件 | `CostLedger.load` | `CostLedger.replace` | `/cost`、状态栏 `~¥` | `session/list` → `session/follow` → `session/page` |
+| 合计与覆盖度 | 内存 `totals` | `CostLedger.total`、`today`、`coverage` | `replace` 清空 | 状态栏、`/cost`、`/status` | 无（本地折叠） |
 | 扫描跳过标记 | `CostController` 的内存映射 | `CostController.refresh` | `CostController.refresh` | 增量刷新 | `session/list.updatedAt` |
 | 会话事件窗口 | 内存 `Transcript` | `messagesForWidth`、`thoughts`、`searchHistory` | `accept`、`addPage`、`trimHistory` | 对话阅读、`/older`、`/search`、`/history`、`/think` | `session/follow`、`session/page` |
 | 布局行缓存 | 内存 `LayoutIndex` | `historyLayout` | `historyLayout` | 滚动、视口渲染、`/copy` | 无（本地排版） |
-| 投影值与水位 | 内存 `Telemetry` | `view()` | `accept`、`snapshot` | 状态栏模型/上下文/token/turns、`/status` | `session/control`、`session/follow` 的 `projections` |
+| 投影值与水位 | 内存 `Telemetry` | `view()` | `accept`、`snapshot` | 状态栏模型/上下文/token/命中率/turns、`/status` | `session/control`、`session/follow` 的 `projections` |
 | 排队输入 | 内存 `Telemetry.queues` | `pending()` | `accept` 的 `queue` 帧 | 输入框预览、`/queue` 删除 | `session/control`、`session/updateQueue` |
 | 活动任务计数 | 内存 `Telemetry.jobs` | `view().jobs` | `accept` 的 `jobs` 帧 | `/status` | `session/control` |
 | 运行状态 | `ConnectionController.runningUpdates` | `SessionController.running` | `$events` emit | 状态栏 `◐ Working`、Ctrl+C、Esc | `api-session/status` |
@@ -1140,9 +1145,9 @@ C4Component
 
 - **回收顺序**：切会话、归档当前会话或断线时依次 `releaseHistoryLayout` → `Transcript.dispose()` → 清理行缓存与投影；`pinHistory(true)` 在阅读、搜索或展开历史期间暂停回收，`/latest` 或回到实时尾部后恢复。
 - **软预算**：会话窗口默认 2,000 条或 16 MiB（`--history-records`、`--history-mb` 可调），回收目标为预算的 75%，至少保留最近 `min(32, max(1, maxRecords / 4))` 条，并保护未完成的历史流与离线历史。
-- **落盘内容限制**：Cookie、价格、charges 与内存日志之外不写任何内容；内存日志只有计数与大小，不含提示词、工具或会话正文。charges 只包含会话 ID、时间、provider/model、token 桶、所选价格版本与金额；提示词、工具正文、回答文本、凭据与 Cookie 值都不进入成本文件。取消或失败的导出会删除不完整 ZIP。
-- **一致性**：认证 Cookie 与成本 cut 文件都以“临时文件 + `rename`”原子替换；`prices.json` 只在首次启动以 `wx` 创建，之后由用户维护。成本 cut 文件名携带 opening cursor，使并发或陈旧的扫描无法顶替更新的结果。
-- **重建代价**：内存数据可随时由宿主重建，但重建需要重新订阅 `session/follow`（新鲜快照）与重新扫描成本历史；重启后第一次成本扫描会重新读取每个会话，并只为其中新出现的请求决定金额，已固化的历史 charge 原样载入。
+- **落盘内容限制**：Cookie、价格、成本汇总与内存日志之外不写任何内容；内存日志只有计数与大小，不含提示词、工具或会话正文。成本汇总只包含会话 ID、金额与计数、当天分桶、cut、规则版本、价目表摘要与未计价原因；提示词、工具正文、回答文本、凭据与 Cookie 值都不进入成本文件。取消或失败的导出会删除不完整 ZIP。
+- **一致性**：认证 Cookie 与成本汇总文件都以“临时文件 + `rename`”原子替换；`prices.json` 只在首次启动以 `wx` 创建，之后由用户维护。成本文件内容携带 opening cursor 与规则版本，使并发或陈旧的扫描无法顶替更新的结果。
+- **重建代价**：内存数据可随时由宿主重建，但重建需要重新订阅 `session/follow`（新鲜快照）与重新扫描成本历史；重启后第一次成本扫描会重新读取每个会话并按当前价目表重新折叠，因此账本文件本身也可以在任何时候删除并重建。
 
 ## 6. 成本模型
 
@@ -1164,14 +1169,14 @@ C4Component
 
 选择与折叠规则：
 
-- 精确匹配 `(provider, model)` 的版本优先；无精确匹配时，只有 `provider === 'deepseek-official'` 才回退到模型族：名称含 `pro`（不区分大小写）用 `deepseek-v4-pro`，否则用 `deepseek-flash`。未列出的 provider 一律不计价。
-- 有结算时间时用 `priceAt` 按半开区间与峰谷窗口选择；无结算时间时用 `lowestPrice` 取候选版本中最低的 off-peak 费率作为**下界**，并标记 `estimated`。
+- 精确匹配 `(provider, model)` 的版本优先；无精确匹配时匹配该版本声明的 `aliases`（尾部 `*` 为前缀）。未声明的名字与未列出的 provider 一律不计价，不按名字子串猜测。
+- 有结算时间时用 `priceAt` 按半开区间与峰谷窗口选择；无结算时间或没有合法用量时只记 `missing time`／`missing usage`，不产生金额。
 - `costRecords` 只保留 `request/context`、`assistant/message`、`assistant/attempt`、`llm/retry-started`、`session/end-seed` 五类事件的最小字段。
 - `foldSamples` 把最小计费事件折叠为每请求样本；`llm/retry-started` 清空同一 `(turn, step)` 的槽位使重试单独计数，同一槽位的后续样本覆盖前一样本的用量。
-- `chargeFor` 只在样本首次出现时求值一次并写下 `priceId` 与 `amount`；`decide` 复用已固化的 charge，因此修改 `prices.json` 不会改变历史金额，只影响其后才出现的请求。唯一例外是 `reason === 'missing usage'` 的样本，它等待宿主报告 token 后再计价。
-- 账本落盘为第 2 代格式（记录 `priceId`，不再内嵌完整价格版本）；其他代数的文件被忽略并由下一次扫描重建。
-- `total(sessionId, days, now)` 的 `days` 为 `1`（当天）或 `3`（当天加前两个自然日），日期边界用 `costDay` 换算为北京时间；`unknown` 计数完全无法计价者，`estimated` 计数只有下界金额者。
-- `coverage` 是账本属性而非渲染属性：已有缓存或完成过扫描为 `complete`，正在扫描为 `scanning`，空账本或扫描失败为 `partial`。`costText` 在存在 `unknown` 或 `estimated` 时追加 `*`，与覆盖度的 `!` 前缀含义不同。
+- `chargeFor` 对每个样本用当前价目表求值一次并只返回金额或原因；扫描把金额累加进会话汇总，不保留任何决定，因此修改 `prices.json` 会在下一次扫描重算它覆盖的历史请求。
+- 账本落盘为第 3 代格式：每会话一份汇总（金额、计数、当天分桶、cut、规则版本、价目表摘要与未计价原因）；其他代数的文件被忽略并由下一次扫描重建。
+- `total(sessionId)` 返回该会话的折叠总额，`today(now)` 求和所有切片中当天分桶属于 `costDay(now)` 的部分；日期边界用 `costDay` 换算为北京时间，`unknown` 计数完全无法计价者。
+- `coverage` 是账本属性而非渲染属性：已有缓存或完成过扫描为 `complete`，正在扫描为 `scanning`，空账本或扫描失败为 `partial`。`costText` 在存在 `unknown` 时追加 `*`，与覆盖度的 `!` 前缀含义不同。
 
 ## 7. 项目协作与维护
 
@@ -1200,7 +1205,7 @@ C4Component
 | `architecture/2026-09-11-terminal-compaction` | `/compact` 与窄屏思考折叠 |
 | `architecture/2026-09-11-terminal-dialog-context` | 对话框上方的对话上下文 |
 | `architecture/2026-09-11-terminal-steering-commands` | 自动 steer/queue、排队项管理与宿主命令 |
-| `architecture/2026-09-11-modular-boundaries-immutable-ledger` | 按业务域重组目录、拆分 Controller/App、账本改为不可重算 |
+| `architecture/2026-09-11-modular-boundaries-immutable-ledger` | 按业务域重组目录、拆分 Controller/App、账本最初改为不可重算（2026-09-12 被投影模型取代） |
 | `architecture/2026-09-11-terminal-approval-options` | 审批编号选择器、未选中起始、Esc 与重放重置 |
 | `architecture/2026-09-11-terminal-storage-unit` | 文件操作统一归属 `src/storage/`，由依赖门禁强制 |
 | `architecture/2026-09-11-terminal-memory-log` | 默认启用的有界运行时内存日志，区分真实保留与 V8 高水位 |
@@ -1309,14 +1314,15 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 58 个模块、6,468 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 59 个模块、6,506 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `index.ts`（公开门面） | 3 | `Client`、`HttpError`、`RemoteError`、`Subscription` |
 | `storage/files.ts` | 114 | `readText`、`readPrivateFile`、`writePrivateFile`、`appendPrivateFile`、`createPrivateFile`、`writeExclusiveStream`、`removeFile` |
 | `storage/directories.ts` | 27 | `ensureDirectory`、`ensurePrivateDirectory`、`listEntries` |
-| `storage/index.ts` | 3 | 域 barrel |
+| `storage/heap-snapshot.ts` | 32 | `heapSnapshotName`、`writeHeapSnapshot` |
+| `storage/index.ts` | 4 | 域 barrel |
 | `state.ts`（共享契约） | 48 | `State`、`ControllerStore`、`initialState` |
 | `transport/wire.ts` | 33 | `Json`、`ObjectValue`、`object`、`string`、`array`、`safeText`、`errorText` |
 | `transport/client.ts` | 235 | `Client`、`HttpError`、`RemoteError`、`Subscription` |
@@ -1324,7 +1330,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `transport/endpoint.ts` | 23 | `Endpoint`、`endpoint` |
 | `transport/host.ts` | 14 | `HostAccess` |
 | `session/controller.ts` | 583 | `SessionController` |
-| `session/transcript.ts` | 655 | `Transcript`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
+| `session/transcript.ts` | 703 | `Transcript`、`LivePhase`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
 | `session/history.ts` | 320 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
 | `session/telemetry.ts` | 108 | `Telemetry`、`QueuedInput` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
@@ -1337,47 +1343,47 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/math.ts` | 67 | `renderMath` |
 | `session/export-html.ts` | 42 | `saveTranscriptHtml` |
 | `session/index.ts` | 17 | 域 barrel |
-| `cost/pricing.ts` | 218 | `DEFAULT_PRICES`、`PRICES_REVISION`、`PRICING_ENGINE_VERSION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`candidates`、`canonicalModel`、`catalogDigest`、`chargeFor`、`costDay` |
+| `cost/pricing.ts` | 216 | `DEFAULT_PRICES`、`PRICES_REVISION`、`PRICING_ENGINE_VERSION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`candidates`、`canonicalModel`、`pricesDigest`、`chargeFor`、`costDay` |
 | `cost/config.ts` | 69 | `loadPrices`（种子、戳记与迁移） |
 | `cost/records.ts` | 75 | `costRecords`、`foldSamples` |
-| `cost/ledger-files.ts` | 142 | `loadLedgers`、`saveLedger` |
-| `cost/ledger.ts` | 195 | `CostLedger`、`costText` |
+| `cost/ledger-files.ts` | 91 | `loadLedgers`、`saveLedger` |
+| `cost/ledger.ts` | 139 | `CostLedger`、`costText` |
 | `cost/scanner.ts` | 77 | `costAddresses`、`sessionCostHistory` |
-| `cost/controller.ts` | 95 | `CostController`、`CostHost` |
-| `cost/types.ts` | 54 | `Charge`、`SavedCost`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
+| `cost/controller.ts` | 103 | `CostController`、`CostHost` |
+| `cost/types.ts` | 62 | `ChargeSample`、`SavedCost`、`DayTotal`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
 | `cost/index.ts` | 10 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
-| `controller/controller.ts` | 405 | `Controller` |
+| `controller/controller.ts` | 414 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 626 | `App` |
+| `ui/app.tsx` | 648 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
-| `ui/commands/registry.ts` | 86 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMANDS`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
-| `ui/commands/parse.ts` | 131 | `Submission`、`SubmissionContext`、`classifySubmission` |
+| `ui/commands/registry.ts` | 87 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMANDS`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
+| `ui/commands/parse.ts` | 137 | `Submission`、`SubmissionContext`、`classifySubmission` |
 | `ui/dialogs/picker.tsx` | 42 | `Picker`、`Choice` |
 | `ui/dialogs/index.tsx` | 189 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
-| `ui/dialogs/cost.tsx` | 34 | `CostPanel` |
+| `ui/dialogs/cost.tsx` | 33 | `CostPanel` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 21 | `HistoryViewport` |
-| `ui/chat/status.tsx` | 410 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
+| `ui/chat/status.tsx` | 429 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`cacheHitText`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
 | `ui/input/history.ts` | 38 | `InputHistory` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
 | `ui/theme/index.ts` | 27 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
-| `cli/index.tsx` | 115 | 可执行入口（无导出） |
+| `cli/index.tsx` | 109 | 可执行入口（无导出） |
 
 ```mermaid
 C4Component
   title 源码索引（按业务域）
 
   Component(root, "根契约", "index.ts, state.ts", "公开库门面与共享状态")
-  Component(storage, "storage/", "files, directories, index", "3 文件 132 行")
+  Component(storage, "storage/", "files, directories, heap-snapshot, index", "4 文件 177 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "5 文件 359 行")
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, index", "14 文件 2082 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "8 文件 638 行")

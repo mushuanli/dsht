@@ -32,6 +32,7 @@ export async function host() {
   let archivedSessionIds: string[] = [];
   let blank = false;
   let running = false;
+  let sessionUpdatedAt: number | undefined;
   let onPage: (() => Promise<ObjectValue>) | undefined;
   let searchResult: ObjectValue = { items: [{ sessionId: 's1', snippet: '你好' }, { sessionId: 's2', snippet: '你好 too' }], hasMore: false };
   let followSnapshot: ObjectValue = snapshot;
@@ -97,7 +98,7 @@ export async function host() {
           value = args.query === 'src/' ? [{ path: 'src/hello world.ts', kind: 'file' }]
             : args.query === 'missing' ? [] : [{ path: 'src', kind: 'directory' }, { path: 'README.md', kind: 'file' }];
           break;
-        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...[{ ...session, running, blank }, { sessionId: 's2', running: true }], ...subagent === undefined ? [] : [subagent]] }; break;
+        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...[{ ...session, running, blank, ...(sessionUpdatedAt === undefined ? {} : { updatedAt: sessionUpdatedAt }) }, { sessionId: 's2', running: true }], ...subagent === undefined ? [] : [subagent]] }; break;
         case 'session/create': assert.deepEqual(args, { request: { workspaceId: 'w1' } }); value = { sessionId: 's-new' }; break;
         case 'workspace/delete': {
           const id = object(args.request).workspaceId;
@@ -198,6 +199,8 @@ export async function host() {
     url: `http://127.0.0.1:${address.port}`, calls, opens, cancels,
     set replayInteractions(value: ObjectValue[]) { replayInteractions = value; },
     set blank(value: boolean) { blank = value; },
+    /** Host-reported session update time; unset leaves the row without one, which disables the scan skip. */
+    set sessionUpdatedAt(value: number | undefined) { sessionUpdatedAt = value; },
     set onPage(value: (() => Promise<ObjectValue>) | undefined) { onPage = value; },
     set searchResult(value: ObjectValue) { searchResult = value; },
     set followSnapshot(value: ObjectValue) { followSnapshot = value; },

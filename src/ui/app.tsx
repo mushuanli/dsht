@@ -288,6 +288,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (key.escape && thoughtList) { setThoughtList(false); if (controller.running) void controller.interrupt(true); return; }
     if (key.escape && searchResults) { setSearchResults(undefined); if (controller.running) void controller.interrupt(true); return; }
     if (key.escape && historyQuery !== undefined) { setHistoryQuery(undefined); setHistoryMatches(undefined); if (controller.running) void controller.interrupt(true); return; }
+    // The typed host path is a screen of its own, so Esc has to leave it: the picker behind it is
+    // disabled while a draft exists, so a leftover path would leave no way back at all.
+    if (key.escape && state.screen === 'path') { setInput(''); operate(() => controller.showPicker('workspaces')); return; }
     if (key.ctrl && _value === 'c') {
       // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
       if (input !== '') { setInput(''); return; }
@@ -438,6 +441,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       remove: () => setRemoval({ kind: 'workspace', id: string(workspace.workspaceId), name: string(workspace.title), path: string(workspace.path) }),
       action: () => controller.pickWorkspace(string(workspace.workspaceId)) })),
     { key: '@all', label: 'All sessions', action: () => operate(() => controller.switchSession('all')) },
+    // The directory this client runs in is the one case where no path has to be typed, and offering
+    // it only while the host has not registered it keeps the row from repeating itself.
+    ...(state.workspaces.some(workspace => string(workspace.path) === controller.localDirectory) ? []
+      : [{ key: '@here', label: `+ Add workspace (this directory)  ${controller.localDirectory}`,
+        action: () => operate(() => controller.createWorkspace(controller.localDirectory)) }]),
     { key: '@new', label: '+ Add workspace (host directory)', action: () => controller.enterPath() },
   ] : [
     ...(state.workspaceId && !state.showAllSessions ? [{ key: '@new', label: '+ New session', action: () => operate(() => controller.createSession()) }] : []),

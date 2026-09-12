@@ -16,32 +16,40 @@ export interface PriceVersion {
 /** Disjoint token buckets reported for one model request. */
 export interface Usage { input: number; output: number; cacheRead: number; cacheWrite: number }
 
-/** One folded request sample before a price decision is attached. */
+/** One folded request sample: the attempt identity and the facts a price decision needs. */
 export interface ChargeSample { key: string; time?: number; provider: string; model: string; usage?: Usage }
 
-/** The price decision recorded the first time a request sample was priced.
- *
- * `matchedBy`, `engine` and `catalog` are recorded with every amount so a charge can be traced to
- * the rules and the rates that produced it: `matchedBy` says whether the model matched the table
- * exactly or through a declared alias, `engine` names the decision rules, and `catalog` digests the
- * price version itself, which an edited file can change while keeping its id.
- */
-export interface PriceDecision {
-  priceId?: string; amount?: number; reason?: string;
-  matchedBy?: 'exact' | 'alias'; engine?: number; catalog?: string;
-}
-
-/** One ledger entry: a request sample plus the price decision that seals it. */
-export interface Charge extends ChargeSample, PriceDecision {}
-
-/** One session's persisted ledger slice. */
-export interface SavedCost { version: 2; sessionId: string; cut: number; charges: Charge[] }
+/** What the table decides for one request sample: an amount, or the reason it has none. */
+export interface PriceDecision { amount?: number; reason?: string }
 
 /** Summary retains the known subtotal and the records it could not price.
  * `unknown` counts records with no amount; `records` counts every request the range covers, so a
  * subtotal is never read as complete without them.
  */
 export interface CostTotal { amount: number; unknown: number; records: number }
+
+/** One Beijing calendar day's requests, kept only for the day a scan ran on. */
+export interface DayTotal extends CostTotal { day: string }
+
+/** One session's persisted ledger slice.
+ *
+ * The host log and the loaded price table are the only inputs, so the slice stores the totals one
+ * scan folded them into and no per-request detail: the next scan reads the session's history again
+ * and decides every sample with the table loaded then. `engine` and `catalog` name the decision
+ * rules and the table behind these totals, so a process holding an older one cannot overwrite them.
+ */
+export interface SavedCost {
+  version: 3;
+  sessionId: string;
+  /** Durable sequence the fold reached; a scan that opened an older cut may not replace this slice. */
+  cut: number;
+  engine: number;
+  catalog: string;
+  total: CostTotal;
+  day: DayTotal;
+  /** Distinct reasons an amount is missing, bounded, so a panel can say what makes a total inexact. */
+  unpriced: string[];
+}
 
 /** How much of the visible history the cached ledger currently covers. */
 export type Coverage = 'complete' | 'scanning' | 'partial';

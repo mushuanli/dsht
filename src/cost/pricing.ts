@@ -30,12 +30,12 @@ export const DEFAULT_PRICES: PriceVersion[] = [
     ...PEAK_SCHEDULE, ...PRO_RATES },
 ];
 
-/** Revision of the pricing decision rules, recorded with every amount they decided.
+/** Revision of the pricing decision rules, recorded with the totals they decided.
  *
  * Bump it whenever the rules change what an amount would be — the matching of a model name, the
- * token buckets an amount covers, or the timestamp it is priced at — so a recorded amount can be
- * traced to the rules that produced it. Version 1 matched a model by the substring `pro` and
- * priced a request with no settlement time at the cheapest off-peak rate.
+ * token buckets an amount covers, or the timestamp it is priced at — so a stored total can be traced
+ * to the rules that produced it. Version 1 matched a model by the substring `pro` and priced a
+ * request with no settlement time at the cheapest off-peak rate.
  */
 export const PRICING_ENGINE_VERSION = 2;
 
@@ -109,7 +109,7 @@ export function pricesFrom(value: unknown): PriceVersion[] {
   return prices;
 }
 
-/** Return the calendar date used by both daily and three-calendar-day summaries.
+/** Return the Beijing calendar date a request is attributed to.
  * @param time - Epoch milliseconds.
  * @returns Beijing calendar date, YYYY-MM-DD.
  */
@@ -154,16 +154,16 @@ export function candidates(prices: PriceVersion[], provider: string, model: stri
     .map(price => ({ price, matchedBy: 'alias' as const }));
 }
 
-/** Stable identity of the rates that decided one charge.
+/** Stable identity of a loaded price table.
  *
  * The identity a price version carries can be edited in place while keeping its `id` — which is how
- * a corrected table once kept charging superseded rates under one id — so the decision records a
- * digest of the version itself, not only its name.
- * @param price - Price version an amount was decided from.
- * @returns Short digest of that version.
+ * a corrected table once kept charging superseded rates under one id — so a stored total records a
+ * digest of the whole table it was decided from, not only the version names.
+ * @param prices - Price versions loaded for this process.
+ * @returns Short digest of the table.
  */
-export function catalogDigest(price: PriceVersion): string {
-  return createHash('sha256').update(JSON.stringify(price)).digest('hex').slice(0, 12);
+export function pricesDigest(prices: readonly PriceVersion[]): string {
+  return createHash('sha256').update(JSON.stringify(prices)).digest('hex').slice(0, 12);
 }
 
 /** Select a price by event time, applying half-open local peak windows.
@@ -189,15 +189,14 @@ export function priceAt(prices: PriceVersion[], provider: string, model: string,
 
 /** Decide the amount for one request sample using the table loaded at decision time.
  *
- * The returned decision is recorded once and never revisited: a later `prices.json` change must
- * not move a historical amount. Only a sample with no usable usage (`missing usage`) is left
- * undecided, because its request has not finished reporting tokens yet.
+ * A decision is a number or a reason; nothing about the rates that produced it is kept, because the
+ * ledger stores totals rather than requests and the next scan decides the sample again.
  * @param prices - Validated versions currently loaded.
  * @param provider - Provider identity from the recorded request.
  * @param model - Recorded model name.
  * @param time - Recorded settlement timestamp, when the host logged one.
  * @param usage - Disjoint token buckets, when the host reported valid counts.
- * @returns The selected price identity, the amount, and the reason when no amount exists.
+ * @returns The amount, or the reason no amount exists.
  */
 export function chargeFor(prices: PriceVersion[], provider: string, model: string, time: number | undefined, usage: Usage | undefined): PriceDecision {
   if (!usage) return { reason: MISSING_USAGE };
@@ -205,14 +204,13 @@ export function chargeFor(prices: PriceVersion[], provider: string, model: strin
   // the usage mapping is wrong, and inventing a rate for it would hide that.
   if (provider === 'deepseek-official' && usage.cacheWrite !== 0) return { reason: UNSUPPORTED_USAGE };
   // No settlement time means the host did not say when the request was billed, and the two peak
-  // bands differ by a factor of two: a floor amount would enter the lifetime total while staying
-  // out of every day range, so the charge is reported unresolved instead of guessed.
+  // bands differ by a factor of two: a floor amount would enter the total while belonging to no day,
+  // so the request is reported unresolved instead of guessed.
   if (time === undefined) return { reason: MISSING_TIME };
   const selected = priceAt(prices, provider, model, time);
   if (!selected) return { reason: 'no price version' };
   const amount = (usage.input * selected.rates.input + usage.output * selected.rates.output
     + usage.cacheRead * selected.rates.cacheRead + usage.cacheWrite * selected.rates.cacheWrite) / 1e6;
   if (!Number.isFinite(amount)) return { reason: 'invalid estimate' };
-  return { priceId: selected.price.id, amount, matchedBy: selected.matchedBy,
-    engine: PRICING_ENGINE_VERSION, catalog: catalogDigest(selected.price) };
+  return { amount };
 }
