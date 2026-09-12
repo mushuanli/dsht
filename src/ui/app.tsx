@@ -430,6 +430,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   };
 
   const width = Math.max(10, (stdout.columns ?? 80) - 2);
+  // The composer never trades the conversation away for input. Its window grows with the body and
+  // is clamped so a few conversation rows always survive; width never buys height, so landscape and
+  // a wide desktop only wrap less instead of showing more input rows. The budget subtracts the one
+  // row the frame, the header, the status bar and a transient notice/suggestion line may each take.
+  const bodyRows = Math.max(4, (stdout.rows ?? 30) - 4 - statusBarRows);
+  const composerRows = Math.max(1, Math.min(Math.min(5, Math.max(2, Math.floor(bodyRows / 3))), bodyRows - 7));
+  const draftWidth = Math.max(1, width - 6);
   // Session activity is a list-level fact, so both pickers read it without loading any history.
   const listAge = Date.now();
   // Unanswered interactions are held per session already; a list only has to read the counts.
@@ -658,12 +665,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     </>}
         </Box>
         {!queueOpen && !pending && state.screen === 'chat' && queued.length > 0 && <QueuedPreview queued={queued} width={width} />}
-        <Box flexShrink={0}>
-        <Text color={answerPending ? theme.colors.muted : theme.accent}>❯ </Text>
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(draft.current); }}
           reservedKeys={approvalKeysActive ? ['1','2','3'] : queueOpen && !pending ? ['d'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
+          width={draftWidth} maxRows={composerRows} promptColor={answerPending ? theme.colors.muted : theme.accent}
           focus={state.online && !state.busy && !copyMode && !answerPending} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
-        </Box>
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
       </Box>
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}

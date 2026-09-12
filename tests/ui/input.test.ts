@@ -39,7 +39,37 @@ test('movement and deletion preserve composed emoji and combining characters', (
   state = editInput(state, '', { leftArrow: true }); assert.equal(state.cursor, 1);
   state = editInput(state, '', { delete: true }); assert.equal(state.text, '中');
   state = editInput(state, 'h', { ctrl: true }); assert.equal(state.text, '');
-  state = editInput(state, 'a\nb\tc\u0001', {}); assert.equal(state.text, 'a b c');
+  state = editInput(state, 'a\nb\tc\u0001', {}); assert.equal(state.text, 'a\nb\tc');
+});
+
+test('insertion keeps line breaks and tabs while normalizing line endings', () => {
+  const insert = (input: string) => editInput({ text: '', cursor: 0, killed: '' }, input, {}).text;
+  assert.equal(insert('a\r\nb'), 'a\nb');
+  assert.equal(insert('a\rb'), 'a\nb');
+  assert.equal(insert('a\tb'), 'a\tb');
+  assert.equal(insert('a\u0000b'), 'ab');
+  assert.equal(insert('a\u000bb'), 'ab');
+  assert.equal(insert('a\u000cb'), 'ab');
+  assert.equal(insert('a\u001bb'), 'ab');
+  assert.equal(insert('a\u007fb'), 'ab');
+  assert.equal(insert('a\u009fb'), 'ab');
+  assert.equal(insert('a\n\nb'), 'a\n\nb');
+});
+
+test('a folded block moves, deletes and inserts as one object', () => {
+  const state: EditState = { text: 'head\nBODY\nBODY\ntail', cursor: 5, killed: '' };
+  const regions = [{ start: 5, end: 15 }];
+  const left = editInput({ ...state, cursor: 15 }, '', { leftArrow: true }, regions);
+  assert.equal(left.cursor, 5);
+  const right = editInput(state, '', { rightArrow: true }, regions);
+  assert.equal(right.cursor, 15);
+  const backspace = editInput({ ...state, cursor: 15 }, '', { backspace: true }, regions);
+  assert.deepEqual({ text: backspace.text, cursor: backspace.cursor }, { text: 'head\ntail', cursor: 5 });
+  const forward = editInput(state, '', { delete: true }, regions);
+  assert.deepEqual({ text: forward.text, cursor: forward.cursor }, { text: 'head\ntail', cursor: 5 });
+  // Word and line motion never park the cursor inside the hidden range.
+  assert.equal(editInput(state, 'f', { meta: true }, regions).cursor, 15);
+  assert.equal(editInput({ ...state, cursor: 10 }, '', { leftArrow: true }, regions).cursor, 5);
 });
 
 test('navigation, completion and submission keys stay with their application owners', () => {

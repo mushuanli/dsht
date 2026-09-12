@@ -504,18 +504,46 @@ test('a status panel that fits leaves the history arrows with the composer', asy
   await pressKey(ui, '\u0003');
 });
 
-test('a pasted multi-line snippet becomes one composer line without sending it', async t => {
+test('a pasted multi-line snippet keeps its line breaks and sends its source text', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
   await until(() => controller.state.transcript.ready);
-  // A phone paste arrives as one burst; tabs and newlines would otherwise break a single-row field.
+  // A phone paste arrives as one burst; line breaks and tabs survive, and a tab is displayed at its
+  // tab stop without changing the character that is sent.
   await pressKey(ui, 'first line\nsecond line\twith tab');
-  await until(() => ui.lastFrame()?.includes('❯ first line second line with tab') === true);
+  await until(() => ui.lastFrame()?.includes('❯ first line') === true);
+  assert.ok(ui.lastFrame()!.includes('second line with tab'), ui.lastFrame());
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
-  assert.equal(controller.state.busy, false);
+  await pressKey(ui, '\r');
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  const sent = fixture.calls.find(call => call.method === 'session/prompt')!;
+  assert.deepEqual(array(object(object(object(sent.payload).args).request).content),
+    [{ type: 'text', text: 'first line\nsecond line\twith tab' }]);
+  await pressKey(ui, '\u0003');
+});
+
+test('a tall pasted block folds to a summary row while the full text is still sent', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.transcript.ready);
+  const paste = ['head note', ...Array.from({ length: 6 }, (_, index) => `log line ${index}`), 'tail note'].join('\n');
+  await pressKey(ui, paste);
+  await until(() => ui.lastFrame()?.includes('❯ head note') === true);
+  const frame = ui.lastFrame()!;
+  assert.ok(frame.includes('[6 lines · '), frame);
+  assert.ok(frame.includes('tail note'), frame);
+  assert.ok(!frame.includes('log line 3'), frame);
+  await pressKey(ui, '\r');
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  const sent = fixture.calls.find(call => call.method === 'session/prompt')!;
+  assert.deepEqual(array(object(object(object(sent.payload).args).request).content),
+    [{ type: 'text', text: paste }]);
   await pressKey(ui, '\u0003');
 });
 
