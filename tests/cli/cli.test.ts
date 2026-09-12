@@ -9,7 +9,7 @@ import { host } from '../support/host.ts';
 
 async function run(args: string[], env: NodeJS.ProcessEnv = {}) {
   const authDirectory = await mkdtemp(join(tmpdir(), 'tui-cli-auth-'));
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.tsx', ...args], {
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', ...args], {
     cwd: new URL('../..', import.meta.url),
     env: { PATH: process.env.PATH, DSHT_AUTH_DIR: authDirectory, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
   });

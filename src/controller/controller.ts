@@ -13,6 +13,7 @@ import type { CostLedger } from '../cost/ledger.ts';
 import { CostController } from '../cost/controller.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
 import { MemoryLog } from './memory-log.ts';
+import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import type { HistorySearch, RemovalTarget } from '../session/types.ts';
 
@@ -123,6 +124,10 @@ export class Controller implements ControllerStore, ConnectionListener {
    * diagram cache — and the work the last cost scan re-read, which is the only timer here whose
    * per-pass work scales with history. With a runtime that exposes `gc`, the sample also reports
    * the heap after a forced collection, so retained state and uncollected garbage stay distinct.
+   *
+   * React's development build appends one performance-timeline entry per rendered component and Node
+   * never trims them, so the sample counts them and then bounds them; `perfMeasuresCleared` separates
+   * entries this sample released from entries the build created since the last one.
    */
   private memorySample(): ObjectValue {
     const memory = process.memoryUsage();
@@ -130,11 +135,14 @@ export class Controller implements ControllerStore, ConnectionListener {
     const ledger = this.costs?.summary();
     const layout = layoutStats(transcript);
     const markdown = markdownCacheStats();
+    const measuresCleared = clearReactMeasures();
+    const measures = measureCount();
     const gc = this.forcedGc();
     return {
       time: new Date().toISOString(),
       rss: memory.rss, heapTotal: memory.heapTotal, heapUsed: memory.heapUsed,
       external: memory.external, arrayBuffers: memory.arrayBuffers,
+      ...(measures === undefined ? {} : { perfMeasures: measures, perfMeasuresCleared: measuresCleared }),
       ...(gc === undefined ? {} : { heapUsedAfterGc: gc.used, gcMs: gc.ms }),
       online: this.state.online, screen: this.state.screen,
       session: this.state.sessionId ?? null,
@@ -231,6 +239,9 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** @returns Sessions accounted to the selected workspace, minus archived identities. */
   get visibleSessions(): ObjectValue[] { return this.session.visibleSessions; }
+
+  /** @returns Unanswered interactions by session, for the state each list row reports. */
+  pendingCounts(): ReadonlyMap<string, number> { return this.session.pendingCounts(); }
 
   /** Load the optional preset roster once per connection. */
   loadPresetNames(): void { this.catalog.loadPresetNames(); }

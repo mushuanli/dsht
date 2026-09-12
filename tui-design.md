@@ -88,7 +88,7 @@ C4Container
   Person(dev, "终端用户")
 
   System_Boundary(proc, "dsht 进程（Node.js ESM）") {
-    Container(cli, "CLI 入口", "src/cli/index.tsx", "解析参数与环境变量、准备价格与用量目录、渲染 Ink 应用、处理 SIGTERM")
+    Container(cli, "CLI 入口", "src/cli/index.ts + src/cli/dsht.tsx", "选择 React 构建、解析参数与环境变量、准备价格与用量目录、渲染 Ink 应用、处理 SIGTERM")
     Container(app, "Ink 应用", "src/ui/app.tsx + 视图组件", "命令解析、键盘与鼠标路由、对话框、历史视口与状态栏")
     Container(controller, "Controller", "src/controller/controller.ts", "UI State、连接世代、订阅生命周期、RPC 编排与成本任务")
     Container(projection, "投影层", "transcript / history / telemetry", "事件折叠、终端行布局、宿主投影水位")
@@ -621,6 +621,10 @@ const DEFAULT_HISTORY_LIMITS: HistoryLimits      // { maxRecords: 2000, maxBytes
 function navigationCommand(value: string): { kind: 'workspace' | 'session'; query?: string } | undefined
 function sessionLabel(session: ObjectValue): string
 function resolveTarget(items: ObjectValue[], query: string, id: string, names: (item) => string[]): ObjectValue
+function sessionState(session: ObjectValue, pending?: boolean): 'needs' | 'running' | 'idle' | 'blank'
+function workspaceCounts(sessions: ObjectValue[], pending?: ReadonlySet<string>): { state: RollupState; count: number }[]
+function workspaceStatus(counts: RollupCount[], style?: 'words' | 'badges'): string
+function workspaceDetail(path: string, title: string): string
 
 // references.ts
 function activeReference(text: string): { prefix: string; query: string; quoted: boolean } | undefined
@@ -671,7 +675,16 @@ dsht [options] [list workspaces|list sessions]
 - 交互模式注册 `SIGTERM` → `app.unmount()`，并在 `finally` 中调用 `controller.shutdown()`。
 - 失败时向 `stderr` 写 `errorText(error)` 并设 `process.exitCode = 1`。
 
-环境变量：`DSH_URL`、`DSH_TOKEN`、`DSHT_AUTH_DIR`、`DSHT_CONFIG_DIR`、`DSHT_STATE_DIR`、`DSHT_MEMORY_LOG`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`HOME`。
+环境变量：`DSH_URL`、`DSH_TOKEN`、`DSHT_AUTH_DIR`、`DSHT_CONFIG_DIR`、`DSHT_STATE_DIR`、`DSHT_MEMORY_LOG`、`DSHT_REACT_DEV`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`HOME`。
+
+#### 3.3.1 React 构建选择
+
+`src/cli/index.ts` 是唯一可执行入口，它必须在任何模块导入 Ink 之前选定 React 构建：
+
+- `react-reconciler` 在 `require` 时按 `NODE_ENV` 在 `development` 与 `production` 之间选择。development 构建会为**每一次渲染**调用 `performance.measure()`，而 Node 的 Performance Timeline 只在显式 `clearMeasures()` 时释放条目。每条 measure 还携带 `detail.devtools.properties`（被渲染组件的 props 描述），实测约 1.2 KB/次渲染，因此长跑进程的堆会随渲染次数单调增长，与 UI 实际保留的业务数据无关。
+- 入口把 `NODE_ENV` 默认设为 `production`；`DSHT_REACT_DEV=1` 保留 development 构建（React 警告与 DevTools performance tracks）。
+- ESM 的静态 `import` 会在模块体执行前求值，因此入口用**动态** `import('./dsht.js')`，这条动态导入是承载语义的，不可改回静态导入。
+- `src/controller/perf-measures.ts` 是 `DSHT_REACT_DEV=1` 下的兜底：内存采样每 30 秒清除 React 自己创建的 measure（名字为 React 的固定集合或以零宽空格 `\u200b` 开头的组件名），不触碰应用或其他库的条目。
 
 ### 3.4 Slash 命令接口
 
@@ -731,7 +744,7 @@ Cookie 文件为 `{ version: 1, origin, cookie, expiresAt }`；POSIX 下读写�
 C4Dynamic
   title 启动、认证与首次基线（动态图）
 
-  Component(cli, "CLI 入口", "src/cli/index.tsx", "参数与环境准备")
+  Component(cli, "CLI 入口", "src/cli/index.ts + src/cli/dsht.tsx", "选择 React 构建、参数与环境准备")
   Component(client, "Client", "src/transport/client.ts", "RPC 与复用 socket")
   Component(controller, "ConnectionController", "src/controller/connection.ts", "连接世代、基线订阅与状态发布")
   Component(telemetry, "Telemetry", "src/session/telemetry.ts", "投影水位")
@@ -1017,7 +1030,7 @@ C4Component
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 | 认证成功且服务端下发持久 Cookie 时 |
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 | 仅首次交互启动创建；之后由用户维护 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sha256(sessionId)>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600 | 每个会话一个文件，写入较新 cut 时替换 |
-| 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本（含布局与渲染缓存计数、扫描工作量；带 `--expose-gc` 时另有回收后堆），满 1,000 行重写 |
+| 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本（含布局与渲染缓存计数、React 渲染 measure 计数与本次清理数、扫描工作量；带 `--expose-gc` 时另有回收后堆），满 1,000 行重写 |
 | 导出归档 | 用户指定，或 `<cwd>/session-<sanitized-id>-<Date.now()>.zip` | — | 0600，`wx` 独占 | `/export` 成功时 |
 
 #### 5.2.1 认证 Cookie
@@ -1073,11 +1086,11 @@ C4Component
 
 粘贴与状态面板：终端把整段粘贴作为一次输入投递，输入框把换行与制表符折叠为空格并丢弃控制字符，因此多行片段会安全地变成单行且不会误发送。展开的 `/status` 持有行偏移而非页号：`↑`/`↓` 逐行、`PgUp`/`PgDn` 翻屏、滚轮在面板打开时滚动面板本身；页脚报出可见区间并在越界时由面板通过 `onScroll` 回报收敛后的偏移；面板通过 `onOverflow` 报告自己是否需要滚动，只有需要滚动时方向键与滚轮才归它；选择器与需要滚动的状态面板接管方向键，`/help`、`/cost` 与一屏放得下的状态面板不从输入框夺走它们，`Ctrl+P`/`Ctrl+N` 在任何界面下都能召回（`tests/ui/key-routing.test.tsx` 固定整张矩阵）。
 
-选择器状态：`/ws` 与 `/resume` 的每一行都从 `session/list` 摘要读状态，不加载会话历史——会话行前缀是 `◐`（运行中）、`●`（空闲）或 `○`（未使用）加最近活动时间（`now`／分／时／天），工作区行前缀是同样标记的计数（运行中在前）。状态只取 `running` 与 `blank`，不从沉默推断停滞；「等待确认」需要宿主侧的列表投影，目前拿不到。
+选择器状态：`/ws` 与 `/resume` 的每一行都从 `session/list` 摘要读状态，不加载会话历史。用户可见状态收敛为三种，按**用户注意力**排序，并在工作区汇总、会话列表与状态栏使用同一套标记：`?` needs you（本客户端持有未回答的审批或提问，最需要处理）、`◐` working（宿主报告运行中）、`●` ready（空闲，随时可继续）。会话行前缀是标记加最近活动时间（`now`／分／时／天）；工作区行是同样标记的计数，`blank`（从未发过消息的会话）既不是状态也不进汇总，只在会话列表中保留 `○` 标记，留待后续折叠成 `+ New session`。`?` 不需要宿主新增列表投影：`$events` 的审批／提问 waterfall 本就按会话到达，且 `SessionController.waterfall()` 不按会话过滤地全部保留，`pendingCounts()` 只是把已有事实按会话计数；它属于当前连接世代，重连后要等宿主重放这些 waterfall 才会恢复。工作区汇总随宽度分档：宽屏写 `? 1 needs you · ◐ 2 working · ● 6 ready`，标题占固定左列、状态列紧随其后、路径右对齐（`workspaceDetail()` 在标题已命名最后一段时只留下父目录，路径按显示宽度从**左侧**截断）；窄屏只留 `?1 ◐2 ●6`，并在标题下给出一行 `● ready · ◐ working · ? needs you`（`ROLLUP_LEGEND`）作为图例。所有计数为零的状态都不显示，`Picker` 的表格列宽按可用列数（`PickerScreen` 传入的 composer 内宽）计算，长行不再折行。状态只取 `running`、`blank` 与本客户端的未答计数，仍不从沉默推断停滞。
 
 工作区选择器最后两项都是注册入口：`+ Add workspace (this directory)` 直接用 `Controller.localDirectory`（进程启动目录，默认为 `process.cwd()`）注册 `dsht` 自身所在目录，并且只在服务端没有同路径工作区时出现——常见的同机场景因此不必手输路径；`+ Add workspace (host directory)` 进入输入界面，输入的服务端绝对路径可以与本机文件系统不同。输入界面是独立 screen（`state.screen === 'path'`），因此 Esc 通过 `showPicker('workspaces')` 退回选择器并清空草稿：选择器的按键在草稿非空时被禁用，留下草稿会让它再也无法操作。
 
-单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。阶段是**当前事件**的名字与年龄，只在下一段工作开始或回合关闭时改变：工具回答之后、下一次增量到达之前它仍显示上一个工具，因此命令行之后的静默期仍被算作这个回合的工作时间，而 `● Ready` 不显示阶段——只有宿主知道回合已经结束。暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都从不从静默推断· `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00(13.00)` · 回合 · token · 缓存命中率（`hit 92%`）。命中率是缓存读取占三个互斥提示侧桶（未命中输入、缓存读取、缓存写入）之和的比例；部分命中不得四舍五入成 `100%`，先增加小数位，仍显示不出就报 `<100%`。ctx 与费用各带两种读法：ctx 只在整行仍放得下时画条状，否则退回 `ctx 30%`；费用是**一个分组里的两个作用域**——`¥: 3.00(13.00)` 的 `3.00` 是本会话，括号内的 `13.00` 是今日合计；账本还没扫到本会话时第一个数如实写 `?`。两者互不替代：用一个槽位让当日总额顶替本会话费用，会让新开的会话报出当天别处的花费。宽度不足时按命中率、token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
+单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`? Needs you`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。本客户端还欠一个回答时（`state.pending` 非空）`? Needs you` 优先于 `⏸ <原因>`：暂停原因只说明时钟为何不动，欠下的回答才是用户必须处理的事，展开面板的 activity 行同样改报 `? Needs you · answer the request above to continue`。阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。阶段是**当前事件**的名字与年龄，只在下一段工作开始或回合关闭时改变：工具回答之后、下一次增量到达之前它仍显示上一个工具，因此命令行之后的静默期仍被算作这个回合的工作时间，而 `● Ready` 不显示阶段——只有宿主知道回合已经结束。暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都从不从静默推断· `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00(13.00)` · 回合 · token · 缓存命中率（`hit 92%`）。命中率是缓存读取占三个互斥提示侧桶（未命中输入、缓存读取、缓存写入）之和的比例；部分命中不得四舍五入成 `100%`，先增加小数位，仍显示不出就报 `<100%`。ctx 与费用各带两种读法：ctx 只在整行仍放得下时画条状，否则退回 `ctx 30%`；费用是**一个分组里的两个作用域**——`¥: 3.00(13.00)` 的 `3.00` 是本会话，括号内的 `13.00` 是今日合计；账本还没扫到本会话时第一个数如实写 `?`。两者互不替代：用一个槽位让当日总额顶替本会话费用，会让新开的会话报出当天别处的花费。宽度不足时按命中率、token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
 
 展开的 `/status` 面板把相关值合并成行并采用短标签（连接／活动、会话与模式、工作区、三行指标、费用与回合、排队与任务各一行），计数采用与单行状态栏相同的紧凑单位（`400.6K/1M`、`229.7M tok`），因此 46 列下常见 11 行、24 行终端一屏可显示；错误各自占行。换行与滚动仍作为小终端的兜底。
 
@@ -1334,7 +1347,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/history.ts` | 320 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
 | `session/telemetry.ts` | 108 | `Telemetry`、`QueuedInput` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
-| `session/navigation.ts` | 84 | `navigationCommand`、`sessionLabel`、`resolveTarget`、`sessionState`、`SESSION_MARKERS`、`activityAge`、`sessionStatus`、`workspaceStatus` |
+| `session/navigation.ts` | 159 | `navigationCommand`、`sessionLabel`、`resolveTarget`、`sessionState`、`SESSION_MARKERS`、`STATE_LABELS`、`ROLLUP_STATES`、`activityAge`、`sessionStatus`、`workspaceCounts`、`workspaceSegments`、`workspaceStatus`、`ROLLUP_LEGEND`、`workspaceDetail` |
 | `session/references.ts` | 41 | `FileReference`、`activeReference`、`fileMention`、`fileReferences` |
 | `session/export.ts` | 30 | `saveSessionLog` |
 | `session/types.ts` | 10 | `RemovalTarget`、`HistorySearch` |
@@ -1354,9 +1367,10 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `cost/index.ts` | 10 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
-| `controller/controller.ts` | 414 | `Controller` |
+| `controller/controller.ts` | 425 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
+| `controller/perf-measures.ts` | 80 | `clearReactMeasures`、`reactMeasureNames`、`measureCount` |
 | `controller/index.ts` | 5 | 域 barrel |
 | `ui/app.tsx` | 648 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
@@ -1364,7 +1378,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
 | `ui/commands/registry.ts` | 87 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMANDS`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
 | `ui/commands/parse.ts` | 137 | `Submission`、`SubmissionContext`、`classifySubmission` |
-| `ui/dialogs/picker.tsx` | 42 | `Picker`、`Choice` |
+| `ui/dialogs/picker.tsx` | 102 | `Picker`、`Choice`、`ChoiceCell` |
 | `ui/dialogs/index.tsx` | 189 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
 | `ui/dialogs/cost.tsx` | 33 | `CostPanel` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
@@ -1376,7 +1390,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
 | `ui/theme/index.ts` | 27 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
-| `cli/index.tsx` | 109 | 可执行入口（无导出） |
+| `cli/index.ts` | 17 | 可执行入口：先选定 React 构建再动态导入 `dsht`（无导出） |
+| `cli/dsht.tsx` | 109 | 参数解析与环境准备（无导出） |
 
 ```mermaid
 C4Component
@@ -1388,9 +1403,9 @@ C4Component
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, index", "14 文件 2082 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "8 文件 638 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, connection, memory-log, index", "3 文件 551 行")
+  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, index", "5 文件 797 行")
   Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 1531 行")
-  Component(cli, "cli/", "index.tsx", "1 文件 91 行")
+  Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 126 行")
 
   Rel(root, transport, "公开门面")
   Rel(transport, session, "被依赖")
