@@ -40,6 +40,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [input, updateInput] = useState('');
   const draft = useRef('');
   const inputHistory = useRef(new InputHistory());
+  const historyPaging = useRef(false);
   useLayoutEffect(() => {
     const history = new InputHistory();
     inputHistory.current = history;
@@ -320,6 +321,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if ((recallPrevious || recallNext) && state.online && !controller.state.busy && !pending
       && !queueOpen && (!recallBlocked || key.ctrl)
       && (state.screen === 'chat' || draft.current !== '' || key.ctrl)) {
+      // The oldest seeded entry is where the session happened to open, not where it began: stepping
+      // past it fetches the page before the retained window, and the step is applied once the page
+      // lands, so recall covers prompts from before this client connected. Paging stays with the
+      // conversation: on a picker screen the arrows only ever walked what was already retained.
+      if (recallPrevious && state.screen === 'chat' && !historyPaging.current
+        && (inputHistory.current.atOldest || inputHistory.current.length === 0)
+        && state.transcript.ready && state.transcript.hasMore) { void recallOlderPrompts(); return; }
       setInput(inputHistory.current.move(recallPrevious ? -1 : 1, draft.current), true); return;
     }
     if (key.tab) { completeCommand(); return; }
@@ -546,6 +554,37 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     historyAbort.current = abort; setHistoryLoading(label);
     try { await operation(abort.signal); }
     finally { if (historyAbort.current === abort) { historyAbort.current = undefined; setHistoryLoading(undefined); } }
+  }
+
+  /** Fetch the page before the retained window until it yields prompts, then step recall back once.
+   *
+   * Recall is seeded from the loaded window, so its oldest entry is where the session happened to
+   * open rather than where it began. Pages holding no User message are skipped inside one bounded
+   * request loop, and the live transcript stays the pager it already is for scrolling, so a page
+   * fetched here remains readable above the composer.
+   */
+  async function recallOlderPrompts(): Promise<void> {
+    if (historyPaging.current) return;
+    historyPaging.current = true;
+    const transcript = state.transcript;
+    const sessionId = state.sessionId;
+    try {
+      const accepted = await controller.perform(() => historyOperation(async signal => {
+        for (let page = 0; page < 5; page++) {
+          const floor = transcript.beforeSeq;
+          if (floor === undefined || !transcript.hasMore) break;
+          await controller.older(signal, transcript);
+          signal.throwIfAborted();
+          const prompts = transcript.messages
+            .filter(message => message.role === 'You' && message.seq < floor)
+            .map(message => message.text.replace(/\r?\n/g, ' ').trim()).filter(Boolean);
+          if (prompts.length) { inputHistory.current.prepend(prompts); return; }
+        }
+      }, 'Loading older prompts…'));
+      if (accepted && mounted.current && controller.state.sessionId === sessionId) {
+        setInput(inputHistory.current.move(-1, draft.current), true);
+      }
+    } finally { historyPaging.current = false; }
   }
   async function openSearchSession(sessionId: string, query: string): Promise<void> {
     await historyOperation(async signal => {

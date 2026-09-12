@@ -1385,6 +1385,35 @@ test('composer recalls submitted prompts and commands while preserving its unsen
 });
 
 
+test('recall pages past the seeded window so prompts from before startup stay reachable', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const prompts = (start: number, end: number) => Array.from({ length: end - start }, (_, index) => ({
+    type: 'event', event: { seq: start + index, type: 'user/message', surfaceOp: 'append', data: {
+      content: [{ type: 'text', text: `prompt-${start + index}` }] } },
+  }));
+  fixture.followSnapshot = { type: 'snapshot', cursor: 3, hasMore: true, header: { id: 's1' }, records: prompts(2, 4) };
+  fixture.onPage = async () => ({ records: prompts(0, 2), hasMore: false });
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.state.transcript.ready);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-3/);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-2/);
+  // The seeded window ends at prompt-2: the next step has to fetch the page before it.
+  await pressKey(ui, '\u001b[A');
+  await until(() => ui.lastFrame()?.includes('❯ prompt-1') === true);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-0/);
+  const pages = fixture.calls.filter(call => call.method === 'session/page');
+  assert.equal(pages.length, 1);
+  const request = object(object(object(pages[0]!.payload).args).request);
+  assert.equal(request.beforeSeq, 2);
+  // The session's oldest prompt is the end of recall: no further page is requested.
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-0/);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, 1);
+  assert.doesNotMatch(ui.lastFrame()!, /Loading older prompts/);
+});
+
+
 test('restored session prompts are available before any new submission', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { ...snapshot, records: [

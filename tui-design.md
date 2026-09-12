@@ -636,7 +636,7 @@ function saveSessionLog(client, sessionId, destination, signal): Promise<string>
 
 // input.tsx / input-history.ts / mouse.ts / history.ts / app.tsx
 function editInput(state: EditState, input: string, key: Partial<Key>): EditState
-class InputHistory { record(value); reset(); move(direction, current) }
+class InputHistory { record(value); reset(); prepend(values); move(direction, current) }
 function isMouseReport(raw: string): boolean
 function wheelDirection(raw: string): number
 function useMouseWheel(scroll, enabled?, select?): void
@@ -855,6 +855,8 @@ C4Dynamic
 交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如自由输入模式下用 `/cancel` 终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。提问与审批的退出语义不同：Esc 在选项模式下**放弃整组问题**——与 Web 客户端关闭按钮同一语义，以 `{ kind: 'rejected', error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } }` 结算该 waterfall，因此本地已收集的部分答案一并作废，宿主记为取消而不是回答；在 `Other answer` 里 Esc 仍先回到选项，再按一次才放弃。审批没有"取消"这个动作（与 Web 端的拒绝／允许两个按钮一致），Esc 仍只清除高亮；Ctrl+C 在两个对话框上都只清空草稿、保留待答交互。只有显式回答（审批的 1/2/3、提问的选项或自由文本）或提问上的 Esc 才终结它。
 
 输入框的多行几何：composer 是"绝不吞掉对话区"的一段固定预算，而不是随内容增长的区域。`app.tsx` 由终端行数算出 body 高度（扣除根框、页眉、状态栏与一行瞬时提示），内容窗口取 `clamp(floor(body/3), 2, 5)` 再受 `body - 7` 约束，剩余行永远留给对话；列数不参与高度计算，因此横屏或宽终端只减少折行。输入内容本身保留用户粘贴的换行与制表符：`editInput` 只把 `CRLF`/`CR` 归一为 `LF` 并剥离其他控制字符，制表符在**显示**时按制表位展开、发送时保持原字节。显示行、光标行与折叠块都由 `src/ui/input/viewport.ts` 在每次渲染时从文本推导，不保存 span，因此任何编辑都无需重定位区间——这与"投影与渲染分离"的既有决策一致。多行草稿的**未折叠**视觉行数超过窗口时，仅折叠中间行（`[N lines · X KB]`），首行与末行保持可见，光标所在行因此始终可见；判定读取未折叠高度，折叠不会反过来触发自身。折叠区间对编辑是一个对象：`←`/`→` 一次跨越，区间两端的 Backspace/Delete 一次删除整块，而 Ctrl+K/Ctrl+U 等显式剪除仍按字符工作（区间随后重新推导）。一期不检测粘贴来源、不引入 bracketed paste，也不新增任何按键；↑/↓ 仍归历史回填。
+
+输入回填的覆盖范围：种子只来自本客户端已加载的 `user/message`，所以窗口里最旧的那条只是会话碰巧打开的位置，不是会话的开头。`↑`/`Ctrl+P` 停在最旧一条（或回填为空）时，`app.tsx` 用读者滚动历史时的同一套分页（`SessionController.older`）取回窗口之前的一页：以加载前的 `beforeSeq` 为界，只把严格更早的 User 消息 `prepend` 进 `InputHistory`，再补上被这次加载顶住的那一步，因此按键语义仍是"退一条"。整页没有 User 消息时在同一次有界循环里继续向前翻（每次最多 5 页，`historyPaging` 保证同时只有一次请求在飞），不会因为一页只有工具调用而卡住；`controller.perform` 期间输入框失焦，重复按键不会排队。翻到的页照旧进入实时 transcript，所以回填读过的内容也能在输入框上方滚到，历史回收在读者回到实时末端时恢复。预算是分裂的：`record` 仍用 200 条 / 256 KiB 约束种子与提交，`prepend` 刻意不淘汰——向更早处读是用户的显式请求，而下一次提交会把缓冲重新收敛回预算。
 
 ```mermaid
 sequenceDiagram
@@ -1112,7 +1114,7 @@ C4Component
 | 待答交互 | `interactions` | `state.pending`（每次 `update` 由映射推导） | `$events` 的 `waterfall` / `cancel` | 显式应答、宿主取消或连接结束 |
 | 工作区、会话列表与归档集 | `State.workspaces/sessions`、`Client.archivedSessionIds` | `visibleSessions`、选择器 | `showPicker`、`listWorkspaces`、`listSessions` | 每次打开选择器或重连刷新 |
 | 模型目录与 preset 名单 | `State.defaultModel/presets` | `/model`、状态栏、模式标签 | `refreshCatalog`、`loadPresetNames` | 世代与 `catalogRevision` 守卫 |
-| 输入回填 | `InputHistory` | `move()` | `record()`、会话加载时种子 | 200 条 / 256 KiB 淘汰；切换会话重建 |
+| 输入回填 | `InputHistory` | `move()` | `record()`、会话加载时种子、到边界时 `prepend()` | `record` 按 200 条 / 256 KiB 淘汰；切换会话重建；`prepend` 的旧条目留到下次提交 |
 | Cookie 与在册订阅 | `Client.cookie/expiresAt/listeners` | `call`、`subscribe` | `restoreCookie`、`authenticate`、`subscribe` | `close()` 结束全部订阅 |
 | 成本汇总镜像与合计 | `CostLedger.sessions/totals` | `total`、`today`、`hasSession`、`missing` | `load`、`replace` | `replace` 清空合计缓存 |
 
@@ -1152,7 +1154,7 @@ C4Component
 | 归档集合 | 内存 `archivedSessionIds` | `visibleSessions` 过滤 | `listWorkspaces`、`removeTarget` | 归档后从列表隐藏、`/resume ID` 重开 | `workspace/follow` baseline、`workspace/archiveSession` |
 | 模型目录 | 内存 `State.defaultModel` | `/model` 选择器、状态栏、`modelCatalog()` | `refreshCatalog` | `/model`、模型与档位显示 | `session/modelCatalog`、`session/selectModel` |
 | Preset 名单 | 内存 `State.presets` | `sessionMode` | `loadPresetNames` | 标题栏模式标签、`/status` | `agentPresets/list` |
-| 输入回填 | 内存 `InputHistory` | `move()` | `record()`、会话种子 | ↑/↓、Ctrl+P/N 回填 | 无（种子取自已加载 `user/message`） |
+| 输入回填 | 内存 `InputHistory` | `move()` | `record()`、会话种子、边界处的 `prepend()` | ↑/↓、Ctrl+P/N 回填 | `session/page`（种子取自已加载 `user/message`，到边界时向前翻页） |
 | 导出归档 | 磁盘 ZIP | — | `saveSessionLog` | `/export` | `GET /api/session.export` |
 | 终端鼠标标志 | 终端 | — | `useMouseWheel` | 滚轮滚动、左键复制、原生选区 | 无 |
 
@@ -1203,7 +1205,7 @@ C4Component
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（29 篇）、`bug-fix/`（4 篇）与 `feature/`（7 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（29 篇）、`bug-fix/`（4 篇）与 `feature/`（8 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 | Agent Note | 主题 |
 | --- | --- |
@@ -1225,6 +1227,7 @@ C4Component
 | `architecture/2026-09-11-terminal-storage-unit` | 文件操作统一归属 `src/storage/`，由依赖门禁强制 |
 | `architecture/2026-09-11-terminal-memory-log` | 默认启用的有界运行时内存日志，区分真实保留与 V8 高水位 |
 | `feature/2026-09-12-terminal-question-dismiss` | 提问的 Esc 放弃整组问题，以 `ASK_CANCELLED` 结算 |
+| `feature/2026-09-12-terminal-recall-full-history` | 回填在窗口边界处向前翻页，覆盖客户端连接之前的提示词 |
 
 ### 7.3 文档配对
 
@@ -1260,7 +1263,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 24 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 226 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、提问的 Esc 放弃（rejected/`ASK_CANCELLED` 结算、Other 的两步退出）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
+- 24 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 229 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填（含翻页到更早的提示词）、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、提问的 Esc 放弃（rejected/`ASK_CANCELLED` 结算、Other 的两步退出）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
