@@ -426,7 +426,7 @@ This repository publishes one public package, `@itookit/dsht`, from the `mushuan
 
 | Field | Value |
 | --- | --- |
-| Name and version | `@itookit/dsht` `0.3.3` |
+| Name and version | `@itookit/dsht` `0.3.4` |
 | Executable | `dsht`, or `npx @itookit/dsht` without installing |
 | Library entries | `@itookit/dsht` and `@itookit/dsht/auth` |
 | Author | lizlok@gmail.com |
