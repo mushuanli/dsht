@@ -85,6 +85,29 @@ test('the superseded seed is recognized and replaced, and any other unstamped ta
   });
 });
 
+test('a repair decides the file a newer scan wrote instead of being dropped as stale', async () => {
+  const record = (seq: number): ObjectValue => ({ type: 'event', event: { seq, time: at('2026-09-10T10:00:00'),
+    type: 'assistant/message', data: { turn: 1, step: seq, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      message: { source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } } } });
+  const events = costRecords([record(0)]);
+  await inConfig(async directory => {
+    // A private copy: pricesFrom returns the array it is given, so splicing it would change the fixture.
+    const superseded = pricesFrom(SUPERSEDED.map(price => ({ ...price })));
+    const repair = new CostLedger(superseded, directory);
+    await repair.replace('s1', 4, events);
+    // Another process scans and writes a newer cut under the superseded table before the repair saves.
+    const scanning = new CostLedger(superseded, directory);
+    await scanning.replace('s1', 5, events);
+    repair.prices.splice(0, repair.prices.length, ...DEFAULT_PRICES.map(price => ({ ...price })));
+    assert.equal(await repair.reprice(), 1);
+    // The newer file was re-decided rather than left holding the superseded amount.
+    const reloaded = new CostLedger(DEFAULT_PRICES, directory);
+    await reloaded.load();
+    assert.equal(Number(reloaded.total('s1').amount.toFixed(4)), 2);
+    assert.equal(Number(reloaded.total('s1').records), 1);
+  });
+});
+
 test('repricing re-decides recorded amounts, persists them, and leaves token-less requests alone', async () => {
   const record = (seq: number, usage: ObjectValue | undefined): ObjectValue => ({ type: 'event', event: { seq,
     time: at('2026-09-10T10:00:00'), type: 'assistant/message', data: { turn: 1, step: seq,

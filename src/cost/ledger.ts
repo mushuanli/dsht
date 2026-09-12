@@ -5,6 +5,16 @@ import { foldSamples } from './records.ts';
 import { loadLedgers, saveLedger } from './ledger-files.ts';
 import { MISSING_USAGE, type Charge, type ChargeSample, type CostTotal, type Coverage, type PriceVersion, type SavedCost } from './types.ts';
 
+/** Whether a decided charge differs from the one it replaces in any recorded field.
+ * @param a - Decision decided now.
+ * @param b - Decision recorded before.
+ * @returns True when every recorded field agrees.
+ */
+function sameDecision(a: Charge, b: Charge): boolean {
+  return a.amount === b.amount && a.priceId === b.priceId && a.reason === b.reason
+    && a.matchedBy === b.matchedBy && a.engine === b.engine && a.catalog === b.catalog;
+}
+
 /** Attach the current decision for a sample, or keep the amount an earlier scan sealed.
  *
  * Only an amount is final: a request that was unpriced stays open, so a table that later covers its
@@ -70,17 +80,38 @@ export class CostLedger {
       const charges = saved.charges.map(charge => {
         if (charge.usage === undefined) return charge;
         const decided: Charge = { ...charge, ...chargeFor(this.prices, charge.provider, charge.model, charge.time, charge.usage) };
-        if (decided.amount === charge.amount && decided.priceId === charge.priceId) return charge;
+        // Every field of the decision counts, so a table change that only adds the audit fields still
+        // reaches a charge whose amount happens to be right.
+        if (sameDecision(decided, charge)) return charge;
         changed++; touched = true;
         return decided;
       });
       if (!touched) continue;
-      const next: SavedCost = { ...saved, charges };
-      if (this.directory) await saveLedger(this.directory, next);
-      this.sessions.set(sessionId, next);
+      this.sessions.set(sessionId, await this.persist({ ...saved, charges }, sessionId));
     }
     if (changed > 0) this.totals.clear();
     return changed;
+  }
+
+  /** Write one slice, or decide again what another process wrote meanwhile.
+   *
+   * `saveLedger` refuses a slice older than the one on disk, which is how a stale scan is kept from
+   * overwriting a newer one. A repair is not a scan: the newer file also needs deciding, so its own
+   * charges are read back, decided, and written under its own cut instead of the repair being dropped.
+   * @param slice - Repaired slice.
+   * @param sessionId - Session the slice belongs to.
+   * @returns The slice this session now holds.
+   */
+  private async persist(slice: SavedCost, sessionId: string): Promise<SavedCost> {
+    if (this.directory === undefined) return slice;
+    if (await saveLedger(this.directory, slice)) return slice;
+    const current = (await loadLedgers(this.directory)).sessions.get(sessionId);
+    if (current === undefined) return slice;
+    const charges = current.charges.map(charge => charge.usage === undefined ? charge
+      : { ...charge, ...chargeFor(this.prices, charge.provider, charge.model, charge.time, charge.usage) });
+    const newer: SavedCost = { ...current, charges };
+    await saveLedger(this.directory, newer);
+    return newer;
   }
 
   /** Replace one session using all billing events through the opening snapshot cut.
