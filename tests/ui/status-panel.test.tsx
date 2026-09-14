@@ -87,7 +87,7 @@ test('arrows and PgUp/PgDn scroll the open panel through the running application
   const ui = renderAt(<App controller={controller} />, 40, 12);
   t.after(async () => { ui.close(); await controller.stop(); });
   controller.start();
-  await until(() => controller.state.transcript.ready && controller.state.screen === 'chat');
+  await until(() => controller.record.ready && controller.state.screen === 'chat');
   const press = async (value: string) => {
     const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
     Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });

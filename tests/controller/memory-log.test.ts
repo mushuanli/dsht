@@ -15,7 +15,7 @@ async function harness(t: Parameters<typeof test>[0] extends never ? never : { a
   const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined, undefined, path);
   t.after(async () => { await controller.stop(); });
   controller.start();
-  await until(() => controller.state.transcript.ready);
+  await until(() => controller.record.ready);
   return { fixture, controller };
 }
 
@@ -46,7 +46,7 @@ test('a sample reports the layout, render cache and scan counters beside the ret
   const path = join(directory, 'memory.log');
   const { controller } = await harness(t, path);
   // Build the layout the UI builds, so its row cache is measurable rather than absent.
-  const transcript = controller.state.transcript;
+  const transcript = controller.record;
   historyLayout(transcript, 100);
   await controller.memoryLog!.sample();
   const sample = JSON.parse((await readFile(path, 'utf8')).trimEnd().split('\n').at(-1)!) as Record<string, unknown>;

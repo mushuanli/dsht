@@ -51,8 +51,10 @@ export function RemovalDialog({ removal, enabled, canSelect, onCancel, onConfirm
   </Box>;
 }
 
-/** Two-step model and reasoning-effort selector. */
-export interface ModelState { catalog: ObjectValue; provider?: string; model?: ObjectValue }
+import type { ModelState } from '../../session/index.ts';
+
+/** Two-step model and reasoning-effort selector; the state shape is shared with the session. */
+export type { ModelState };
 
 /** Model routes and adapter-owned reasoning efforts.
  * @param props - Catalog, current step and its selection actions.

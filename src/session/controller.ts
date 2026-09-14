@@ -11,7 +11,9 @@ import { releaseHistoryLayout } from './history.ts';
 import type { HistoryLimits } from './memory.ts';
 import { resolveTarget, sessionLabel } from './navigation.ts';
 import { fileReferences, type FileReference } from './references.ts';
-import { Transcript, toolLine } from './transcript.ts';
+import { PromptCache, type ComposerState, type InteractionState, type ModelState, type OptionState, type PanelState, type PromptIndex, type ReferenceState, type SessionInfo, type ViewState } from './info.ts';
+import type { Reasoning } from './history.ts';
+import { recordPrompts, Transcript, toolLine } from './transcript.ts';
 import type { ConnectionView } from './connection-view.ts';
 import type { HistorySearch, RemovalTarget } from './types.ts';
 
@@ -21,11 +23,20 @@ const BUILT_IN_MODES = new Map([['standard', 'Standard mode'], ['ptc', 'PTC mode
 /** Bounded match count for one history search. */
 const SEARCH_MATCH_LIMIT = 200;
 
+/** Bounded page count for the prompt backfill that runs once per opened session. */
+const PROMPT_BACKFILL_PAGES = 200;
+
 /** Owns the selected session: its follow stream, transcript, history window and interactions. */
 export class SessionController {
   private follow: Subscription | undefined;
   private interactions = new Map<string, ObjectValue>();
-  private historyPinned = false;
+  /** Cancels the background prompt backfill of the previous selection. */
+  private promptBackfill?: AbortController;
+  /** Prompts of sessions this process has already read, so re-opening one costs no page request. */
+  private readonly promptCache = new PromptCache();
+  /** Prompt index, composer and reading view of the selected session; the instance `State.session` exposes. */
+  private get info(): SessionInfo { return this.store.state.session; }
+  private get prompts(): PromptIndex { return this.info.prompts; }
   private stoppingSession?: string;
   private interruptTask: Promise<boolean> | undefined;
   private admission: Promise<Json | undefined> | undefined;
@@ -62,7 +73,7 @@ export class SessionController {
   /** Epoch start from the retained turn log, or when this client first observed the run. */
   get workingSince(): number | undefined {
     if (!this.running || !this.store.state.sessionId) return undefined;
-    return this.store.state.transcript.activeTurnStartedAt ?? this.connection.observedAt(this.store.state.sessionId);
+    return this.info.record.activeTurnStartedAt ?? this.connection.observedAt(this.store.state.sessionId);
   }
 
   /** Present only sessions explicitly accounted to the selected workspace. */
@@ -78,7 +89,7 @@ export class SessionController {
   get active(): boolean { return this.interruptTask !== undefined || this.running || this.admission !== undefined; }
 
   /** Whether reading protects the loaded window, suspending history reclamation. */
-  get pinned(): boolean { return this.historyPinned; }
+  get pinned(): boolean { return this.info.view.pinned; }
 
   /** Drop generation-scoped state before a new connection generation begins. */
   beginGeneration(): void { this.stoppingSession = undefined; }
@@ -86,7 +97,7 @@ export class SessionController {
   /** Invalidate in-flight work and drop transient interactions when a generation ends. */
   endGeneration(): void {
     this.store.bumpSelection();
-    this.store.state.transcript.ready = false;
+    this.info.record.ready = false;
     this.interactions.clear();
   }
 
@@ -186,7 +197,7 @@ export class SessionController {
    * @param pinned - Whether the main transcript is actively being read away from its tail.
    */
   pinHistory(pinned: boolean): void {
-    this.historyPinned = pinned;
+    this.info.view.pinned = pinned;
     if (!pinned && this.reclaimHistory()) this.store.update({});
   }
 
@@ -255,7 +266,7 @@ export class SessionController {
     this.store.bumpSelection();
     this.follow?.cancel(); this.follow = undefined;
     this.releaseTranscript();
-    this.store.update({ workspaceId, sessionId: undefined, showAllSessions: false, transcript: new Transcript(), screen: 'sessions' });
+    this.store.update({ workspaceId, sessionId: undefined, showAllSessions: false, screen: 'sessions' });
   }
 
   /** Open a workspace picker, or resolve a workspace by ID, exact title/path, or unique ID prefix.
@@ -315,13 +326,13 @@ export class SessionController {
     this.store.bumpSelection();
     const selection = this.store.selection();
     this.follow?.cancel(); this.follow = undefined;
-    this.releaseTranscript();
-    const transcript = new Transcript();
+    this.info.reset(sessionId);
+    const transcript = this.info.record;
     const workspace = this.store.state.workspaces.find(item => array(item.sessionIds).includes(sessionId));
     const workspaceId = workspace ? string(workspace.workspaceId)
       : this.store.state.sessions.some(item => item.sessionId === sessionId) ? undefined : this.store.state.workspaceId;
     this.connection.observe(sessionId);
-    this.store.update({ sessionId, workspaceId, showAllSessions: false, transcript, screen: 'chat', status: 'Loading session…' });
+    this.store.update({ sessionId, workspaceId, showAllSessions: false, screen: 'chat', status: 'Loading session…' });
     this.follow = this.host.require().subscribe('session/follow', {
       request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true },
     }, {
@@ -329,10 +340,11 @@ export class SessionController {
         if (selection !== this.store.selection()) return;
         try {
           transcript.accept(value);
+          this.prompts.fold(transcript.promptsSince(this.prompts.through));
           this.reclaimHistory();
           const frame = object(value);
           if (frame.type === 'snapshot') this.connection.telemetryView().snapshot(sessionId, frame.projections);
-          this.store.update({ transcript, status: this.stoppingSession === sessionId ? this.store.state.status : transcript.hasLiveContent ? 'Responding…' : 'Connected' });
+          this.store.update({ status: this.stoppingSession === sessionId ? this.store.state.status : transcript.hasLiveContent ? 'Responding…' : 'Connected' });
         } catch (error) { this.connection.fail(new Error(errorText(error))); }
       },
       end: error => {
@@ -341,17 +353,18 @@ export class SessionController {
         this.store.update({ status: 'Session disconnected', error: errorText(error ?? 'Session stream ended') });
       },
     });
+    this.backfillPrompts(sessionId, selection);
   }
 
   /** Wait for the selected follow snapshot, failing on disconnect or cancellation.
    * @param signal - Cancels waiting without closing the session.
    */
   async waitForHistory(signal: AbortSignal): Promise<void> {
-    const transcript = this.store.state.transcript;
+    const transcript = this.info.record;
     const deadline = Date.now() + this.host.require().timeoutMs;
     while (!transcript.ready) {
       signal.throwIfAborted();
-      if (!this.store.state.online || this.store.state.transcript !== transcript) throw new Error('Session changed while loading history');
+      if (!this.store.state.online || this.info.record !== transcript) throw new Error('Session changed while loading history');
       if (Date.now() >= deadline) throw new Error('Session snapshot timed out');
       await delay(20, undefined, { signal });
     }
@@ -392,7 +405,7 @@ export class SessionController {
    * @returns The host's successful command result text.
    */
   async command(line: string, signal: AbortSignal): Promise<string> {
-    if (!this.store.state.transcript.ready) throw new Error('Wait for the session snapshot before running commands');
+    if (!this.info.record.ready) throw new Error('Wait for the session snapshot before running commands');
     const execution = await this.host.require().call('commands/execute', {
       agentId: this.sessionId, line, submittedAttachments: [],
     }, signal, null);
@@ -427,7 +440,7 @@ export class SessionController {
    * @returns Absolute saved filename.
    */
   async exportHtml(path: string | undefined, signal: AbortSignal): Promise<string> {
-    return saveTranscriptHtml(this.store.state.transcript, this.sessionId, path, signal);
+    return saveTranscriptHtml(this.info.record, this.sessionId, path, signal);
   }
 
   /** Admit text once as steering while running, or a new turn while idle; a lost response can leave delivery uncertain.
@@ -436,7 +449,7 @@ export class SessionController {
   async prompt(text: string): Promise<void> {
     if (this.store.state.pending.length) throw new Error('Answer the pending question or approval first');
     this.stoppingSession = undefined;
-    if (!this.store.state.transcript.ready) throw new Error('Wait for the session snapshot before sending');
+    if (!this.info.record.ready) throw new Error('Wait for the session snapshot before sending');
     const admission = this.host.require().call('session/prompt', { request: {
       sessionId: this.sessionId, requestId: randomUUID(), mode: this.running ? 'steer' : 'queue',
       content: [{ type: 'text', text }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -485,9 +498,9 @@ export class SessionController {
    * @param signal - Cancels local paging without interrupting the remote agent.
    * @param transcript - Transcript to extend; defaults to the live one.
    */
-  async older(signal?: AbortSignal, transcript = this.store.state.transcript): Promise<void> {
+  async older(signal?: AbortSignal, transcript = this.info.record): Promise<void> {
     const selection = this.store.selection();
-    if (transcript === this.store.state.transcript) this.historyPinned = true;
+    if (transcript === this.info.record) this.info.view.pinned = true;
     if (!transcript.ready || !transcript.hasMore || transcript.beforeSeq === undefined) return;
     const result = await this.host.require().call('session/page', { request: {
       address: { kind: 'session', sessionId: this.sessionId }, throughSeq: transcript.cursor,
@@ -498,13 +511,317 @@ export class SessionController {
     this.store.update({});
   }
 
+  /** Recall one step through the session's prompt index; navigation never touches the network.
+   * @param direction - Negative for older input, positive for newer input.
+   * @param current - Composer content before recall began, restored at the newest position.
+   * @returns The recalled prompt, or the unsent draft.
+   */
+  recall(direction: -1 | 1, current: string): string { return this.prompts.move(direction, current); }
+
+  /** Composer draft, caret and parked draft, as the selected session holds them. */
+  get composer(): ComposerState { return this.info.composer; }
+
+  /** Replace the composer text and caret, publishing only when either actually changed. */
+  setComposer(draft: string, cursor = draft.length): void {
+    const composer = this.info.composer;
+    if (composer.draft === draft && composer.cursor === cursor) return;
+    composer.draft = draft; composer.cursor = cursor;
+    this.store.update({});
+  }
+
+  /** Move the caret without changing the text. */
+  setComposerCursor(cursor: number): void {
+    const composer = this.info.composer;
+    if (composer.cursor === cursor) return;
+    composer.cursor = cursor;
+    this.store.update({});
+  }
+
+  /** Move a non-empty draft aside while a dialog owns the keyboard. */
+  parkComposer(): void {
+    const composer = this.info.composer;
+    if (composer.draft === '') return;
+    composer.parked = composer.draft; composer.draft = ''; composer.cursor = 0;
+    this.store.update({});
+  }
+
+  /** Give a parked draft back once no dialog needs the keyboard. */
+  restoreComposer(): void {
+    const composer = this.info.composer;
+    if (composer.parked === '') return;
+    composer.draft = composer.parked; composer.cursor = composer.parked.length; composer.parked = '';
+    this.store.update({});
+  }
+
+  /** How the selected session's record is being read right now. */
+  get view(): ViewState { return this.info.view; }
+
+  /** Show a detached history window, releasing the one it replaces.
+   * @param window - Record to display, or undefined to return to the live transcript.
+   */
+  setViewWindow(window?: Transcript): void {
+    if (this.info.view.window === window) return;
+    this.info.closeWindow();
+    this.info.view.window = window;
+    this.store.update({});
+  }
+
+  /** Move the reader's position inside the displayed record.
+   * @param scroll - Rows scrolled back from the live end.
+   */
+  setScroll(scroll: number): void {
+    if (this.info.view.scroll === scroll) return;
+    this.info.view.scroll = scroll;
+    this.store.update({});
+  }
+
+  /** Replace the set of expanded reasoning blocks, keyed by message sequence.
+   * @param folds - Sequences to expand beyond the default fold.
+   */
+  setFolds(folds: ReadonlySet<number>): void {
+    if (this.info.view.folds === folds) return;
+    this.info.view.folds = folds;
+    this.store.update({});
+  }
+
+  /** Set the fold mode of the live attempt's completed reasoning.
+   * @param reasoning - `row` to fold, `full` to keep the streamed text.
+   */
+  setLiveReasoning(reasoning: Reasoning): void {
+    if (this.info.view.liveReasoning === reasoning) return;
+    this.info.view.liveReasoning = reasoning;
+    this.store.update({});
+  }
+
+  /** Local answer state for the selected session's pending waterfalls. */
+  get interaction(): InteractionState { return this.info.interaction; }
+
+  /** Replace the partly collected answers, keyed by the waterfall event id.
+   * @param answers - Answers collected so far, by event id.
+   */
+  setAnswers(answers: Record<string, ObjectValue[]>): void {
+    this.info.interaction.answers = answers;
+    this.store.update({});
+  }
+
+  /** Replace the pending question's option keyboard state.
+   * @param option - Highlighted option, toggled labels and free-text mode; undefined clears it.
+   */
+  setOption(option?: OptionState): void {
+    if (this.info.interaction.option === option) return;
+    this.info.interaction.option = option;
+    this.store.update({});
+  }
+
+  /** Replace the pending approval's selected row.
+   * @param approval - Selected approval row; undefined clears the highlight.
+   */
+  setApproval(approval?: InteractionState['approval']): void {
+    if (this.info.interaction.approval === approval) return;
+    this.info.interaction.approval = approval;
+    this.store.update({});
+  }
+
+  /** Composer-adjacent `@` reference menu state. */
+  get reference(): ReferenceState { return this.info.reference; }
+
+  /** Highlight one row of the open reference menu.
+   * @param index - Row index into the current matches.
+   */
+  setReferenceIndex(index: number): void {
+    if (this.info.reference.index === index) return;
+    this.info.reference.index = index;
+    this.store.update({});
+  }
+
+  /** Remember the draft that dismissed the reference menu, so it does not reopen while it stands.
+   * @param draft - Composer text at dismissal, or undefined to allow the menu again.
+   */
+  setReferenceDismissed(draft?: string): void {
+    if (this.info.reference.dismissed === draft) return;
+    this.info.reference.dismissed = draft;
+    this.store.update({});
+  }
+
+  /** Panels the selected session has open. */
+  get panels(): PanelState { return this.info.panels; }
+
+  /** Show or hide the reasoning panel.
+   * @param open - Whether `/think` is open.
+   */
+  openThoughts(open: boolean): void {
+    if (this.info.panels.thoughts === open) return;
+    this.info.panels.thoughts = open;
+    this.store.update({});
+  }
+
+  /** Show or hide the pending-input panel.
+   * @param open - Whether `/queue` is open.
+   */
+  openQueue(open: boolean): void {
+    if (this.info.panels.queue === open) return;
+    this.info.panels.queue = open;
+    this.store.update({});
+  }
+
+  /** Show the model dialog at one step, or close it.
+   * @param model - Catalog plus the provider or model being inspected; undefined closes the dialog.
+   */
+  setModelPanel(model?: ModelState): void {
+    if (this.info.panels.model === model) return;
+    this.info.panels.model = model;
+    this.store.update({});
+  }
+
+  /** Show the history or content-search dialog, or close it.
+   * @param history - Query, content-search mode and matches; undefined closes the dialog.
+   */
+  setHistoryPanel(history?: PanelState['history']): void {
+    if (this.info.panels.history === history) return;
+    this.info.panels.history = history;
+    this.store.update({});
+  }
+
+  /** Show the host session-search results, or close them.
+   * @param search - Query, results and truncation flag; undefined closes the dialog.
+   */
+  setSearchPanel(search?: PanelState['search']): void {
+    if (this.info.panels.search === search) return;
+    this.info.panels.search = search;
+    this.store.update({});
+  }
+
+  /** Remember a locally submitted command, which never becomes a durable session record. */
+  recordRecall(value: string): void { this.prompts.record(value); }
+
+  /** Leave recall navigation because the composer was edited or replaced. */
+  resetRecall(): void { this.prompts.resetCursor(); }
+
+  /** Whether recall is parked on the oldest prompt it retains in memory. */
+  get recallAtOldest(): boolean { return this.prompts.atOldest; }
+
+  /** How many prompts the session retains for recall. */
+  get recallLength(): number { return this.prompts.length; }
+
+  /** Whether an older prompt is reachable at all: shed from the window, or still on the host. */
+  get recallHasOlder(): boolean {
+    const transcript = this.info.record;
+    const oldest = this.prompts.oldest;
+    const refillable = oldest !== undefined && transcript.beforeSeq !== undefined && oldest > transcript.beforeSeq;
+    return refillable || (!this.prompts.exhausted && transcript.hasMore);
+  }
+
+  /** Recover older prompts from the loaded window before spending a page request.
+   *
+   * The transcript window can still hold prompts the index's budgets evicted, so a backward step
+   * refills from memory first and only then asks the caller to page. That is what keeps recall
+   * complete across submissions, where the previous buffer lost them at the eviction boundary.
+   * @returns Whether any older prompt was recovered.
+   */
+  refillRecall(): boolean {
+    const oldest = this.prompts.oldest;
+    if (oldest === undefined) return false;
+    return this.prompts.prepend(this.info.record.promptsBefore(oldest)) > 0;
+  }
+
+  /** Seed recall from a complete cached entry, so an open that follows a scan costs no request.
+   * @param sessionId - Session being opened.
+   * @returns Whether the cache covered this session.
+   */
+  private adoptCachedPrompts(sessionId: string): boolean {
+    const cached = this.promptCache.get(sessionId);
+    if (!cached?.complete) return false;
+    const oldest = this.prompts.oldest;
+    const older = oldest === undefined ? cached.prompts : cached.prompts.filter(prompt => prompt.seq < oldest);
+    this.prompts.prepend(older);
+    this.prompts.markComplete();
+    this.store.update({});
+    return true;
+  }
+
+  /** Fold one history page the cost scan already read into the prompt cache.
+   *
+   * The scan reads every session's whole history on connect, so this is where two readers stop
+   * paying twice: it hands over pages it already has, and an open that follows reads the cache.
+   * @param sessionId - Session the page belongs to.
+   * @param records - Raw records of one scanned page.
+   */
+  rememberScanPage(sessionId: string, records: readonly Json[]): void {
+    this.promptCache.observe(sessionId, recordPrompts(records), false);
+  }
+
+  /** Report that the scanned session's history was read to its beginning.
+   * @param sessionId - Session the scan finished.
+   */
+  rememberScanDone(sessionId: string): void {
+    this.promptCache.observe(sessionId, [], true);
+  }
+
+  /** Fold every prompt the host still holds into the recall index, in the background.
+   *
+   * Session start delivers only the newest window, so without this the arrows could reach older
+   * prompts but not show them without paging first. Each page is parsed into a temporary transcript
+   * and only its prompts are kept, so the live record, its memory window and the row cache never
+   * grow. The walk is bounded and the next selection cancels it; anything past the bound is still
+   * reachable through the lazy backward step.
+   * @param sessionId - Session being opened.
+   * @param selection - Selector generation that must still be current.
+   */
+  private backfillPrompts(sessionId: string, selection: number): void {
+    this.promptBackfill?.abort();
+    const abort = new AbortController();
+    this.promptBackfill = abort;
+    void (async () => {
+      try {
+        while (!this.info.record.ready) {
+          abort.signal.throwIfAborted();
+          await delay(20, undefined, { signal: abort.signal });
+        }
+        // A cost scan or an earlier open may already have this session's prompts cached.
+        if (this.adoptCachedPrompts(sessionId)) return;
+        const throughSeq = this.info.record.readThrough;
+        let beforeSeq = this.info.record.beforeSeq;
+        let hasMore = this.info.record.hasMore;
+        for (let page = 0; hasMore && beforeSeq !== undefined && page < PROMPT_BACKFILL_PAGES; page++) {
+          abort.signal.throwIfAborted();
+          if (selection !== this.store.selection()) return;
+          const result = object(await this.host.require().call('session/page', { request: {
+            address: { kind: 'session', sessionId }, throughSeq, beforeSeq, maxMessages: 80,
+          } }, abort.signal));
+          abort.signal.throwIfAborted();
+          if (selection !== this.store.selection()) return;
+          const temporary = new Transcript();
+          try {
+            temporary.accept({ type: 'snapshot', cursor: throughSeq, assistantStream: { revision: 0 }, records: result.records, hasMore: result.hasMore });
+            const next = temporary.beforeSeq;
+            if (temporary.hasMore && (next === undefined || next >= beforeSeq)) throw new Error('Host history page did not advance');
+            this.prompts.prepend(temporary.promptsSince(-1).prompts);
+            beforeSeq = next; hasMore = temporary.hasMore;
+          } finally { temporary.dispose(); }
+          // A scan that finished while this walk ran already established the same list.
+          if (this.adoptCachedPrompts(sessionId)) return;
+        }
+        this.prompts.settle();
+        // Only a walk that ended because the host said "no more" makes the index exhaustive; one
+        // stopped by the page bound leaves the lazy backward step in charge of the rest.
+        if (!hasMore) this.prompts.markComplete();
+        // Cache only what the walk established: advertising a capped or shed list would let a later
+        // open skip a fetch it still needs.
+        if (!hasMore) this.promptCache.put(sessionId, { prompts: this.prompts.durableItems, complete: this.prompts.exhausted });
+        this.store.update({});
+      } catch {
+        // A cancelled, disconnected or unavailable history leaves the lazy backward step in charge.
+      } finally { if (this.promptBackfill === abort) this.promptBackfill = undefined; }
+    })();
+  }
+
   /** Search one page at a time, preserving only the first 200 matches and releasing temporary content.
    * @param query - Literal, case-insensitive text including folded reasoning.
    * @param signal - Cancels HTTP and processing without cancelling the agent.
    * @returns Newest-first bounded summaries and an explicit truncation flag.
    */
   async searchHistory(query: string, signal: AbortSignal): Promise<HistorySearch> {
-    const source = this.store.state.transcript;
+    const source = this.info.record;
     if (!source.ready) throw new Error('Wait for the session snapshot');
     const sessionId = this.sessionId;
     const selection = this.store.selection();
@@ -553,7 +870,7 @@ export class SessionController {
    * @returns A caller-owned historical window that must be disposed when closed.
    */
   async historyAt(target: number, signal: AbortSignal): Promise<Transcript> {
-    const source = this.store.state.transcript;
+    const source = this.info.record;
     const selection = this.store.selection();
     const page = object(await this.host.require().call('session/page', { request: {
       address: { kind: 'session', sessionId: this.sessionId }, throughSeq: source.readThrough,
@@ -574,13 +891,13 @@ export class SessionController {
    * @param signal - Cancels local paging without interrupting the remote agent.
    */
   async historyThrough(target: number | 'first', signal: AbortSignal): Promise<void> {
-    const transcript = this.store.state.transcript;
+    const transcript = this.info.record;
     if (!transcript.ready) throw new Error('Wait for the session snapshot');
     while (transcript.hasMore && (target === 'first' || transcript.beforeSeq !== undefined && transcript.beforeSeq > target)) {
       signal.throwIfAborted();
       const before = transcript.beforeSeq;
       await this.older(signal);
-      if (this.store.state.transcript !== transcript) throw new Error('Session changed while loading history');
+      if (this.info.record !== transcript) throw new Error('Session changed while loading history');
       if (transcript.hasMore && (before === undefined || transcript.beforeSeq === undefined || transcript.beforeSeq >= before)) {
         throw new Error('Host history page did not advance');
       }
@@ -591,16 +908,16 @@ export class SessionController {
    * @returns Number of removed records.
    */
   private reclaimHistory(): number {
-    if (this.historyPinned || !this.store.state.online) return 0;
-    const removed = this.store.state.transcript.trimHistory(this.historyLimits);
-    if (removed) releaseHistoryLayout(this.store.state.transcript);
+    if (this.info.view.pinned || !this.store.state.online) return 0;
+    const removed = this.info.record.trimHistory(this.historyLimits);
+    if (removed) releaseHistoryLayout(this.info.record);
     return removed;
   }
 
   /** Release the selected transcript and its layout caches. */
   private releaseTranscript(): void {
-    releaseHistoryLayout(this.store.state.transcript);
-    this.store.state.transcript.dispose(); this.historyPinned = false;
+    this.promptBackfill?.abort(); this.promptBackfill = undefined;
+    this.info.reset();
   }
 
   /** @returns The selected session identity, or a `Select a session first` failure. */

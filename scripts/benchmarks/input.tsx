@@ -21,13 +21,13 @@ for (const count of [20, 500, 2000]) {
   }
   try {
     controller.start();
-    await until(() => controller.state.transcript.ready);
+    await until(() => controller.record.ready);
     const records = Array.from({ length: count }, (_, seq) => ({ type: 'event', event: {
       seq, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: `Synthetic message ${seq}: ` + 'Text 中文 example. '.repeat(20) }] },
     } }));
     const transcript = new MeasuredTranscript();
     transcript.accept({ ...snapshot, records });
-    controller.state.transcript = transcript;
+    controller.state.session.record = transcript;
     const press = async () => { await act(async () => {}); await act(async () => { ui.stdin.write('x'); }); };
     Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
     for (let i = 0; i < 5; i++) await press();

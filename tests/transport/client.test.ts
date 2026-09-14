@@ -42,7 +42,7 @@ test('selected-session interaction replies and reconnection replace the baseline
   controller.pickWorkspace('w1');
   assert.equal(controller.visibleSessions.length, 1);
   await controller.selectSession('s1');
-  await until(() => controller.state.transcript.ready);
+  await until(() => controller.record.ready);
   await controller.prompt('hello');
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
   fixture.emit({ type: 'waterfall', event: 'unknown/request', eventId: 'other', agentId: 's1', request: {} });
@@ -55,9 +55,9 @@ test('selected-session interaction replies and reconnection replace the baseline
   fixture.baseline = [];
   fixture.disconnect();
   await until(() => !controller.state.online);
-  await until(() => controller.state.online && controller.state.transcript.ready && controller.state.workspaces.length === 0);
+  await until(() => controller.state.online && controller.record.ready && controller.state.workspaces.length === 0);
   assert.equal(controller.state.sessionId, 's1');
-  assert.equal(controller.state.transcript.messages.length, 1);
+  assert.equal(controller.record.messages.length, 1);
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
 });
 
@@ -95,7 +95,7 @@ test('workspace and session commands switch across workspaces without creating o
   assert.equal(controller.state.showAllSessions, false);
   assert.equal(controller.visibleSessions.length, 1);
   await controller.switchSession('First conversation');
-  await until(() => controller.state.transcript.ready);
+  await until(() => controller.record.ready);
   await controller.switchSession('s2');
   assert.equal(controller.state.workspaceId, 'w2');
   assert.equal(controller.state.sessionId, 's2');
@@ -123,7 +123,7 @@ test('interrupt cancels a running selected session, coalesces repeated keys, and
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   t.after(() => controller.stop());
   controller.start();
-  await until(() => controller.state.transcript.ready);
+  await until(() => controller.record.ready);
   assert.equal(await controller.interrupt(), true);
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
   await until(() => controller.running);
@@ -158,7 +158,7 @@ test('Ctrl+C during prompt admission waits for admission before sending cancella
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   t.after(() => controller.stop());
   controller.start();
-  await until(() => controller.state.transcript.ready);
+  await until(() => controller.record.ready);
   let release!: () => void;
   fixture.onPrompt = () => new Promise<void>(resolve => { release = resolve; });
   t.after(() => release?.());
@@ -181,7 +181,7 @@ test('replayed questions survive startup, picker navigation and reconnect withou
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   t.after(() => controller.stop());
   controller.start();
-  await until(() => controller.state.transcript.ready && controller.state.pending.length === 1);
+  await until(() => controller.record.ready && controller.state.pending.length === 1);
   assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
   await controller.showPicker('workspaces');
   assert.equal(controller.state.pending.length, 0);
@@ -190,7 +190,7 @@ test('replayed questions survive startup, picker navigation and reconnect withou
   assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
   fixture.disconnect();
   await until(() => !controller.state.online);
-  await until(() => controller.state.online && controller.state.transcript.ready && controller.state.pending.length === 1);
+  await until(() => controller.state.online && controller.record.ready && controller.state.pending.length === 1);
   assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
   await controller.answer({ answers: [{ id: 'q1', selected: ['Review first'] }] });
   assert.equal(controller.state.pending.length, 0);
@@ -220,7 +220,7 @@ test('long command calls can outlive the default timeout and remain cancellable'
 test('a claimed queue item cannot be removed or resubmitted by a stale action', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1'); t.after(() => controller.stop());
-  controller.start(); await until(() => controller.state.transcript.ready);
+  controller.start(); await until(() => controller.record.ready);
   await assert.rejects(controller.removeQueued('already-claimed'), error => error instanceof RemoteError && error.code === 'session/queue-item-not-found');
   assert.equal(fixture.calls.filter(call => call.method === 'session/updateQueue').length, 1);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);

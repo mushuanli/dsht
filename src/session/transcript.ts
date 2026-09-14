@@ -1,6 +1,7 @@
 /** Human transcript projection from durable events and ephemeral assistant chunks. */
 import sliceAnsi from 'slice-ansi';
 import type { HistoryLimits } from './memory.ts';
+import type { PromptRecord } from './info.ts';
 import { array, object, safeText, string, type Json, type ObjectValue } from '../transport/wire.ts';
 
 interface ToolSummary { name: string; operation?: string; command?: string }
@@ -63,6 +64,38 @@ export function contentText(content: Json | undefined, tools?: ReadonlyMap<strin
 
 /** Event types that contribute a displayed message; other retained events only affect live state. */
 const DISPLAY_EVENTS = new Set(['user/message', 'assistant/message', 'tool/result']);
+
+/** One durable `user/message` event as a recallable prompt.
+ *
+ * Injected context and every other record type return undefined. This is the single place the rule
+ * lives, so a prompt parsed straight from a wire record (the cost scan's pages) is identical to one
+ * the transcript folded into its own window.
+ * @param seq - Durable sequence of the record.
+ * @param event - Decoded wire event, when the record carried one.
+ * @returns The prompt text, or undefined when the record is not a user prompt.
+ */
+export function eventPrompt(seq: number, event: ObjectValue | undefined): PromptRecord | undefined {
+  if (!event || event.type !== 'user/message' || event.surfaceOp !== 'append') return undefined;
+  const data = object(event.data);
+  if (data.source && object(data.source).kind !== 'user') return undefined;
+  return { seq, text: contentText(data.content) };
+}
+
+/** User prompts in one raw history page, oldest first.
+ * @param records - One HTTP history page's records.
+ * @returns Prompts with their durable sequences, in page order.
+ */
+export function recordPrompts(records: unknown): PromptRecord[] {
+  const prompts: PromptRecord[] = [];
+  for (const raw of array(records)) {
+    const event = object(object(raw).event);
+    const seq = event.seq;
+    if (typeof seq !== 'number' || !Number.isSafeInteger(seq)) continue;
+    const prompt = eventPrompt(seq, event);
+    if (prompt) prompts.push(prompt);
+  }
+  return prompts;
+}
 
 /** Semantic content stays separate from terminal rows, styles, and fold state. */
 export interface MessagePart {
@@ -381,6 +414,44 @@ export class Transcript {
 
   /** Latest loaded user prompt summary, sharing the durable thought index. */
   get latestPrompt(): string { void this.thoughts; return this.thoughtIndex!.prompt; }
+
+  /** User prompts newer than `afterSeq`, oldest first, with the newest sequence scanned.
+   *
+   * Recall folds its tail this way instead of projecting messages, so a stream frame never rebuilds
+   * the row layout at a second width just to notice a new prompt. The watermark is returned even when
+   * the scanned records contributed no prompt, because an assistant-only turn must not make the next
+   * frame rescan it.
+   * @param afterSeq - Newest sequence already folded into the caller's index.
+   * @returns Prompts with an increasing sequence, and the watermark the caller should adopt.
+   */
+  promptsSince(afterSeq: number): { prompts: PromptRecord[]; through: number } {
+    const keys = this.sortedKeys();
+    let start = keys.length;
+    while (start > 0 && keys[start - 1]! > afterSeq) start--;
+    const prompts: PromptRecord[] = [];
+    for (let index = start; index < keys.length; index++) {
+      const prompt = this.userPrompt(keys[index]!);
+      if (prompt) prompts.push(prompt);
+    }
+    return { prompts, through: Math.max(afterSeq, keys.at(-1) ?? afterSeq) };
+  }
+
+  /** User prompts strictly older than `beforeSeq`, oldest first, from the retained window.
+   * @param beforeSeq - Sequence the caller's index has already reached.
+   * @returns Loaded prompts that can refill an evicted prefix without a page request.
+   */
+  promptsBefore(beforeSeq: number): PromptRecord[] {
+    const prompts: PromptRecord[] = [];
+    for (const seq of this.sortedKeys()) {
+      if (seq >= beforeSeq) break;
+      const prompt = this.userPrompt(seq);
+      if (prompt) prompts.push(prompt);
+    }
+    return prompts;
+  }
+
+  /** One `user/message` record as a prompt; injected context and other records return undefined. */
+  private userPrompt(seq: number): PromptRecord | undefined { return eventPrompt(seq, this.events.get(seq)); }
 
   /** Number of semantic records and unfinished legacy chunks held by the client. */
   get retainedRecordCount(): number { return this.events.size; }

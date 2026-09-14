@@ -1,5 +1,5 @@
 /** Application state shared by the controller facade and every domain controller. */
-import { Transcript } from './session/transcript.ts';
+import { SessionInfo } from './session/info.ts';
 import type { HistorySearch, RemovalTarget } from './session/types.ts';
 import type { ObjectValue } from './transport/wire.ts';
 
@@ -22,7 +22,8 @@ export interface State {
   presetError?: string;
   presets?: ObjectValue[];
   defaultModel?: ObjectValue;
-  transcript: Transcript;
+  /** Record, prompt index, composer, view and interaction state of the selected session. */
+  session: SessionInfo;
 }
 
 /** The state contract every domain controller writes through. */
@@ -42,7 +43,7 @@ export interface ControllerStore {
  */
 export function initialState(): State {
   return { version: 0, online: false, busy: false, screen: 'workspaces', status: 'Connecting…',
-    error: '', workspaces: [], sessions: [], showAllSessions: false, pending: [], transcript: new Transcript() };
+    error: '', workspaces: [], sessions: [], showAllSessions: false, pending: [], session: new SessionInfo() };
 }
 
 export type { HistorySearch, RemovalTarget };

@@ -1,6 +1,6 @@
 /** Address and page one session's complete billing history over the host connection. */
 import { RemoteError, type Client, type Subscription } from '../transport/client.ts';
-import { array, errorText, object, string, type ObjectValue } from '../transport/wire.ts';
+import { array, errorText, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import { costRecords } from './records.ts';
 
 /** Wire addresses for one `session/list` row, in the order the cost scan should try them.
@@ -25,12 +25,15 @@ export function costAddresses(session: ObjectValue): ObjectValue[] {
  * @param session - One row from the host session list.
  * @param signal - Cancels paging without cancelling any agent work.
  * @param onPage - Counts each history request, so a scan can report how much it re-read.
+ * @param onRecords - Hands each page's raw records to the caller, which owns any further reading of
+ *   them; the billing fold itself keeps only the minimal events below.
  * @returns Opening cursor and the minimal billing events behind it.
  */
-export async function sessionCostHistory(client: Client, session: ObjectValue, signal: AbortSignal, onPage?: () => void): Promise<{ cursor: number; events: ObjectValue[] }> {
+export async function sessionCostHistory(client: Client, session: ObjectValue, signal: AbortSignal, onPage?: () => void,
+  onRecords?: (records: readonly Json[]) => void): Promise<{ cursor: number; events: ObjectValue[] }> {
   let lastError: unknown;
   for (const address of costAddresses(session)) {
-    try { return await readCostHistory(client, address, signal, onPage); }
+    try { return await readCostHistory(client, address, signal, onPage, onRecords); }
     catch (error) {
       lastError = error;
       // Only a delivery-mode mismatch justifies the other form; every other failure is final here.
@@ -41,7 +44,8 @@ export async function sessionCostHistory(client: Client, session: ObjectValue, s
 }
 
 /** Page one addressed session's history into the billing events the ledger folds. */
-async function readCostHistory(client: Client, address: ObjectValue, signal: AbortSignal, onPage?: () => void): Promise<{ cursor: number; events: ObjectValue[] }> {
+async function readCostHistory(client: Client, address: ObjectValue, signal: AbortSignal, onPage?: () => void,
+  onRecords?: (records: readonly Json[]) => void): Promise<{ cursor: number; events: ObjectValue[] }> {
   onPage?.();
   const snapshot = await new Promise<ObjectValue>((resolve, reject) => {
     let sub: Subscription | undefined;
@@ -63,6 +67,7 @@ async function readCostHistory(client: Client, address: ObjectValue, signal: Abo
   while (true) {
     signal.throwIfAborted();
     const records = array(page.records);
+    onRecords?.(records);
     events.push(...costRecords(records));
     if (!page.hasMore) break;
     const seqs = records.map(r => object(object(r).event).seq);

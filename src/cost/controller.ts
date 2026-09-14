@@ -1,6 +1,6 @@
 /** Periodic billing scans; the ledger outlives any single connection generation. */
 import type { Client } from '../transport/client.ts';
-import { array, errorText, object, string } from '../transport/wire.ts';
+import { array, errorText, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { CostLedger } from './ledger.ts';
 import { sessionCostHistory } from './scanner.ts';
 
@@ -14,6 +14,10 @@ export interface CostHost {
   signal(): AbortSignal;
   /** Re-publish controller state after the ledger changes. */
   publish(): void;
+  /** Hand one already-read history page to another consumer, which owns what it does with it. */
+  scanPage?(sessionId: string, records: readonly Json[]): void;
+  /** Report that a session's history was read to its beginning. */
+  scanDone?(sessionId: string): void;
 }
 
 /** Refresh interval for the background cost scan. */
@@ -80,7 +84,9 @@ export class CostController {
           const sessionId = string(session.sessionId);
           if (!session.running && typeof session.updatedAt === 'number' && this.updates.get(sessionId) === session.updatedAt) continue;
           try {
-            const history = await sessionCostHistory(client, session, combined, () => { pages++; });
+            const history = await sessionCostHistory(client, session, combined, () => { pages++; },
+              records => this.host.scanPage?.(sessionId, records));
+            this.host.scanDone?.(sessionId);
             scanned++; events += history.events.length;
             await ledger.replace(sessionId, history.cursor, history.events);
             if (!session.running && typeof session.updatedAt === 'number') this.updates.set(sessionId, session.updatedAt);

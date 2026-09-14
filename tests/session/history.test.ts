@@ -30,7 +30,7 @@ test('workspace search preserves global truncation and validates host responses'
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   t.after(() => controller.stop()); controller.start();
-  await until(() => controller.state.transcript.ready);
+  await until(() => controller.record.ready);
   fixture.searchResult = { items: [{ sessionId: 's1', snippet: 'one' }, { sessionId: 's2', snippet: 'two' }], hasMore: true };
   const signal = new AbortController().signal;
   assert.deepEqual(await controller.searchSessions('one', true, signal), { items: [{ sessionId: 's1', snippet: 'one' }], hasMore: true });
@@ -47,7 +47,7 @@ test('paging stops on an unadvancing host page and respects cancellation', async
   fixture.onPage = async () => ({ records: [], hasMore: true });
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   t.after(() => controller.stop()); controller.start();
-  await until(() => controller.state.transcript.ready);
+  await until(() => controller.record.ready);
   await assert.rejects(controller.historyThrough('first', new AbortController().signal), /did not advance/);
   const abort = new AbortController(); abort.abort();
   await assert.rejects(controller.historyThrough('first', abort.signal), { name: 'AbortError' });

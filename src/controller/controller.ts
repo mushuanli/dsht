@@ -11,11 +11,14 @@ import type { Telemetry } from '../session/telemetry.ts';
 import type { Transcript } from '../session/transcript.ts';
 import type { CostLedger } from '../cost/ledger.ts';
 import { CostController } from '../cost/controller.ts';
+import { costText } from '../cost/ledger.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
 import { MemoryLog } from './memory-log.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import type { HistorySearch, RemovalTarget } from '../session/types.ts';
+import type { ComposerState, InteractionState, ModelState, OptionState, PanelState, ReferenceState, ViewState } from '../session/info.ts';
+import type { Reasoning } from '../session/history.ts';
 
 /** Application facade over the domain controllers; the UI owns only this object.
  *
@@ -51,6 +54,10 @@ export class Controller implements ControllerStore, ConnectionListener {
       online: () => this.state.online,
       signal: () => this.connection.signal(),
       publish: () => this.update({}),
+      // The scan already reads every session's whole history; handing its pages to the session
+      // domain lets the prompt cache pick them up, so one open does not pay for a second walk.
+      scanPage: (sessionId, records) => this.session.rememberScanPage(sessionId, records),
+      scanDone: sessionId => this.session.rememberScanDone(sessionId),
     });
     if (memoryLogPath !== undefined) this.memoryLog = new MemoryLog(memoryLogPath, () => this.memorySample());
   }
@@ -66,6 +73,9 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** Current projection store; replaced at each connection generation. */
   get telemetry(): Telemetry { return this.connection.telemetry; }
+
+  /** Record of the selected session; the one strong owner lives in `State.session`. */
+  get record(): Transcript { return this.state.session.record; }
 
   /** @returns The current selector generation. */
   selection(): number { return this.selector; }
@@ -131,7 +141,7 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private memorySample(): ObjectValue {
     const memory = process.memoryUsage();
-    const transcript = this.state.transcript;
+    const transcript = this.state.session.record;
     const ledger = this.costs?.summary();
     const layout = layoutStats(transcript);
     const markdown = markdownCacheStats();
@@ -264,10 +274,147 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   interrupt(force = false): Promise<boolean> { return this.session.interrupt(force); }
 
+  /** One-line estimate of the selected session's cost, or `?` while the ledger has no entry for it. */
+  get sessionCostText(): string {
+    const sessionId = this.state.sessionId;
+    return this.costs?.hasSession(sessionId) ? costText(this.costs.total(sessionId)) : '?';
+  }
+
   /** Keep history stable while the user reads, searches, or expands it.
    * @param pinned - Whether the main transcript is being read away from its tail.
    */
   pinHistory(pinned: boolean): void { this.session.pinHistory(pinned); }
+
+  /** Recall one step through the selected session's prompt index; never touches the network.
+   * @param direction - Negative for older input, positive for newer input.
+   * @param current - Composer content before recall began, restored at the newest position.
+   * @returns The recalled prompt, or the unsent draft.
+   */
+  recall(direction: -1 | 1, current: string): string { return this.session.recall(direction, current); }
+
+  /** Remember a locally submitted command, which never becomes a durable session record.
+   * @param value - Submitted command text.
+   */
+  recordRecall(value: string): void { this.session.recordRecall(value); }
+
+  /** Leave recall navigation because the composer was edited or replaced. */
+  resetRecall(): void { this.session.resetRecall(); }
+
+  /** Whether recall is parked on the oldest prompt the session retains. */
+  get recallAtOldest(): boolean { return this.session.recallAtOldest; }
+
+  /** How many prompts the selected session retains for recall. */
+  get recallLength(): number { return this.session.recallLength; }
+
+  /** Whether an older prompt is reachable, in the loaded window or on the host. */
+  get recallHasOlder(): boolean { return this.session.recallHasOlder; }
+
+  /** Recover older prompts from the loaded window before spending a page request.
+   * @returns Whether any older prompt was recovered.
+   */
+  refillRecall(): boolean { return this.session.refillRecall(); }
+
+  /** Composer draft, caret and parked draft of the selected session. */
+  get composer(): ComposerState { return this.session.composer; }
+
+  /** Replace the composer text and caret.
+   * @param draft - New text.
+   * @param cursor - Caret column; defaults to the end of the text.
+   */
+  setComposer(draft: string, cursor?: number): void { this.session.setComposer(draft, cursor); }
+
+  /** Move the caret without changing the text.
+   * @param cursor - Caret column.
+   */
+  setComposerCursor(cursor: number): void { this.session.setComposerCursor(cursor); }
+
+  /** Move a non-empty draft aside while a dialog owns the keyboard. */
+  parkComposer(): void { this.session.parkComposer(); }
+
+  /** Give a parked draft back once no dialog needs the keyboard. */
+  restoreComposer(): void { this.session.restoreComposer(); }
+
+  /** How the selected session's record is being read right now. */
+  get view(): ViewState { return this.session.view; }
+
+  /** Show a detached history window, releasing the one it replaces.
+   * @param window - Record to display, or undefined to return to the live transcript.
+   */
+  setViewWindow(window?: Transcript): void { this.session.setViewWindow(window); }
+
+  /** Move the reader's position inside the displayed record.
+   * @param scroll - Rows scrolled back from the live end.
+   */
+  setScroll(scroll: number): void { this.session.setScroll(scroll); }
+
+  /** Replace the set of expanded reasoning blocks.
+   * @param folds - Sequences to expand beyond the default fold.
+   */
+  setFolds(folds: ReadonlySet<number>): void { this.session.setFolds(folds); }
+
+  /** Set the fold mode of the live attempt's completed reasoning.
+   * @param reasoning - `row` to fold, `full` to keep the streamed text.
+   */
+  setLiveReasoning(reasoning: Reasoning): void { this.session.setLiveReasoning(reasoning); }
+
+  /** Local answer state for the selected session's pending waterfalls. */
+  get interaction(): InteractionState { return this.session.interaction; }
+
+  /** Replace the partly collected answers, keyed by waterfall event id.
+   * @param answers - Answers collected so far, by event id.
+   */
+  setAnswers(answers: Record<string, ObjectValue[]>): void { this.session.setAnswers(answers); }
+
+  /** Replace the pending question's option keyboard state.
+   * @param option - Highlighted option, toggled labels and free-text mode; undefined clears it.
+   */
+  setOption(option?: OptionState): void { this.session.setOption(option); }
+
+  /** Replace the pending approval's selected row.
+   * @param approval - Selected approval row; undefined clears the highlight.
+   */
+  setApproval(approval?: InteractionState['approval']): void { this.session.setApproval(approval); }
+
+  /** Composer-adjacent `@` reference menu state. */
+  get reference(): ReferenceState { return this.session.reference; }
+
+  /** Highlight one row of the open reference menu.
+   * @param index - Row index into the current matches.
+   */
+  setReferenceIndex(index: number): void { this.session.setReferenceIndex(index); }
+
+  /** Remember the draft that dismissed the reference menu.
+   * @param draft - Composer text at dismissal, or undefined to allow the menu again.
+   */
+  setReferenceDismissed(draft?: string): void { this.session.setReferenceDismissed(draft); }
+
+  /** Panels the selected session has open. */
+  get panels(): PanelState { return this.session.panels; }
+
+  /** Show or hide the reasoning panel.
+   * @param open - Whether `/think` is open.
+   */
+  openThoughts(open: boolean): void { this.session.openThoughts(open); }
+
+  /** Show or hide the pending-input panel.
+   * @param open - Whether `/queue` is open.
+   */
+  openQueue(open: boolean): void { this.session.openQueue(open); }
+
+  /** Show the model dialog at one step, or close it.
+   * @param model - Catalog plus the provider or model being inspected; undefined closes the dialog.
+   */
+  setModelPanel(model?: ModelState): void { this.session.setModelPanel(model); }
+
+  /** Show the history or content-search dialog, or close it.
+   * @param history - Query, content-search mode and matches; undefined closes the dialog.
+   */
+  setHistoryPanel(history?: PanelState['history']): void { this.session.setHistoryPanel(history); }
+
+  /** Show the host session-search results, or close them.
+   * @param search - Query, results and truncation flag; undefined closes the dialog.
+   */
+  setSearchPanel(search?: PanelState['search']): void { this.session.setSearchPanel(search); }
 
   /** Refresh all HTTP-visible sessions without changing the selected conversation.
    * @param signal - Optional cancellation for an explicit /cost refresh.

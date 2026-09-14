@@ -176,12 +176,12 @@ C4Component
   Component(root, "共享契约", "src/state.ts", "State 与 ControllerStore")
   Component(storage, "storage/", "4 文件 177 行", "全部文件系统操作：私有读写、原子替换、独占创建、流式写入与堆快照")
   Component(transport, "transport/", "5 文件 359 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
-  Component(session, "session/", "14 文件 2082 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
-  Component(cost, "cost/", "8 文件 638 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
+  Component(session, "session/", "15 文件 3149 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
+  Component(cost, "cost/", "9 文件 853 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "4 文件 659 行", "Controller 门面、ConnectionController 与内存日志")
-  Component(ui, "ui/", "18 文件 1531 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
-  Component(cli, "cli/", "1 文件 111 行", "参数、目录准备与进程生命周期")
+  Component(controller, "controller/", "5 文件 947 行", "Controller 门面、ConnectionController 与内存日志")
+  Component(ui, "ui/", "18 文件 2228 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
+  Component(cli, "cli/", "2 文件 126 行", "参数、目录准备与进程生命周期")
 
   Rel(root, transport, "被依赖")
   Rel(storage, transport, "被依赖")
@@ -242,6 +242,7 @@ C4Component
 | Controller 是门面 | 门面只负责状态发布、选择器世代与生命周期，实现分布在四个域控制器 | 防止再次长出 God Object，同时保留 UI 与测试沿用的公开 API |
 | 目录即边界 | 每个业务域一个目录，跨域导入走 `index.ts` | 目录表达架构，依赖方向可被机械检查 |
 | 公开 API 与布局解耦 | `src/index.ts` 是唯一库门面，`exports` 指向编译产物 | 内部目录调整不改变 `@itookit/dsht` 的导入路径 |
+| 提示词索引可重载 | 回填由会话级 `PromptIndex` 承担；预算淘汰最旧条目，被淘汰者由已加载窗口回填或由宿主分页取回 | 淘汰只约束内存、不决定可达性；把"会话数据"与"输入编辑状态"合进同一个有界缓冲，会在提交时丢掉仍在该窗口内的提示词 |
 
 ## 3. 接口
 
@@ -634,9 +635,9 @@ function fileReferences(value: unknown): FileReference[]
 // export.ts
 function saveSessionLog(client, sessionId, destination, signal): Promise<string>
 
-// input.tsx / input-history.ts / mouse.ts / history.ts / app.tsx
+// input.tsx / mouse.ts / history.ts / app.tsx / info.ts
 function editInput(state: EditState, input: string, key: Partial<Key>): EditState
-class InputHistory { record(value); reset(); prepend(values); move(direction, current) }
+class PromptIndex { append(values); record(value); prepend(values); move(direction, current); reset() }
 function isMouseReport(raw: string): boolean
 function wheelDirection(raw: string): number
 function useMouseWheel(scroll, enabled?, select?): void
@@ -856,7 +857,7 @@ C4Dynamic
 
 输入框的多行几何：composer 是"绝不吞掉对话区"的一段固定预算，而不是随内容增长的区域。`app.tsx` 由终端行数算出 body 高度（扣除根框、页眉、状态栏与一行瞬时提示），内容窗口取 `clamp(floor(body/3), 2, 5)` 再受 `body - 7` 约束，剩余行永远留给对话；列数不参与高度计算，因此横屏或宽终端只减少折行。输入内容本身保留用户粘贴的换行与制表符：`editInput` 只把 `CRLF`/`CR` 归一为 `LF` 并剥离其他控制字符，制表符在**显示**时按制表位展开、发送时保持原字节。显示行、光标行与折叠块都由 `src/ui/input/viewport.ts` 在每次渲染时从文本推导，不保存 span，因此任何编辑都无需重定位区间——这与"投影与渲染分离"的既有决策一致。多行草稿的**未折叠**视觉行数超过窗口时，仅折叠中间行（`[N lines · X KB]`），首行与末行保持可见，光标所在行因此始终可见；判定读取未折叠高度，折叠不会反过来触发自身。折叠区间对编辑是一个对象：`←`/`→` 一次跨越，区间两端的 Backspace/Delete 一次删除整块，而 Ctrl+K/Ctrl+U 等显式剪除仍按字符工作（区间随后重新推导）。一期不检测粘贴来源、不引入 bracketed paste，也不新增任何按键；↑/↓ 仍归历史回填。
 
-输入回填的覆盖范围：种子只来自本客户端已加载的 `user/message`，所以窗口里最旧的那条只是会话碰巧打开的位置，不是会话的开头。`↑`/`Ctrl+P` 停在最旧一条（或回填为空）时，`app.tsx` 用读者滚动历史时的同一套分页（`SessionController.older`）取回窗口之前的一页：以加载前的 `beforeSeq` 为界，只把严格更早的 User 消息 `prepend` 进 `InputHistory`，再补上被这次加载顶住的那一步，因此按键语义仍是"退一条"。整页没有 User 消息时在同一次有界循环里继续向前翻（每次最多 5 页，`historyPaging` 保证同时只有一次请求在飞），不会因为一页只有工具调用而卡住；`controller.perform` 期间输入框失焦，重复按键不会排队。翻到的页照旧进入实时 transcript，所以回填读过的内容也能在输入框上方滚到，历史回收在读者回到实时末端时恢复。预算是分裂的：`record` 仍用 200 条 / 256 KiB 约束种子与提交，`prepend` 刻意不淘汰——向更早处读是用户的显式请求，而下一次提交会把缓冲重新收敛回预算。
+输入回填的覆盖范围：回填由会话级的 `PromptIndex`（`src/session/info.ts`）承担，由 `SessionController` 持有，随 `selectSession` 创建、随 `releaseTranscript` 重置。它在每次 `session/follow` 帧后增量折叠：`Transcript.promptsSince(through)` 只按序号读出比上次折进更新的原始记录并抽取 User 消息，既不重建行投影也不看窗口大小；开屏快照只覆盖最新的一小段，因此 `selectSession` 随后启动**后台回填**（`backfillPrompts`），把窗口之前的 `session/page` 逐页读进临时 `Transcript`、只提取提示词并 `prepend`，走到宿主报告没有更早记录为止（上限 200 页，切换会话即取消，且只保留提示词，所以实时记录、它的内存窗口与行缓存都不增长）。回填完成后 `markComplete()` 让索引知道自己已穷尽，此后边界按键不再发起无谓的翻页；被 200 页上限截断时会话仍可按需惰性补页。于是索引里是**会话开始至今的全部 user prompt**（连续重复合并、超大输入跳过，超出 2,000 条 / 512 KiB 的最旧一段仍可按需取回），而不是某次加载恰好覆盖的窗口；本地提交的 slash 命令不会成为持久记录，因此单独记入同一索引并标记为非持久，持久回声到达时把那一条升级为带序号而不是插入第二份。预算（默认 2,000 条 / 512 KiB）只约束内存、不决定可达性：`↑`/`Ctrl+P` 停在索引最旧一条（或索引为空）时，先由 `refillRecall()` 用读者滚动历史时的**同一份已加载窗口**补回被淘汰的提示词（`Transcript.promptsBefore`），这一步不发请求、不失焦、不显示加载提示；只有窗口本身也用尽时才走 `SessionController.older` 取回窗口之前的一页，整页没有 User 消息时在同一次有界循环里继续向前翻（每次最多 5 页，`historyPaging` 保证同时只有一次请求在飞），不会因为一页只有工具调用而卡住；`controller.perform` 期间输入框失焦，重复按键不会排队。翻到的页照旧进入实时 transcript，所以回填读过的内容也能在输入框上方滚到，历史回收在读者回到实时末端时恢复。被淘汰的条目要么仍在窗口内（回填补回）、要么在窗口之前（分页取回），所以"淘汰线"与"翻页边界"不再互相错位；`InputHistory` 时代的缺口（见 5.7.2）由此消除。
 
 ```mermaid
 sequenceDiagram
@@ -930,6 +931,8 @@ C4Dynamic
 
 触发时机：每个连接世代建立后、每 60 秒、回合结束（`api-session/status` 变为 false）时，以及打开 `/cost` 时。每个新世代先丢弃跳过表并完整重读一次全部会话：客户端不在时宿主仍在工作，任何缓存或上一次的更新时间都不能代替这次读取。`CostController` 用自身的任务句柄合并并发调用，`/cost` 的 `AbortSignal` 会传播到正在进行的扫描；单个会话失败只累加到一个失败列表，不影响其他会话。每次扫描都重新读取整段历史并为每个样本调用 `chargeFor`：账本只保留汇总，任何样本都不带上次的决定。
 
+扫描同时是提示词的搬运工：`sessionCostHistory` 把每页原始记录交给可选的 `onRecords` 回调，门面把它接到 `SessionController.rememberScanPage`，该会话的提示词因此进入进程级 `PromptCache`，扫描结束再以 `rememberScanDone` 标记完整。计费本身仍只折叠最小事件，"对话正文不进入账本"的边界不变；被搬运的只是同一次读取已经拿在手上的页。
+
 子代理处理：`costAddresses` 为 `origin === 'subagent'` 且带 `parentSessionId` 的行生成两种地址，先 `continuable` 后 `one-shot`，且仅当错误码为 `subagent/unauthorized` 时才重试第二种。`header.isSeeded === true` 的会话必须包含 `session/end-seed` 且 `inherited === true`，否则拒绝归属其继承用量。
 
 ### 4.6 断线重连与退出
@@ -994,7 +997,7 @@ C4Component
     Component(lay, "LayoutIndex", "内存 WeakMap", "行缓存与序号偏移索引")
     Component(tel, "Telemetry", "内存", "投影值、排队输入与任务计数")
     Component(led, "CostLedger", "内存镜像", "会话汇总与合计缓存")
-    Component(ih, "InputHistory", "内存", "进程内输入回填")
+    Component(ih, "PromptIndex", "内存", "会话提示词索引与回填游标")
     Component(cl, "Client", "内存", "Cookie 副本、archivedSessionIds 与在册订阅")
     Component(exp, "export.saveSessionLog", "TypeScript", "独占创建并流式写入归档")
   }
@@ -1022,7 +1025,7 @@ C4Component
 | --- | --- | --- | --- |
 | 宿主持久层 | 会话事件日志、工作区注册表、设置、凭据、投影 | 是 | 宿主；`dsht` 只经协议访问 |
 | 客户端磁盘 | 认证 Cookie、`prices.json`、成本 cut 文件、导出 ZIP | 是 | `dsht`（ZIP 为用户文件） |
-| 客户端内存 | `State`、`Transcript`、`LayoutIndex`、`Telemetry`、`CostLedger` 镜像、`InputHistory` | 否，可重载 | 宿主基线 + 本地视图状态 |
+| 客户端内存 | `State`、`Transcript`、`LayoutIndex`、`Telemetry`、`CostLedger` 镜像、`PromptIndex`、`PromptCache` | 否，可重载 | 宿主基线 + 本地视图状态 |
 | 终端状态 | SGR 鼠标上报开关、Ink 渲染生命周期 | 否 | 终端；挂载启用、退出恢复 |
 
 ### 5.2 本地磁盘文件
@@ -1114,7 +1117,12 @@ C4Component
 | 待答交互 | `interactions` | `state.pending`（每次 `update` 由映射推导） | `$events` 的 `waterfall` / `cancel` | 显式应答、宿主取消或连接结束 |
 | 工作区、会话列表与归档集 | `State.workspaces/sessions`、`Client.archivedSessionIds` | `visibleSessions`、选择器 | `showPicker`、`listWorkspaces`、`listSessions` | 每次打开选择器或重连刷新 |
 | 模型目录与 preset 名单 | `State.defaultModel/presets` | `/model`、状态栏、模式标签 | `refreshCatalog`、`loadPresetNames` | 世代与 `catalogRevision` 守卫 |
-| 输入回填 | `InputHistory` | `move()` | `record()`、会话加载时种子、到边界时 `prepend()` | `record` 按 200 条 / 256 KiB 淘汰；切换会话重建；`prepend` 的旧条目留到下次提交 |
+| 会话提示词索引与回填游标 | `PromptIndex`（`session/info.ts`） | `recall()`、`refillRecall()`、`length`／`atOldest` | `session/follow` 帧的增量折叠、`adoptCachedPrompts`／`backfillPrompts` 的播种与回填、本地提交的 `record()`、边界处的 `prepend()` | `trim()` 按 2,000 条 / 512 KiB 淘汰最旧条目并置 `trimmed`（此后不再声称穷尽）；切换会话重置并取消回填 |
+| 跨会话提示词缓存 | `PromptCache`（`session/info.ts`） | `adoptCachedPrompts` | 计费扫描的 `rememberScanPage`／`rememberScanDone`、回填完成时的 `put()` | 按字节 LRU 淘汰最久未用的会话，至少保留一个条目；只接受 `complete` 条目 |
+| 会话草稿、光标与寄存草稿 | `SessionInfo.composer`（`session/info.ts`） | composer、`recall()` | `setComposer`／`setComposerCursor`／`parkComposer`／`restoreComposer` | `releaseTranscript()` 随会话重置；`setComposer` 只在真正变化时发布 |
+| 阅读视图（窗口、滚动、折叠、阅读保护） | `SessionInfo.view`（`session/info.ts`） | `historyLayout`、视口、`/think` | `setViewWindow`／`setScroll`／`setFolds`／`setLiveReasoning`／`pinHistory` | `closeWindow()` 与 `releaseTranscript()` 释放独立窗口；行缓存仍是 `WeakMap` |
+| 待答作答与 `@` 菜单选择 | `SessionInfo.interaction`／`SessionInfo.reference`（`session/info.ts`） | 提问／审批对话框、`ReferenceMenu` | `setAnswers`／`setOption`／`setApproval`／`setReferenceIndex`／`setReferenceDismissed` | `releaseTranscript()` 随会话重置；`lookup` 不进状态，按 draft 现算 |
+| 会话面板可见性与查询 | `SessionInfo.panels`（`session/info.ts`） | `/think`、`/queue`、`/model`、`/history`、`/search` 面板 | `openThoughts`／`openQueue`／`setModelPanel`／`setHistoryPanel`／`setSearchPanel` | `releaseTranscript()` 随会话重置；面板行光标仍在 `Picker` 内 |
 | Cookie 与在册订阅 | `Client.cookie/expiresAt/listeners` | `call`、`subscribe` | `restoreCookie`、`authenticate`、`subscribe` | `close()` 结束全部订阅 |
 | 成本汇总镜像与合计 | `CostLedger.sessions/totals` | `total`、`today`、`hasSession`、`missing` | `load`、`replace` | `replace` 清空合计缓存 |
 
@@ -1154,7 +1162,11 @@ C4Component
 | 归档集合 | 内存 `archivedSessionIds` | `visibleSessions` 过滤 | `listWorkspaces`、`removeTarget` | 归档后从列表隐藏、`/resume ID` 重开 | `workspace/follow` baseline、`workspace/archiveSession` |
 | 模型目录 | 内存 `State.defaultModel` | `/model` 选择器、状态栏、`modelCatalog()` | `refreshCatalog` | `/model`、模型与档位显示 | `session/modelCatalog`、`session/selectModel` |
 | Preset 名单 | 内存 `State.presets` | `sessionMode` | `loadPresetNames` | 标题栏模式标签、`/status` | `agentPresets/list` |
-| 输入回填 | 内存 `InputHistory` | `move()` | `record()`、会话种子、边界处的 `prepend()` | ↑/↓、Ctrl+P/N 回填 | `session/page`（种子取自已加载 `user/message`，到边界时向前翻页） |
+| 会话提示词索引 | 内存 `PromptIndex`（`session/info.ts`） | `recall()`、`refillRecall()` | `session/follow` 增量折叠、缓存播种或整段回填、本地提交 `record()` | ↑/↓、Ctrl+P/N 回填 | 打开会话优先读 `PromptCache`（计费扫描已读过的页面）；未命中才按页读取整段历史 |
+| 会话草稿与光标 | 内存 `SessionInfo.composer`（`session/info.ts`） | composer、回填与提交 | `setComposer`、`parkComposer`、`restoreComposer` | 输入、回填、切会话清空 | 无（纯本地） |
+| 阅读视图 | 内存 `SessionInfo.view`（`session/info.ts`） | `historyLayout`、视口、`/think`、`/older` | `setScroll`、`setViewWindow`、`setFolds`、`pinHistory` | 滚动、跳转历史、展开推理 | 无（纯本地；独立窗口由宿主分页填充） |
+| 待答作答与选择 | 内存 `SessionInfo.interaction`／`reference`（`session/info.ts`） | 提问／审批对话框、`ReferenceMenu` | `setAnswers`、`setOption`、`setApproval`、`setReferenceIndex` | 作答、选项与 `@` 菜单导航 | `$events/result`（提交作答） |
+| 会话面板 | 内存 `SessionInfo.panels`（`session/info.ts`） | `/think`、`/queue`、`/model`、`/history`、`/search` | `openThoughts`、`openQueue`、`setModelPanel`、`setHistoryPanel` | 打开／关闭各面板 | 打开即触发对应读取（`session/page`、`session/modelCatalog` 等） |
 | 导出归档 | 磁盘 ZIP | — | `saveSessionLog` | `/export` | `GET /api/session.export` |
 | 终端鼠标标志 | 终端 | — | `useMouseWheel` | 滚轮滚动、左键复制、原生选区 | 无 |
 
@@ -1165,6 +1177,174 @@ C4Component
 - **落盘内容限制**：Cookie、价格、成本汇总与内存日志之外不写任何内容；内存日志只有计数与大小，不含提示词、工具或会话正文。成本汇总只包含会话 ID、金额与计数、当天分桶、cut、规则版本、价目表摘要与未计价原因；提示词、工具正文、回答文本、凭据与 Cookie 值都不进入成本文件。取消或失败的导出会删除不完整 ZIP。
 - **一致性**：认证 Cookie 与成本汇总文件都以“临时文件 + `rename`”原子替换；`prices.json` 只在首次启动以 `wx` 创建，之后由用户维护。成本文件内容携带 opening cursor 与规则版本，使并发或陈旧的扫描无法顶替更新的结果。
 - **重建代价**：内存数据可随时由宿主重建，但重建需要重新订阅 `session/follow`（新鲜快照）与重新扫描成本历史；重启后第一次成本扫描会重新读取每个会话并按当前价目表重新折叠，因此账本文件本身也可以在任何时候删除并重建。
+
+### 5.7 会话状态容器 `SessionInfo` 与提示词索引（第一阶段已实现）
+
+本节的**全部字段**都已落地：`src/session/info.ts` 的 `SessionInfo` 由 `SessionController` 持有，并作为 `State.session` 暴露——`PromptIndex` 承担"会话开始至今的全部 user prompt"与回填游标（机制见 4.3，缺陷分析见 5.7.2），`composer` 承担草稿、光标与对话框寄存的草稿（切换会话即清空），`view` 承担显示哪份记录、滚到哪里、哪些块展开以及阅读保护（独立历史窗口由 `closeWindow()` 释放，因此切会话不会泄漏），`interaction` 承担待答交互的本地作答与选择，`reference` 承担 `@` 菜单的高亮与抑制，`record` 则是记录的唯一强引用（切换会话时 `reset()` 释放旧记录并新建一份），`panels` 承担面板可见性与查询文本（行数据仍来自记录）。`State.transcript` 已整体移除，`ui/app.tsx` 里 §5.7.1 列出的会话级 `useState` 全部消失；`SessionController` 现在是这些状态的唯一写者。
+
+#### 5.7.1 问题：会话级状态没有单一容器
+
+按会话生命周期创建与释放的容器原本只有 `Transcript`（`selectSession` 新建，`releaseTranscript` 释放，见 4.2／5.6）；本阶段把它连同提示词索引、输入框、阅读视图与交互状态一起收进了 `State.session`（`SessionInfo`，见 5.7.3），记录本身现在是 `SessionInfo.record`。下表记录仍然散落在 `ui/app.tsx`、靠零散 `useEffect` 重置的会话级面板可见性：
+
+| 组 | 现状持有者（`ui/app.tsx`） | 重置方式 |
+| --- | --- | --- |
+| 草稿与光标 | 已迁入 `SessionInfo.composer`（见 5.7.3），不再是 `ui/app.tsx` 的 `useState` | `releaseTranscript()` 随会话重置 |
+| 回填 | 已迁入 `PromptIndex`（见 4.3）；App 只剩 `historyPaging` 在途标记 | —— |
+| 视口 | 已迁入 `SessionInfo.view.scroll`（见 5.7.3）；App 只剩 `scrollIntent`／`previousView` 等派生引用 | —— |
+| 历史窗口与搜索 | `historyWindow` 已迁入 `SessionInfo.view.window` 并由 `closeWindow()` 释放；`historyLoading`／`historyMatches`／`historyQuery`／`contentSearch`／`searchResults`／`historyAbort` 仍是 App 级 | `transcript` 变化清选中与命中 |
+| 展开与思考 | 折叠与实时折叠模式已迁入 `SessionInfo.view`；`thoughtList` 仍是 App 级面板开关 | 会话切换重置折叠；实时尝试变化重置 live 模式 |
+| 待答作答 | 已迁入 `SessionInfo.interaction`（`answers`／`option`／`approval`）；`SessionController.interactions`（宿主 waterfall）仍按连接世代保留 | `releaseTranscript()` 随会话重置 |
+| 引用菜单 | `referenceIndex`／`dismissedReference` 已迁入 `SessionInfo.reference`；`lookup` 仍按 draft 现算 | 会话切换重置 |
+| 队列面板 | 已迁入 `SessionInfo.panels.queue`；待答事件出现时仍会关闭 | —— |
+| 会话级面板 | 已迁入 `SessionInfo.panels`（见 5.7.3） | `releaseTranscript()` 随会话重置 |
+| 列表光标（对话框内） | `Picker` 组件自身的 `selected`、`rawKey` | 由 `key={identity}` 在列表身份变化时重置，不在 App 状态里 |
+
+两类后果已经可观察。一是**草稿跨会话**：没有任何 effect 在 `state.sessionId` 变化时清空 `input`，因此为 A 会话写了一半的提示词会留在 B 会话的输入框里。二是**回填的完整性**依赖种子、翻页与淘汰三者的偶然一致，而 `record` 的 200 条上限与翻页 floor（`beforeSeq`）并不一致，见 5.7.2。
+
+#### 5.7.2 回填完整性的确证缺陷
+
+旧 `InputHistory` 同时承担三件事：最近的提交、会话种子、边界翻页的容器，而预算只有一份——`record` 按 200 条 / 256 KiB 从最旧端淘汰，`prepend` 刻意不淘汰（该实现已移除；新机制见 4.3）。翻页以加载前的 `beforeSeq` 为界，只 `prepend` 严格更早的 `user/message`。
+
+由此存在一个可复现的缺口：读者一路 `↑` 向早处翻页（`prepend` 把缓冲撑到超过 200 条），随后提交一条新输入 → `record` 把最旧的若干条淘汰；这些条目此刻**已经位于 transcript 窗口之内**（`seq ≥ beforeSeq`），而翻页只取 `seq < beforeSeq`，于是它们再也无法由 `↑` 到达，只能靠滚动或 `/history` 阅读。它们正是"覆盖客户端连接之前的提示词"这一目标的核心场景。
+
+结论：这不是可以局部修补的边界 bug，而是把**会话数据**与**输入编辑状态**放进同一个有界缓冲的结构性后果。
+
+**修复**：`PromptIndex` 让每条提示词携带来源序号，预算淘汰最旧的一段后，`refillRecall()` 先用已加载窗口把这段补回，窗口也用尽才分页；于是淘汰只影响内存、不影响可达性，5.7.4 的语义由此成立。
+
+这段缺口也解释了 `feature/2026-09-12-terminal-recall-full-history` 为何把它当成已解决：该 note 的 Alternatives 拒绝了"开始时加载整个会话"（理由是破坏内存窗口）与"让 `prepend` 淘汰"（理由是丢掉刚读到的条目），但两条推理都没有覆盖第三种情形——**淘汰由下一次 `record` 触发，而被淘汰者已在窗口内**。5.7.4 的 `prompts` 不持有整段会话、只持有提示词，因此并不违反该 note 针对"整段加载"的记忆预算结论，而是修正它未覆盖的那条路径。
+
+#### 5.7.3 `SessionInfo`：会话客户端状态与记录引用
+
+新模块 `session/info.ts`，经 `session/index.ts` 导出；依赖方向仍为 `ui → session`，不新增跨域导入。
+
+```ts
+export interface PromptRecord { seq: number; text: string }
+export interface PromptEntry extends PromptRecord { durable: boolean }
+export interface ModelState { catalog: ObjectValue; provider?: string; model?: ObjectValue }
+
+/** 一个被选中会话的客户端状态；与它持有的记录同寿命创建与释放。 */
+export interface SessionInfo {
+  readonly sessionId: string;
+  /** 会话记录引用：`record` 持有 `Transcript` 本身，不复制它的任何字段。 */
+  record: Transcript;
+  /** 会话开始至今的提示词索引与回填游标（已实现，`session/info.ts`）。 */
+  prompts: PromptIndex;
+  composer: { draft: string; cursor: number; parked: string };   // 已实现；切换会话即清空
+  /** 渲染窗口：显示哪份记录、滚到哪里、哪些块被手动展开（已实现）。
+   *  流式思考"正在输出时展开"是派生行为（`historyLayout` 按 `part.closed` 与宽度决定），不占状态。 */
+  view: {
+    window?: Transcript;              // 跳转历史时打开的独立记录（强引用，由 closeWindow 释放）；否则显示 `record`
+    scroll: number;
+    pinned: boolean;                  // 阅读保护：暂停实时窗口回收，直到回到尾部或 /latest
+    folds: ReadonlySet<number>;       // 按消息序号手动展开的推理（`/think SEQ` 与跳转）
+    liveReasoning: Reasoning;         // 已完成实时块的折叠模式（`/think live`）
+  };
+  /** 会话级面板的可见性与查询数据（已实现）；行数据仍来自记录，行光标留在 `Picker` 里。 */
+  panels: {
+    thoughts: boolean;
+    queue: boolean;
+    model?: ModelState;
+    history?: { query: string; contentSearch: boolean; matches?: HistorySearch };
+    search?: { query: string; items: ObjectValue[]; hasMore: boolean };
+  };
+  /** 待答交互的本地作答与选择（已实现；宿主 waterfall 本体不在这里，见 5.7.6）。 */
+  answers: Record<string, ObjectValue[]>;
+  option?: { key: string; cursor: number; selected: string[]; custom: boolean };
+  approval?: { eventId: string; index: number };
+  /** `@` 引用菜单的高亮行与被抑制的草稿（已实现）。 */
+  reference: { index: number; dismissed?: string };
+}
+```
+
+归属与不变量：
+
+- 由 `SessionController` 持有，在 `selectSession` 创建、在 `releaseTranscript` 释放；**只为被选中的会话物化**，这与 5.6 的整段释放一致。需要为未选中会话预热时另设按 `sessionId` 常驻的服务（形如 `Telemetry`／`CostLedger`），而不是把 `SessionInfo` 变成全会话大 Map。
+- **它是会话的唯一容器**：`SessionInfo.record` 是记录的唯一下标（已实现），`State.transcript` 已移除；`initialState()` 与 `ui/app.tsx` 都读 `state.session.record`，无选中会话时它是一份空记录，因此 `record.ready`／`record.liveAttemptKey` 这些无条件读取仍然成立。
+- **持有引用，不复制**：`record` 与 `view.window` 都指向 `Transcript` 实例本身；从 `Transcript`、`Telemetry`、`CostLedger` 可推导的字段一律不复制（依据见 5.7.6）。
+- **强引用在哪、弱引用在哪**：`record` 与 `view.window` 是**强引用**，必须由 `SessionInfo` 持有并在释放时 `dispose` 与 `releaseHistoryLayout`；而行缓存 `LayoutIndex` 是 `WeakMap<Transcript, LayoutIndex>`（`session/history.ts:251`）里的**弱引用**，本来就不进状态——但它的键必须由强引用持有，否则缓存会被 GC 连同语义一起清掉。
+- **`view.window` 保留为 `SessionInfo` 的强引用（已定）**：跳转历史时保留一份独立记录，不把那一页加载进主记录。替代方案（走 `/older` 的老路直接扩展主记录）已否决，因为它会改动阅读语义：`older` 会置 `historyPinned = true`（`session/controller.ts:490`）而暂停实时窗口回收，并且没有可以让 `/latest` 单独释放的对象（现有 `/latest` 与提交新提示词都只是清掉 `historyWindow`，`ui/app.tsx:381`、`445`）。独立窗口让"读旧页"与"实时尾部"各自拥有生命周期；代价是释放 `SessionInfo` 时必须沿用 `ui/app.tsx` 现有的 `releaseHistoryLayout` + `dispose`，否则会漏掉一份记录。
+- **`view.pinned` 是唯一"半派生"的字段**：它有两个写入者——UI 按视口派生的 `pinHistory(!historyWindow && (position > 0 || thoughtList || historyQuery !== undefined && !contentSearch))`（`ui/app.tsx:522`），以及 `SessionController.older` 扩展主记录时的强制置位（`session/controller.ts:490`）。因此它不能像 `scroll`／`folds` 那样只由 UI 写；迁入 `SessionInfo` 后仍以 `SessionController` 为唯一写者，UI 的派生规则作为**请求合并**，否则会把 `older` 刚置上的保护覆盖掉。`/latest`（`ui/app.tsx:382`）与释放（`session/controller.ts:603`）复位。
+- **"正在输出的思考"不需要状态**：`historyLayout` 在 `part.kind === 'reasoning' && reasoning === 'row'` 时，只对 `part.closed` 或宽度小于 60 的情况折叠（`session/history.ts:197`、`232`）。因此流式期间默认完整显示完全由 `part.closed` 与终端宽度派生；只有**手动**展开（`/think SEQ`、从 `/think` 跳转、`/think live`）才写入 `view.folds` 与 `view.liveReasoning`。`/think` 面板本身是否打开属于 5.7.6 的"瞬时可见性"，不改变记录渲染。
+- **单一写者**：会话状态的写入只经 `SessionController`，UI 通过既有的 `subscribe`／`State` 读取，不再各自持有会话数据。这是消除 5.7.1 那批零散重置 effect 的前提。
+- **不落盘**：全部可由宿主历史重建，与"回填不写独立历史文件"的隐私边界一致。
+- `view.window` 是临时 `Transcript`，释放 `SessionInfo` 时必须 `dispose`（保留 4.3 的释放语义）。
+
+#### 5.7.4 `prompts`：会话开始至今的全部 user prompt
+
+- **语义（已实现）**：按 `seq` 升序，只含 `user/message` 且 `source` 缺失或 `source.kind === 'user'`（即显示层的 `role === 'You'`，排除 Context）。只追加，不因提交而淘汰，也不合并连续重复——这与 `record` 现有的去重与淘汰规则相反，因为索引的目标是完整而不是省内存。本地提交但不会成为持久记录的 slash 命令同样保留，标记为非持久；持久回声到达时升级那一条而不是追加第二份。
+- **缓存优先（已实现）**：`PromptCache`（`session/info.ts`）是进程级、按 `sessionId` 键、按字节 LRU 的提示词缓存，两个生产者写入它——计费扫描每读一页就交出一页（`rememberScanPage`/`rememberScanDone`），开屏回填在走完后写入自己建立的列表。`selectSession` 先 `adoptCachedPrompts`：命中完整条目就直接播种并 `markComplete()`，不发起任何请求；未命中才启动回填。
+- **种子与追加（已实现）**：索引在每次 `session/follow` 帧后由 `Transcript.promptsSince(through)` 增量折叠开屏快照与后续 `user/message`，只读原始记录、不重建投影，因此流式期间是 O(新增)。
+- **整段历史回填（已实现）**：`selectSession` 在订阅之后启动 `backfillPrompts`，用 `session/page` 从开屏窗口向前逐页读取，每页解析进一份临时 `Transcript` 后只把提示词 `prepend` 进索引，直到宿主报告 `hasMore === false`；上限 200 页，切换会话或释放即 `abort()`。它不写入实时记录，因此不扩大 transcript 的内存窗口；完成后 `markComplete()` 记下"宿主已无更早提示词"，`recallHasOlder` 据此不再发起多余的页请求，被上限截断时则回落到惰性补页。重复已经消除：计费扫描（4.5）读每一页时会把原始记录交给会话域，由 `rememberScanPage` 折进进程级的 `PromptCache`，因此 `selectSession` 先查缓存（`adoptCachedPrompts`），命中就直接播种、0 请求，只在该会话尚未被扫描过时才走上面这条回填。缓存按字节 LRU 跨会话保留（至少留一个），且只接受 `complete` 条目——半途被取消的扫描写的条目标记为不完整，读到时会被忽略，因为它缺的正是最旧的那一段。若宿主将来提供只返回 `user/message` 的分页端点，扫描与回填都可以改为消费它，这里只是把两份读取合并成一份。
+- **容量**：条目另设字节上限（提示词远小于完整记录）。超限时只允许淘汰**可重载**的区间，即被淘汰者必须仍能由宿主分页重新取得；否则保留而不淘汰。这是与旧 `InputHistory` 的关键差别：预算仍然控制内存，但不以牺牲可达性为代价。
+- **导航**：`↑`／`↓`（及 Ctrl+P/N）只在本地数组内移动，路径上不再有 `controller.perform`、不再失焦、不再有"5 页未命中即停"；数组两端就是会话开头与最新，`atOldest` 因此有确切含义。
+
+#### 5.7.5 迁移顺序与验证
+
+分阶段，各自可独立校验：
+
+1. **提示词索引（已完成）**：`PromptIndex` 落地于 `src/session/info.ts`，由 `SessionController` 持有并暴露 `recall`／`refillRecall` 等方法；`InputHistory` 与 `ui/input/history.ts` 一并移除。验证：`tests/session/info.test.ts` 覆盖序号升级、预算淘汰后的回填可达性、窗口正反扫描、注入上下文的排除与"只有助手记录的一帧也推进折进水位"（否则整轮都会每帧重扫）；`tests/ui/app.test.tsx` 覆盖"越过窗口边界取回更早一页"与"回填已加载的更早提示词而不再次分页"两条路径；README 双语回填段落与 4.3／5.3／5.5 同步更新并重记哈希。
+2. **composer（已完成）**：`input`／`draft`／`cursor`／`parkedDraft` 迁入 `SessionInfo.composer`，经 `State.session` 与 `setComposer`／`setComposerCursor`／`parkComposer`／`restoreComposer` 读写；`releaseTranscript()` 随会话重置，因此草稿不再跨会话。`ui/app.tsx` 的 `setInput` 只保留"回到实时末端"与 `resetRecall` 两个 UI 副作用，回调一律读 `controller.composer`（比原来的 `draft` ref 更直接，因为控制器状态永远是最新的）。验证：`tests/ui/app.test.tsx` 新增"草稿属于它自己的会话，不跟随到下一个"。
+3. **view（已完成）**：`scroll`／`historyWindow`／`reasoningOverrides`／`liveReasoning` 与 `historyPinned` 迁入 `SessionInfo.view`，经 `setScroll`／`setViewWindow`／`setFolds`／`setLiveReasoning` 与 `pinHistory` 读写；`setViewWindow` 与 `SessionInfo.reset()` 都会 `releaseHistoryLayout` + `dispose` 旧窗口，因此切换会话不再泄漏一份记录。`view.pinned` 的两个写入者（`older` 的强制置位与 UI 的派生规则）按原语义保留，合并规则仍未定。验证：`tests/ui/app.test.tsx` 新增"切换会话释放阅读视图，包括独立历史窗口"（跳转打开独立窗口，切到 `s2` 后断言 `scroll`／`folds` 归零且旧窗口 `ready === false`）。
+4. **answers／reference（已完成）**：`answers`／`optionState`／`approvalSelection` 迁入 `SessionInfo.interaction`，`referenceIndex`／`dismissedReference` 迁入 `SessionInfo.reference`；`lookup` 刻意留下，因为它按当前 draft 重算。验证：`tests/ui/app.test.tsx` 新增"作答与菜单高亮属于它们自己的会话"（打开 `@` 菜单并移动高亮、置入部分作答，切到 `s2` 后断言全部归零且菜单未跟随）。
+5. **record 统一（已完成）**：`State.transcript` 移除，记录改由 `SessionInfo.record` 持有；`SessionInfo.reset()` 释放旧记录（`releaseHistoryLayout` + `dispose`）并新建一份，`selectSession`／`pickWorkspace`／`release()` 都不再自行构造 `Transcript`。验证：`tests/ui/app.test.tsx` 新增"记录属于它自己的会话，旧记录被释放"（断言 `controller.record === state.session.record`、切换后换新对象且旧记录 `ready === false`）；88 处测试引用由 `controller.state.transcript` 改为 `controller.record`。
+6. **panels（已完成）**：`thoughtList`／`queueOpen`／`models`／`historyQuery`／`contentSearch`／`historyMatches`／`searchResults` 迁入 `SessionInfo.panels`（`thoughts`／`queue`／`model`／`history`／`search`），经 `openThoughts`／`openQueue`／`setModelPanel`／`setHistoryPanel`／`setSearchPanel` 读写；`ModelState` 也随之移入会话域，由 `ui/dialogs` 复用。验证：`tests/ui/app.test.tsx` 新增"打开的面板属于它们自己的会话，切换即清空"（用 `/queue` 打开真实面板，其余字段直接置位，切到 `s2` 后断言全部清空且面板不再出现）。
+
+§5.7 的六步已全部完成，每一步都按 7.7 第 4 条在同一 PR 内带了对应的 Agent Note 与文档同步。
+
+#### 5.7.6 派生状态、宿主镜像与焦点状态（刻意不进入 `SessionInfo`）
+
+把"与会话有关"当成唯一判据，会把宿主镜像与组件焦点一起拉进来，从而产生第二份真相，或让每次按键重渲染整棵树。`SessionInfo` 的判据是**谁拥有这份数据**：只有客户端自己产生、且**改变记录如何渲染**或**必须跨切换保留**的状态才进入；而只决定某个面板是否可见的开关也随之进入了 `panels`，因为它同样只属于一个会话。
+
+| 类别 | 现状所在 | 进入 `SessionInfo` | 理由 |
+| --- | --- | --- | --- |
+| 会话记录（事件、实时尝试、分页游标、`ready`／`hasMore`） | `Transcript` | 只持有引用（`record`） | 已经是会话级容器；复制字段会造出第二份真相 |
+| 排队输入（`queued`／`steering`／`context`）、活动任务数、投影值（title／model／context／token／stats／preset） | `Telemetry`（按 `sessionId` 键） | 否 | 宿主是权威来源，世代重建时整体替换；这正是"当前等待执行的 input"所在，复制进会话容器会在重连后变脏 |
+| 运行状态与观察起点（`runningUpdates`、`observedRunningAt`） | `ConnectionController`（按 `sessionId` 键） | 否 | 宿主 `$events` 的镜像，世代开始时清空；5.3 已列，这里补齐以免遗漏 |
+| 待答事件（`pending`） | `SessionController.interactions` → `state.pending` | 否（只存本地作答 `answers`） | 每次 `update` 由映射按当前会话派生，因此与帧到达顺序无关 |
+| 折叠后的费用 | `CostLedger.sessions`（落盘） | 否 | 跨会话、可重算 |
+| 列表项光标与滚动（`Picker.selected`、`rawKey`） | `Picker` 组件内部 | 否 | 每次方向键只重渲染该子树；提到 `SessionInfo` 会让含 2,048 行历史视口的整棵树随按键重渲染。重置由 `key={identity}` 决定（`PickerScreen`、`HistoryDialog`、`ThoughtsDialog`、`ModelDialog`、`RemovalDialog`） |
+| 活动思考的展开显示 | `historyLayout` 内联派生（`part.closed` 与宽度，`session/history.ts:197`、`232`） | 否 | 没有存储：流式期间默认完整显示由 `part.closed` 与终端宽度决定 |
+| 布局行缓存与实时换行状态 | `WeakMap<Transcript, LayoutIndex>`（`session/history.ts:251`） | 否 | 弱引用缓存，`releaseHistoryLayout` 显式释放；键由 `record` 的强引用持有 |
+| 会话级面板的可见性（`thoughtList`／`queueOpen`／`models`／`historyQuery`／`searchResults`） | `SessionInfo.panels`（`session/info.ts`） | 是（已实现） | 只决定面板是否显示，但面板本身属于一个会话；行光标仍留在 `Picker`，由 `key={identity}` 重置 |
+| 待答选择器的键盘状态（`optionState`、`approvalSelection`） | App 级 `useState` | 是 | 与列表光标相反：它们必须在 `pending` 事件变化期间保留已作答内容，不能随组件卸载丢失 |
+| 引用菜单查询缓存（`lookup`） | App 级 `useState` | 否 | 按当前 draft 重新查询的宿主结果，菜单关闭即失效；只有 `reference` 的导航状态需要保留 |
+| 在途标记与派生引用（`historyPaging`、`historyLoading`、`loadingPage`、`scrollIntent`、`historyAbort`、`previousView`、`scrollPosition`、`mounted`、`displayRef`、`conversationBox`） | App 级 ref／state | 否 | 在途或派生；切换会话必须丢弃，不能当作可恢复状态 |
+| help／cost／status 面板、`notice`、`removal` | App 级 | 否 | 与应用而非会话绑定；`removal` 的目标还可以是工作区（`RemovalTarget.kind === 'workspace'`），在会话存在之前就能打开 |
+| 几何、复制模式与在途标记（`conversationRows`／`statusBarRows`、`copyMode`、`historyAbort`／`loadingPage`／`scrollIntent`／`mounted`） | App 级 | 否 | 进程级或纯瞬时；切换会话必须丢弃，而不是当作状态恢复 |
+
+这条判据也解释了"当前等待执行的 input"为什么不复制进 `SessionInfo`：它已经是按 `sessionId` 键的宿主镜像（`Telemetry.queues`，`ui/app.tsx` 读 `controller.telemetry.pending(state.sessionId)`）。要统一的是它的**访问方式**，不是它的存储位置；把镜像搬进会话容器只会得到两份会在重连时分叉的队列。同理，"当前渲染窗口"里属于会话的只有**显示哪份记录、滚到哪、哪些块展开**（`view`），而记录内容本身仍由 `Transcript` 拥有。
+
+#### 5.7.7 现状持有者到 `SessionInfo` 的完整映射
+
+为了让"是否还有遗漏"可以逐行核对，下表列出当前所有与会话相关的持有者及其去向。标为"不进入"的条目在 5.7.6 有理由；其余必须在 5.7.5 的相应阶段迁入。
+
+| 现状持有者 | 去向 |
+| --- | --- |
+| `input`、`draft`、`cursor`、`parkedDraft`（已移除） | `composer.draft`／`composer.cursor`／`composer.parked`，经 `State.session` 读写（已实现） |
+| `inputHistory`（已移除） | `PromptIndex`，由 `SessionController` 持有（已实现，见 4.3） |
+| `scroll`（已移除） | `view.scroll`（已实现） |
+| `reasoningOverrides`（已移除） | `view.folds`（已实现） |
+| `liveReasoning`（已移除） | `view.liveReasoning`（已实现） |
+| `historyWindow`（已移除） | `view.window`，由 `closeWindow()` 释放（已实现） |
+| `thoughtList`、`queueOpen`、`models`、`historyQuery`、`contentSearch`、`historyMatches`、`searchResults`（已移除） | `panels.thoughts`／`panels.queue`／`panels.model`／`panels.history`／`panels.search`（已实现） |
+| `answers`（已移除） | `interaction.answers`（已实现） |
+| `optionState`（已移除） | `interaction.option`（已实现） |
+| `approvalSelection`（已移除） | `interaction.approval`（已实现） |
+| `referenceIndex`、`dismissedReference`（已移除） | `reference.index`／`reference.dismissed`（已实现） |
+| `SessionController.historyPinned`（字段已移除） | `view.pinned`（已实现；两个写入者按原语义保留） |
+| `SessionController.interactions` | 不进入（`state.pending` 按当前会话派生；本地作答见 `answers`） |
+| `SessionController.follow`／`interruptTask`／`admission`／`stoppingSession` | 不进入（在途或世代作用域） |
+| `ConnectionController.runningUpdates`、`observedRunningAt` | 不进入（宿主镜像） |
+| `Telemetry.entries`／`queues`／`jobs` | 不进入（宿主镜像） |
+| `CostLedger.sessions`／`totals` | 不进入（落盘、可重算） |
+| `Transcript` 的事件、游标、`ready`／`hasMore`、`promptBeforeWindow`、thought index | 由 `record` 强引用持有，不复制字段 |
+| `history.ts` 的 `indexes`（`WeakMap<Transcript, LayoutIndex>`）、`liveRows`／`liveWraps`／`liveMarkdown` | 不进入（弱引用缓存） |
+| `lookup` | 不进入（按当前 draft 重算） |
+| `historyPaging`／`historyLoading`／`loadingPage`／`scrollIntent`／`historyAbort`／`previousView`／`scrollPosition`／`mounted`／`displayRef`／`conversationBox` | 不进入（在途或派生） |
+| `conversationRows`／`statusBarRows`／`statusOverflow`／`statusScroll`／`helpPage` | 不进入（几何与应用级面板） |
+| `copyMode`／`help`／`costExpanded`／`statusExpanded`／`notice`／`removal` | 不进入（应用级） |
+
+核对方式是机械的：`grep -n 'useState\|useRef' src/ui/app.tsx` 的输出，加上各域控制器与 `Telemetry`／`CostLedger`／`ConnectionController` 的字段声明，应与本表逐行对应。新增会话状态时先在本表登记去向，再决定它是否进入 `SessionInfo`。
 
 ## 6. 成本模型
 
@@ -1205,7 +1385,7 @@ C4Component
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（29 篇）、`bug-fix/`（4 篇）与 `feature/`（8 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（29 篇）、`bug-fix/`（4 篇）与 `feature/`（16 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 | Agent Note | 主题 |
 | --- | --- |
@@ -1228,6 +1408,14 @@ C4Component
 | `architecture/2026-09-11-terminal-memory-log` | 默认启用的有界运行时内存日志，区分真实保留与 V8 高水位 |
 | `feature/2026-09-12-terminal-question-dismiss` | 提问的 Esc 放弃整组问题，以 `ASK_CANCELLED` 结算 |
 | `feature/2026-09-12-terminal-recall-full-history` | 回填在窗口边界处向前翻页，覆盖客户端连接之前的提示词 |
+| `feature/2026-09-14-terminal-prompt-index` | 回填改由会话提示词索引承担；预算淘汰可重载，消除旧缓冲在提交后的可达性缺口 |
+| `feature/2026-09-14-terminal-session-composer` | 草稿、光标与寄存草稿迁入 `SessionInfo.composer`；草稿不再跨会话 |
+| `feature/2026-09-14-terminal-session-view` | 滚动、独立历史窗口、折叠与阅读保护迁入 `SessionInfo.view`；切会话释放窗口 |
+| `feature/2026-09-14-terminal-session-interaction` | 待答作答、选项与 `@` 菜单选择迁入 `SessionInfo`；切会话不再残留 |
+| `feature/2026-09-14-terminal-session-record` | `State.transcript` 移除，记录改由 `SessionInfo.record` 独占强引用；切会话释放旧记录 |
+| `feature/2026-09-14-terminal-session-panels` | 面板可见性与查询迁入 `SessionInfo.panels`；§5.7 迁移六步全部完成 |
+| `feature/2026-09-14-terminal-prompt-backfill` | 打开会话时后台遍历整段历史，把全部 user prompt 折入索引并标记穷尽 |
+| `feature/2026-09-14-terminal-shared-history-read` | 计费扫描把已读页面交给进程级 `PromptCache`；扫描之后打开会话 0 请求 |
 
 ### 7.3 文档配对
 
@@ -1263,7 +1451,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- 24 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 229 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填（含翻页到更早的提示词）、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、提问的 Esc 放弃（rejected/`ASK_CANCELLED` 结算、Other 的两步退出）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
+- 32 个 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`architecture/`），共 245 项测试，覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填（含翻页到更早的提示词、序号升级与预算淘汰后的窗口回填）、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、提问的 Esc 放弃（rejected/`ASK_CANCELLED` 结算、Other 的两步退出）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 11 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1283,6 +1471,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 - 客户端崩溃不保留未提交的部分回答；宿主重启或工具失败后，原提问只能重新发起。
 - 输入框一期不识别粘贴边界：折叠按"多行且未折叠高度超过窗口"的结构判定，标签用中性的 `[N lines · X KB]`，不区分粘贴与手输。可靠边界要等 bracketed paste（`?2004h`；Ink 6 会把 `[200~`/`[201~]` 当普通文本投递，必须自行吞掉标记并跨 chunk 累积）。
 - 折叠块只能整块查看与删除：尚无 `View paste`/`Edit paste` 面板，光标也不能逐行进入折叠区间（↑/↓ 仍归历史回填，行间移动只能靠 ←/→ 与 Home/End）。`@` 引用菜单与对话框仍可能占用超过"对话区至少 4 行"的预算，因为它们是用户主动打开的模态；composer 本身已不再无限增长。
+- 会话级状态已全部收进 `State.session`（`SessionInfo`，见 5.7）：记录、提示词索引、`composer`、阅读视图、交互状态与面板可见性各有一个所有者，切会话只走 `SessionInfo.reset()`。回填本身按可达性完整：预算淘汰的提示词要么仍在已加载窗口内（`refillRecall` 回填补齐），要么仍在宿主上（`session/page` 取回），见 4.3。
 
 ### 7.7 变更检查清单
 
@@ -1335,7 +1524,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 59 个模块、6,506 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 62 个模块、7,978 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1344,14 +1533,14 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `storage/directories.ts` | 27 | `ensureDirectory`、`ensurePrivateDirectory`、`listEntries` |
 | `storage/heap-snapshot.ts` | 32 | `heapSnapshotName`、`writeHeapSnapshot` |
 | `storage/index.ts` | 4 | 域 barrel |
-| `state.ts`（共享契约） | 48 | `State`、`ControllerStore`、`initialState` |
+| `state.ts`（共享契约） | 49 | `State`、`ControllerStore`、`initialState` |
 | `transport/wire.ts` | 33 | `Json`、`ObjectValue`、`object`、`string`、`array`、`safeText`、`errorText` |
 | `transport/client.ts` | 235 | `Client`、`HttpError`、`RemoteError`、`Subscription` |
 | `transport/auth.ts` | 54 | `CookieStore`、`login`、`AuthenticationRequired` |
 | `transport/endpoint.ts` | 23 | `Endpoint`、`endpoint` |
 | `transport/host.ts` | 14 | `HostAccess` |
-| `session/controller.ts` | 583 | `SessionController` |
-| `session/transcript.ts` | 703 | `Transcript`、`LivePhase`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
+| `session/controller.ts` | 933 | `SessionController` |
+| `session/transcript.ts` | 774 | `Transcript`、`LivePhase`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
 | `session/history.ts` | 320 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
 | `session/telemetry.ts` | 108 | `Telemetry`、`QueuedInput` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
@@ -1363,38 +1552,38 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/markdown.ts` | 245 | `hasMarkdown`、`markdownRows`、`markdownHtml`、`MarkdownRow`、`MarkdownSpan` |
 | `session/math.ts` | 67 | `renderMath` |
 | `session/export-html.ts` | 42 | `saveTranscriptHtml` |
-| `session/index.ts` | 17 | 域 barrel |
+| `session/info.ts` | 359 | `PromptIndex`、`PromptEntry`、`PromptRecord`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText` |
+| `session/index.ts` | 19 | 域 barrel |
 | `cost/pricing.ts` | 216 | `DEFAULT_PRICES`、`PRICES_REVISION`、`PRICING_ENGINE_VERSION`、`isUncorrectedSeed`、`pricesFrom`、`priceAt`、`candidates`、`canonicalModel`、`pricesDigest`、`chargeFor`、`costDay` |
 | `cost/config.ts` | 69 | `loadPrices`（种子、戳记与迁移） |
 | `cost/records.ts` | 75 | `costRecords`、`foldSamples` |
 | `cost/ledger-files.ts` | 91 | `loadLedgers`、`saveLedger` |
 | `cost/ledger.ts` | 139 | `CostLedger`、`costText` |
-| `cost/scanner.ts` | 77 | `costAddresses`、`sessionCostHistory` |
-| `cost/controller.ts` | 103 | `CostController`、`CostHost` |
+| `cost/scanner.ts` | 82 | `costAddresses`、`sessionCostHistory` |
+| `cost/controller.ts` | 109 | `CostController`、`CostHost` |
 | `cost/types.ts` | 62 | `ChargeSample`、`SavedCost`、`DayTotal`、`CostTotal`、`Coverage`、`PriceDecision`、`MISSING_USAGE` |
 | `cost/index.ts` | 10 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
-| `controller/controller.ts` | 425 | `Controller` |
+| `controller/controller.ts` | 575 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `clearReactMeasures`、`reactMeasureNames`、`measureCount` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 648 | `App` |
+| `ui/app.tsx` | 707 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
 | `ui/commands/registry.ts` | 87 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMANDS`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
 | `ui/commands/parse.ts` | 137 | `Submission`、`SubmissionContext`、`classifySubmission` |
 | `ui/dialogs/picker.tsx` | 102 | `Picker`、`Choice`、`ChoiceCell` |
-| `ui/dialogs/index.tsx` | 189 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
+| `ui/dialogs/index.tsx` | 196 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
 | `ui/dialogs/cost.tsx` | 33 | `CostPanel` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/chat/history-view.tsx` | 21 | `HistoryViewport` |
 | `ui/chat/status.tsx` | 429 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`cacheHitText`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
-| `ui/input/history.ts` | 38 | `InputHistory` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
 | `ui/theme/index.ts` | 27 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
@@ -1408,11 +1597,11 @@ C4Component
   Component(root, "根契约", "index.ts, state.ts", "公开库门面与共享状态")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "4 文件 177 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "5 文件 359 行")
-  Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, index", "14 文件 2082 行")
-  Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "8 文件 638 行")
+  Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "15 文件 3149 行")
+  Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 853 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, index", "5 文件 797 行")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 1531 行")
+  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, index", "5 文件 947 行")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 2228 行")
   Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 126 行")
 
   Rel(root, transport, "公开门面")
@@ -1441,3 +1630,5 @@ C4Component
 | 固化 charge（sealed charge） | 已写下 `priceId` 与 `amount` 的账本条目；后续扫描只复用，不重新计价 |
 | 开放样本（open sample） | `reason === 'missing usage'` 的条目；宿主尚未报告 token，下一次扫描可以补计价 |
 | 域边界（domain boundary） | 目录与其允许导入集合；由 `tests/architecture/dependencies.test.ts` 机械检查 |
+| `SessionInfo`（设计，见 5.7） | 一个被选中会话的客户端状态容器，持有其 `Transcript` 引用；与记录同寿命创建与释放 |
+| 提示词索引 `prompts`（设计，见 5.7.4） | 会话开始至今的全部 user prompt，按 `seq` 升序、只追加、不合并重复、不以牺牲可达性为代价淘汰 |

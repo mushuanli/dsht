@@ -275,7 +275,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
   const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
   const view = controller.telemetry.view(state.sessionId);
   const costs = controller.costs;
-  const sessionCost = costs?.hasSession(state.sessionId) ? costText(costs.total(state.sessionId)) : '?';
+  const sessionCost = controller.sessionCostText;
   const todayCost = costs ? costText(costs.today()) : '?';
   // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
   const coverage = costs?.coverage ?? 'complete';
@@ -297,7 +297,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     const billed = buckets[0] === undefined || buckets[2] === undefined ? undefined : buckets[0] + buckets[2] + (buckets[3] ?? 0);
     const hit = cacheHitText(buckets[2], billed);
     const compactCount = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
-    const phase = state.transcript.livePhase;
+    const phase = state.session.record.livePhase;
     const clock = running && since !== undefined ? ` ${clockText(now - since)}` : '';
     const phaseLabel = phase === undefined ? undefined
       : phase.kind === 'tool' ? `${phase.name ?? 'tool'} ${phaseText(now - phase.startedAt)}`
@@ -365,7 +365,7 @@ const StatusDetails = memo(function StatusDetails({ controller, theme, width, no
   const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
   const view = controller.telemetry.view(state.sessionId);
   const costs = controller.costs;
-  const sessionCost = costs?.hasSession(state.sessionId) ? costText(costs.total(state.sessionId)) : '?';
+  const sessionCost = controller.sessionCostText;
   const todayCost = costs ? costText(costs.today()) : '?';
   // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
   const coverage = costs?.coverage ?? 'complete';
@@ -380,7 +380,7 @@ const StatusDetails = memo(function StatusDetails({ controller, theme, width, no
     { key: 'activity', color: state.pending.length > 0 ? theme.status.critical : running ? theme.colors.context : theme.colors.muted, text: state.pending.length > 0
       ? '? Needs you · answer the request above to continue'
       : running
-        ? `◐ Working · ${duration}${state.transcript.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
+        ? `◐ Working · ${duration}${state.session.record.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
         : '● Ready · Ctrl+C exit' },
     { key: 'host', text: `${safeText(controller.base)} · ${safeText(state.status)}${!state.online ? ' · offline, last known status' : ''}` },
     ...state.sessionId

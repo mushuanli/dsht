@@ -86,15 +86,15 @@ test('history limit options reject unusable values', () => {
 test('swapping sessions releases old bodies and pinned reading delays reclaim until returning to live', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined, { maxRecords: 4, maxBytes: 100_000 });
-  t.after(() => controller.stop()); controller.start(); await until(() => controller.state.transcript.ready);
+  t.after(() => controller.stop()); controller.start(); await until(() => controller.record.ready);
   controller.pinHistory(true);
   for (let seq = 1; seq <= 10; seq++) fixture.follow(message(seq));
-  await until(() => controller.state.transcript.retainedRecordCount === 11);
-  const old = controller.state.transcript;
+  await until(() => controller.record.retainedRecordCount === 11);
+  const old = controller.record;
   controller.pinHistory(false);
   assert.equal(old.retainedRecordCount, 3);
   const layout = historyLayout(old, 80);
-  await controller.selectSession('s2'); await until(() => controller.state.transcript.ready);
+  await controller.selectSession('s2'); await until(() => controller.record.ready);
   assert.equal(old.retainedRecordCount, 0);
   assert.equal(old.retainedBytes, 0);
   assert.equal(layout.cachedRowCount, 0);
@@ -110,8 +110,8 @@ test('paged search keeps live history unchanged, bounds matches, and loads only 
     return { records: records.slice(Math.max(0, before - 80), before), hasMore: before > 80 };
   };
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
-  t.after(() => controller.stop()); controller.start(); await until(() => controller.state.transcript.ready);
-  const source = controller.state.transcript;
+  t.after(() => controller.stop()); controller.start(); await until(() => controller.record.ready);
+  const source = controller.record;
   const bytes = source.retainedBytes;
   const matches = await controller.searchHistory('needle', new AbortController().signal);
   assert.equal(matches.items.length, 200);
@@ -123,7 +123,7 @@ test('paged search keeps live history unchanged, bounds matches, and loads only 
   const window = await controller.historyAt(120, new AbortController().signal);
   assert.equal(window.messages.at(-1)?.seq, 120);
   assert.ok(window.retainedRecordCount <= 80);
-  assert.equal(controller.state.transcript, source);
+  assert.equal(controller.record, source);
   window.dispose();
   const abort = new AbortController(); abort.abort();
   await assert.rejects(controller.searchHistory('needle', abort.signal), { name: 'AbortError' });
