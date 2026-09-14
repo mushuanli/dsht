@@ -415,6 +415,10 @@ export class SessionController {
       throw new Error('Invalid command result from host');
     }
     if (result.kind === 'error') throw new Error(string(result.text));
+    // Compaction rewrites the host log, so a cached prompt list for this session may describe
+    // records that no longer exist. The live index keeps what the reader already sees; the cache is
+    // dropped so the next open reads the rewritten history.
+    if (line.trim().split(/\s/, 1)[0] === '/compact') this.promptCache.drop(this.sessionId);
     return result.text === undefined ? 'Command completed.' : string(result.text);
   }
 
@@ -495,12 +499,17 @@ export class SessionController {
   }
 
   /** Add a page before the retained window using its fixed opening cut.
+   *
+   * Reclamation is deliberately not pinned here. Every caller that needs the fetched page to
+   * survive is already covered by the view: scrolling back sets a scroll position, `/think` opens a
+   * panel, and a recall page folds its prompts into the index before this resolves. A pin set here
+   * had no clearing edge, so after one recall page the history budget silently stopped applying for
+   * the rest of the session while every following page kept adding records.
    * @param signal - Cancels local paging without interrupting the remote agent.
    * @param transcript - Transcript to extend; defaults to the live one.
    */
   async older(signal?: AbortSignal, transcript = this.info.record): Promise<void> {
     const selection = this.store.selection();
-    if (transcript === this.info.record) this.info.view.pinned = true;
     if (!transcript.ready || !transcript.hasMore || transcript.beforeSeq === undefined) return;
     const result = await this.host.require().call('session/page', { request: {
       address: { kind: 'session', sessionId: this.sessionId }, throughSeq: transcript.cursor,
@@ -734,6 +743,9 @@ export class SessionController {
     const oldest = this.prompts.oldest;
     const older = oldest === undefined ? cached.prompts : cached.prompts.filter(prompt => prompt.seq < oldest);
     this.prompts.prepend(older);
+    // Same budget as the walk it replaces: `settle` may shed the oldest prefix, and `markComplete`
+    // then refuses, so the lazy backward step stays available for whatever was shed.
+    this.prompts.settle();
     this.prompts.markComplete();
     this.store.update({});
     return true;

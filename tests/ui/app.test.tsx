@@ -1392,7 +1392,7 @@ test('composer recalls submitted prompts and commands while preserving its unsen
 });
 
 
-test('recall pages past the seeded window so prompts from before startup stay reachable', async t => {
+test('recall reaches prompts from before the seeded window with no extra request', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const prompts = (start: number, end: number) => Array.from({ length: end - start }, (_, index) => ({
     type: 'event', event: { seq: start + index, type: 'user/message', surfaceOp: 'append', data: {
@@ -1404,19 +1404,20 @@ test('recall pages past the seeded window so prompts from before startup stay re
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.record.ready);
-  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-3/);
-  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-2/);
-  // The seeded window ends at prompt-2: the next step has to fetch the page before it.
-  await pressKey(ui, '\u001b[A');
-  await until(() => ui.lastFrame()?.includes('❯ prompt-1') === true);
-  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-0/);
+  // Opening the session folds the page before the window in the background; that walk is the only
+  // read here, so the arrows must reach prompt-0 without asking the host for anything.
+  await until(() => controller.state.session.prompts.length === 4);
   const pages = fixture.calls.filter(call => call.method === 'session/page');
-  assert.equal(pages.length, 1);
+  assert.equal(pages.length, 1, 'the open-time backfill read the page before the window');
   const request = object(object(object(pages[0]!.payload).args).request);
   assert.equal(request.beforeSeq, 2);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-3/);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-2/);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-1/);
+  await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-0/);
   // The session's oldest prompt is the end of recall: no further page is requested.
   await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-0/);
-  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, 1);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, pages.length);
   assert.doesNotMatch(ui.lastFrame()!, /Loading older prompts/);
 });
 

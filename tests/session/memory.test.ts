@@ -77,6 +77,22 @@ test('command indentation survives truncation and the terminal row renderer', ()
   assert.equal(contentText([{ type: 'tool-call', name: 'bash', arguments: '{"description":"Run tests","command":"npm test"}' }]).split('\n')[1], '  $ npm test');
 });
 
+test('a page fetched for the reader does not pin reclaim for the rest of the session', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { ...snapshot, cursor: 9, hasMore: true, records: [message(8), message(9)] };
+  fixture.onPage = async () => ({ records: [message(6), message(7)], hasMore: false });
+  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined,
+    { maxRecords: 4, maxBytes: 100_000 });
+  t.after(() => controller.stop()); controller.start(); await until(() => controller.record.ready);
+  assert.equal(controller.view.pinned, false);
+  await controller.older();
+  assert.equal(controller.record.beforeSeq, 6, 'the page was added');
+  assert.equal(controller.view.pinned, false, 'reclaim resumes without the reader scrolling back');
+  // Reclaim therefore still runs on the following frames, which is the point of not pinning here.
+  for (let seq = 10; seq <= 14; seq++) fixture.follow(message(seq));
+  await until(() => controller.record.retainedRecordCount <= 4);
+});
+
 test('history limit options reject unusable values', () => {
   assert.deepEqual(historyLimits('100', '4'), { maxRecords: 100, maxBytes: 4 * 1048576 });
   for (const value of ['0', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992']) assert.throws(() => historyLimits(value));

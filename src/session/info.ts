@@ -309,11 +309,24 @@ export class PromptCache {
    * @param value - Prompts in session order, and whether the host held no older ones.
    */
   put(sessionId: string, value: { prompts: readonly PromptRecord[]; complete: boolean }): void {
-    const prompts = value.prompts.filter(prompt => prompt.text !== '')
+    const all = value.prompts.filter(prompt => prompt.text !== '')
       .map(prompt => ({ seq: prompt.seq, text: prompt.text }));
+    let prompts = all, complete = value.complete;
+    let bytes = all.reduce((sum, prompt) => sum + prompt.text.length * 2, 0);
+    // One session can hold more prompt text than the whole budget. Keep its newest prompts that fit
+    // and record the entry as incomplete, so a later open still fetches the older part instead of
+    // trusting a list with a hole at the front.
+    if (bytes > this.maxBytes) {
+      let start = all.length, kept = 0;
+      for (let index = all.length - 1; index >= 0; index--) {
+        const size = all[index]!.text.length * 2;
+        if (kept + size > this.maxBytes) break;
+        kept += size; start = index;
+      }
+      prompts = all.slice(start); bytes = kept; complete = false;
+    }
     this.drop(sessionId);
-    const entry = { prompts, complete: value.complete,
-      bytes: prompts.reduce((sum, prompt) => sum + prompt.text.length * 2, 0) };
+    const entry = { prompts, complete, bytes };
     this.entries.set(sessionId, entry); this.bytes += entry.bytes;
     this.evict();
   }

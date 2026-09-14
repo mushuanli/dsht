@@ -153,3 +153,14 @@ test('an index that shed a prefix never claims to be exhaustive', () => {
   index.markComplete();
   assert.equal(index.exhausted, false, 'the dropped prefix must stay reachable through the lazy path');
 });
+
+test('PromptCache keeps one oversized session inside the budget and marks it incomplete', () => {
+  const cache = new PromptCache(20);
+  cache.put('big', { prompts: [
+    { seq: 1, text: 'aaaa' }, { seq: 2, text: 'bbbb' }, { seq: 3, text: 'cccc' },
+  ], complete: true });
+  const entry = cache.get('big');
+  assert.ok(entry);
+  assert.deepEqual(entry.prompts.map(prompt => prompt.text), ['bbbb', 'cccc']);
+  assert.equal(entry.complete, false, 'a truncated list must let a later open fetch the older part');
+});
