@@ -16,9 +16,23 @@ import { ConnectionController, type ConnectionListener, type ConnectionOptions }
 import { MemoryLog } from './memory-log.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
+import { ShellController } from '../shell/index.ts';
 import type { HistorySearch, RemovalTarget } from '../session/types.ts';
 import type { ComposerState, InteractionState, ModelState, OptionState, PanelState, ReferenceState, ViewState } from '../session/info.ts';
 import type { Reasoning } from '../session/history.ts';
+
+/** Environment for a local `!` command: this client's variables without its credentials.
+ *
+ * `DSH_URL` is removed as well as the token, because the URL form the README documents can carry a
+ * token in its query string. Commands therefore run with the operator's environment, not this
+ * client's session.
+ * @returns A copy of the environment safe to hand to a child process.
+ */
+function shellEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.DSH_TOKEN; delete env.DSH_URL;
+  return env;
+}
 
 /** Application facade over the domain controllers; the UI owns only this object.
  *
@@ -37,6 +51,8 @@ export class Controller implements ControllerStore, ConnectionListener {
   readonly cost: CostController | undefined;
   /** Bounded runtime memory samples; present only when a log path was supplied. */
   readonly memoryLog: MemoryLog | undefined;
+  /** Local `!` commands, run on this machine and shown inline in the transcript. */
+  readonly shell: ShellController;
   private readonly observers = new Set<() => void>();
   private selector = 0;
 
@@ -44,10 +60,18 @@ export class Controller implements ControllerStore, ConnectionListener {
     makeClient: () => Client = () => new Client(base),
     authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS, readonly memoryLogPath?: string,
     /** Directory this client runs in, offered as a workspace when the host has not registered it. */
-    readonly localDirectory: string = process.cwd()) {
+    readonly localDirectory: string = process.cwd(),
+    /** Whether `!` may run local commands; the CLI disables it with `--no-shell`. */
+    shellEnabled = true) {
     const options: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
     this.connection = new ConnectionController(this, options, this);
     this.session = new SessionController(this, this.connection, this.connection, historyLimits);
+    this.shell = new ShellController({
+      publish: () => this.update({}),
+      cwd: () => this.localDirectory,
+      env: () => shellEnv(),
+      anchor: () => this.state.session.record.readThrough,
+    }, shellEnabled);
     this.catalog = new CatalogController(this, this.connection);
     if (costs) this.cost = new CostController(costs, {
       client: () => this.connection.client(),
@@ -99,6 +123,7 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** Cancel retries and HTTP, close the socket, and release session and catalog work. */
   async stop(): Promise<void> {
+    await this.shell.stop();
     await this.connection.stop();
     await this.session.settle();
     await this.catalog.settle();
@@ -195,6 +220,11 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.update({ online: true, status: 'Connected', error: '', pending: [] });
     const screen = this.state.screen;
     await this.session.showPicker(screen === 'sessions' ? 'sessions' : 'workspaces');
+    // Starting inside a registered workspace's directory already answers the first question, so the
+    // reader lands on that workspace's sessions instead of a list they would pick from by hand.
+    if (screen !== 'sessions' && !this.initialSession && this.session.adoptLocalWorkspace(this.localDirectory) !== undefined) {
+      this.update({ status: 'Workspace from this directory · ← to switch' });
+    }
     const sessionId = this.state.sessionId ?? this.initialSession;
     if (sessionId && (screen === 'chat' || this.initialSession && !this.state.sessionId)) await this.session.selectSession(sessionId);
     this.cost?.start();

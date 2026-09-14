@@ -12,10 +12,11 @@ const UNITS: Record<string, readonly string[]> = {
   storage: ['storage'],
   transport: ['transport', 'storage'],
   session: ['transport', 'session', 'state.ts', 'storage'],
+  shell: ['shell', 'storage'],
   cost: ['transport', 'cost', 'storage'],
   catalog: ['transport', 'catalog', 'state.ts'],
-  controller: ['transport', 'session', 'cost', 'catalog', 'controller', 'state.ts', 'storage'],
-  ui: ['transport', 'session', 'cost', 'catalog', 'controller', 'ui', 'state.ts'],
+  controller: ['transport', 'session', 'cost', 'catalog', 'controller', 'shell', 'state.ts', 'storage'],
+  ui: ['transport', 'session', 'cost', 'catalog', 'controller', 'shell', 'ui', 'state.ts'],
   cli: ['transport', 'session', 'cost', 'catalog', 'controller', 'ui', 'cli', 'state.ts', 'storage'],
   'state.ts': ['transport', 'session'],
   'index.ts': ['transport'],
@@ -26,6 +27,9 @@ const RENDERER_MODULES = new Set(['react', 'ink', 'ink-testing-library']);
 
 /** Filesystem modules that may only appear inside the storage unit. */
 const FILESYSTEM_MODULES = new Set(['fs', 'node:fs', 'fs/promises', 'node:fs/promises']);
+
+/** Process-execution modules that may only appear inside the shell unit. */
+const PROCESS_MODULES = new Set(['child_process', 'node:child_process']);
 
 interface SourceFile { path: string; source: string }
 
@@ -62,6 +66,8 @@ function violations(files: readonly SourceFile[]): string[] {
         if (unit === 'ui' && target === 'transport/client.ts') problems.push(`${file.path}: ui must not call the transport client directly`);
       } else if (FILESYSTEM_MODULES.has(spec) && unit !== 'storage') {
         problems.push(`${file.path}: filesystem operations belong to the storage unit (${spec})`);
+      } else if (PROCESS_MODULES.has(spec) && unit !== 'shell') {
+        problems.push(`${file.path}: process execution belongs to the shell unit (${spec})`);
       } else if (RENDERER_MODULES.has(spec.split('/')[0]!) && unit !== 'ui') {
         problems.push(`${file.path}: React/Ink belongs to the ui layer (${spec})`);
       }
@@ -96,7 +102,10 @@ test('the dependency check rejects each forbidden direction', () => {
     ['ui/panel.ts: ui must not call the transport client directly']);
   assert.deepEqual(violations([{ path: 'cost/files.ts', source: "import { readFile } from 'node:fs/promises';" }]),
     ['cost/files.ts: filesystem operations belong to the storage unit (node:fs/promises)']);
+  assert.deepEqual(violations([{ path: 'cost/spawn.ts', source: "import { spawn } from 'node:child_process';" }]),
+    ['cost/spawn.ts: process execution belongs to the shell unit (node:child_process)']);
   assert.deepEqual(violations([{ path: 'storage/files.ts', source: "import { readFile } from 'node:fs/promises';\nimport { join } from 'node:path';" }]), []);
+  assert.deepEqual(violations([{ path: 'shell/runner.ts', source: "import { spawn } from 'node:child_process';" }]), []);
   assert.deepEqual(violations([{ path: 'ui/app.ts', source: "import { Box } from 'ink';\nimport { Client } from '../transport/client.ts';\nimport { Controller } from '../controller/index.ts';\nimport { safeText } from '../transport/wire.ts';" }]),
     ['ui/app.ts: ui must not call the transport client directly']);
 });

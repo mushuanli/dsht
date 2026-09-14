@@ -176,12 +176,13 @@ C4Component
   Component(root, "共享契约", "src/state.ts", "State 与 ControllerStore")
   Component(storage, "storage/", "4 文件 177 行", "全部文件系统操作：私有读写、原子替换、独占创建、流式写入与堆快照")
   Component(transport, "transport/", "5 文件 359 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
-  Component(session, "session/", "15 文件 3174 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
+  Component(session, "session/", "15 文件 3193 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 853 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "5 文件 947 行", "Controller 门面、ConnectionController 与内存日志")
-  Component(ui, "ui/", "18 文件 2228 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
-  Component(cli, "cli/", "2 文件 126 行", "参数、目录准备与进程生命周期")
+  Component(controller, "controller/", "5 文件 971 行", "Controller 门面、ConnectionController 与内存日志")
+  Component(ui, "ui/", "19 文件 2295 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
+  Component(cli, "cli/", "2 文件 130 行", "参数、目录准备与进程生命周期")
+  Component(shell, "shell/", "3 文件 262 行", "本地 ! 命令的执行、有界输出与进程组终止")
 
   Rel(root, transport, "被依赖")
   Rel(storage, transport, "被依赖")
@@ -194,6 +195,7 @@ C4Component
   Rel(cost, controller, "被依赖")
   Rel(catalog, controller, "被依赖")
   Rel(controller, ui, "被依赖")
+  Rel(shell, controller, "被依赖")
   Rel(ui, cli, "被依赖")
 ```
 
@@ -242,6 +244,8 @@ C4Component
 | Controller 是门面 | 门面只负责状态发布、选择器世代与生命周期，实现分布在四个域控制器 | 防止再次长出 God Object，同时保留 UI 与测试沿用的公开 API |
 | 目录即边界 | 每个业务域一个目录，跨域导入走 `index.ts` | 目录表达架构，依赖方向可被机械检查 |
 | 公开 API 与布局解耦 | `src/index.ts` 是唯一库门面，`exports` 指向编译产物 | 内部目录调整不改变 `@itookit/dsht` 的导入路径 |
+| 首个工作区可由启动目录决定 | `ready()` 用 `localDirectory` 在已注册工作区里按路径分段做最长匹配，命中就 `pickWorkspace` 并落在会话列表 | 在项目目录里启动已经把"用哪个工作区"回答了；远端路径通常不匹配，因此这是一条安全的自动捷径而非新的默认 |
+| 本地 shell 只在客户端 | `!` 由 `src/shell/` 执行，cwd 是客户端目录，绝不经过宿主、`commands/execute` 或 `session/prompt` | 宿主的 shell 是模型自己的工具；在操作者机器上执行命令是另一个需求，且只能由人敲出的 `!` 触发 |
 | 提示词索引可重载 | 回填由会话级 `PromptIndex` 承担；预算淘汰最旧条目，被淘汰者由已加载窗口回填或由宿主分页取回 | 淘汰只约束内存、不决定可达性；把"会话数据"与"输入编辑状态"合进同一个有界缓冲，会在提交时丢掉仍在该窗口内的提示词 |
 
 ## 3. 接口
@@ -768,6 +772,8 @@ C4Dynamic
 
 认证回退（`login`）：先读本地 Cookie 并用 `session/list` 探测；仅当返回 `HttpError(401)` 时才使用启动令牌重新认证，成功后若服务端下发了持久 Cookie 则写盘。没有可用令牌时抛 `AuthenticationRequired`。
 
+首个界面：`ready()` 建立基线后按当前 screen 打开选择器；若命令行没有指定会话、且 `Controller.localDirectory` 落在某个已注册工作区的路径内（按路径分段比较、最长路径优先），则直接采用该工作区并落在它的会话列表上，`pickWorkspace` 之后屏幕为 `sessions`，状态行写明 `Workspace from this directory · ← to switch`。远端宿主的路径通常与客户端不同，此时不会有任何匹配，行为与以前完全一致。
+
 ### 4.2 会话跟随与流式渲染
 
 ```mermaid
@@ -980,6 +986,23 @@ C4Dynamic
 - 成本账本只保存会话汇总（金额、计数、当天分桶、cut、规则版本与价目表摘要）与未计价原因，不含逐请求信息、提示词、工具正文、凭据与 Cookie。
 - 启动令牌不落盘；Cookie 文件拒绝不安全权限、非当前属主与符号链接。
 - 只有 `safeText` 清洗后的远端文本才进入终端，且着色在排版之后施加。
+- `!` 命令只在**客户端这台机器**上执行，只由人敲出的 `!` 触发；宿主数据、模型输出与重放帧都不能让客户端执行命令。
+
+### 4.8 本地 `!` 命令（在客户端机器上执行）
+
+`!command` 是与宿主无关的本地设施：它在 dsht 进程所在的机器上（操作者的笔记本或跳板机）用 `$SHELL -c` 执行，cwd 是 `Controller.localDirectory`，**不是** agent 工作的宿主。宿主的 shell 属于模型自己的工具，这条路径不经过 `commands/execute`、不经过 `session/prompt`，也不产生任何宿主记录。
+
+- **领域边界**：`src/shell/` 是本仓唯一允许导入 `node:child_process` 的单元；`tests/architecture/dependencies.test.ts` 新增 `shell` 单元与 `PROCESS_MODULES` 规则（与 fs 归 `storage/` 同形），因此别处出现 `spawn` 会被门禁直接拒绝。
+- **执行**：`runner.ts` 用 `detached: true` 建立独立进程组，stdout/stderr 合并成一条行流（行到达顺序），`
+` 去掉；单行超过 8 KiB 时**只发一次带 `…` 的截断行**，其后丢弃到下一个换行，因此一个从不换行的命令不会撑大内存。取消时向**整个进程组**发 SIGTERM，宽限 2 秒后 SIGKILL，管道与后台子进程一起结束。
+- **状态与上限**：`ShellController` 保留最近 20 个块，每块输出上限 200 行 / 64 KiB（超出从最旧端丢弃并计数 `dropped`）。同一时刻只运行一条命令，第二条 `!` 会被拒绝（`Ctrl+C` 停止第一条）。输出流期间按 80 ms 节流发布重绘，状态变化立即发布。
+- **渲染**：块**内联进对话区，并停在它发生的位置**。每个块在启动时记录 `anchor = record.readThrough`；`mergeShellRuns`（`ui/chat/shell-view.ts`）用二分在该会话的投影消息里找到"锚点之后的第一条消息"，把块插在它的起始行之前，因此之后到达的消息出现在块**下方**，块随历史一起滚走，而不是被钉在屏幕底部。相同锚点保持创建顺序，比前一个块更旧的锚点被夹到其后，所以向前翻页时合并流仍然有序。合并后的行数（`merged.total`）取代 `layout.length` 参与滚动数学，视口通过交替的"宿主行段 / 块行段"读取，每段只向 `layout.viewport` 请求可见区间，宿主记录的偏移与回收完全不受影响。命令行画在主题的 `shell` 色条上（`HistoryRow.highlight`），输出行带 `  ⎿  ` 起始标记、后续行按 gutter 缩进；换行在加 gutter **之前**完成，所以折行不会回到第 0 列，行计数与视口一致。非零退出码或信号会追加一行 `exit N`。
+- **不进入的东西**：不写入 `Transcript`（没有宿主 seq，也不该被当成会话消息）、不进入 `SessionInfo`、不进入回填历史（`PromptIndex` 不记录 `!` 命令）、不发给模型、不落盘。`lookup` 同理。
+- **环境**：子进程继承操作者环境，但剥掉 `DSH_TOKEN` 与 `DSH_URL`（后者按 README 的用法可能内嵌 token）。
+- **取消**：`Esc` 与 `Ctrl+C`（草稿为空、且没有面板或待答交互接管键盘时）都先停止正在运行的本地命令——终止整个进程组；再按一次才回到原有语义（Esc 打断 agent 回合、Ctrl+C 停止或退出）。
+- **输出是只读的**：客户端刻意不提供"把输出灌进输入框"的捷径。要把它交给模型，就用 `/copy` 的复制模式选中复制——这是一次显式的人为动作；命令输出因此保持为"看过就算"的本地块。
+- **开关**：默认启用；`--no-shell` 或 `DSHT_NO_SHELL=1` 关闭，`ShellController.start` 在关闭时抛出可见错误。
+- **已知限制**：没有 TTY，`vim`／`ssh`／需要交互的命令无法工作；输出不持久（重启即失）；读完之后没有单独的"移除这个块"动作——块随会话存活并且只受 20 块上限淘汰。
 
 ## 5. 数据存储
 
@@ -1118,6 +1141,7 @@ C4Component
 | 工作区、会话列表与归档集 | `State.workspaces/sessions`、`Client.archivedSessionIds` | `visibleSessions`、选择器 | `showPicker`、`listWorkspaces`、`listSessions` | 每次打开选择器或重连刷新 |
 | 模型目录与 preset 名单 | `State.defaultModel/presets` | `/model`、状态栏、模式标签 | `refreshCatalog`、`loadPresetNames` | 世代与 `catalogRevision` 守卫 |
 | 会话提示词索引与回填游标 | `PromptIndex`（`session/info.ts`） | `recall()`、`refillRecall()`、`length`／`atOldest` | `session/follow` 帧的增量折叠、`adoptCachedPrompts`／`backfillPrompts` 的播种与回填、本地提交的 `record()`、边界处的 `prepend()` | `trim()` 按 2,000 条 / 512 KiB 淘汰最旧条目并置 `trimmed`（此后不再声称穷尽）；切换会话重置并取消回填 |
+| 本地 `!` 块 | `ShellController.blocks`（`shell/controller.ts`） | 对话视口（内联追加的行） | `start()` 与 runner 的 `onLine` | 每块 200 行 / 64 KiB，最多 20 块；`stop()` 终止进程组 |
 | 跨会话提示词缓存 | `PromptCache`（`session/info.ts`） | `adoptCachedPrompts` | 计费扫描的 `rememberScanPage`／`rememberScanDone`、回填完成时的 `put()` | 按字节 LRU 淘汰最久未用的会话，至少保留一个条目；只接受 `complete` 条目 |
 | 会话草稿、光标与寄存草稿 | `SessionInfo.composer`（`session/info.ts`） | composer、`recall()` | `setComposer`／`setComposerCursor`／`parkComposer`／`restoreComposer` | `releaseTranscript()` 随会话重置；`setComposer` 只在真正变化时发布 |
 | 阅读视图（窗口、滚动、折叠、阅读保护） | `SessionInfo.view`（`session/info.ts`） | `historyLayout`、视口、`/think` | `setViewWindow`／`setScroll`／`setFolds`／`setLiveReasoning`／`pinHistory` | `closeWindow()` 与 `releaseTranscript()` 释放独立窗口；行缓存仍是 `WeakMap` |
@@ -1385,7 +1409,7 @@ export interface SessionInfo {
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（29 篇）、`bug-fix/`（5 篇）与 `feature/`（16 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（29 篇）、`bug-fix/`（5 篇）与 `feature/`（18 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences，且都提供英文、中文与 `.i18n.yaml` 配对。变更非平凡行为时应新增同目录的 note。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 | Agent Note | 主题 |
 | --- | --- |
@@ -1416,6 +1440,8 @@ export interface SessionInfo {
 | `feature/2026-09-14-terminal-session-panels` | 面板可见性与查询迁入 `SessionInfo.panels`；§5.7 迁移六步全部完成 |
 | `feature/2026-09-14-terminal-prompt-backfill` | 打开会话时后台遍历整段历史，把全部 user prompt 折入索引并标记穷尽 |
 | `feature/2026-09-14-terminal-shared-history-read` | 计费扫描把已读页面交给进程级 `PromptCache`；扫描之后打开会话 0 请求 |
+| `feature/2026-09-14-terminal-local-shell-commands` | `!` 在客户端机器上执行并把命令与输出内联进对话；新增 `shell/` 领域与进程执行门禁 |
+| `feature/2026-09-14-terminal-local-workspace-adoption` | 在已注册工作区目录里启动时直接采用该工作区，跳过工作区选择器 |
 | `bug-fix/2026-09-14-terminal-reclaim-pin-and-cache-bounds` | 移除无清除边的回收保护；缓存与索引在超预算时截断且不再声称穷尽 |
 
 ### 7.3 文档配对
@@ -1472,6 +1498,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 - 客户端崩溃不保留未提交的部分回答；宿主重启或工具失败后，原提问只能重新发起。
 - 输入框一期不识别粘贴边界：折叠按"多行且未折叠高度超过窗口"的结构判定，标签用中性的 `[N lines · X KB]`，不区分粘贴与手输。可靠边界要等 bracketed paste（`?2004h`；Ink 6 会把 `[200~`/`[201~]` 当普通文本投递，必须自行吞掉标记并跨 chunk 累积）。
 - 折叠块只能整块查看与删除：尚无 `View paste`/`Edit paste` 面板，光标也不能逐行进入折叠区间（↑/↓ 仍归历史回填，行间移动只能靠 ←/→ 与 Home/End）。`@` 引用菜单与对话框仍可能占用超过"对话区至少 4 行"的预算，因为它们是用户主动打开的模态；composer 本身已不再无限增长。
+- 本地 `!` 命令在客户端机器上执行且默认启用：没有 TTY，`vim`／`ssh` 这类需要交互终端的命令无法工作；同一时刻只运行一条；输出有界（每块 200 行 / 64 KiB、最多 20 块）、不持久、不进回填历史也不发给模型；`--no-shell`／`DSHT_NO_SHELL=1` 关闭。
 - 会话级状态已全部收进 `State.session`（`SessionInfo`，见 5.7）：记录、提示词索引、`composer`、阅读视图、交互状态与面板可见性各有一个所有者，切会话只走 `SessionInfo.reset()`。回填本身按可达性完整：预算淘汰的提示词要么仍在已加载窗口内（`refillRecall` 回填补齐），要么仍在宿主上（`session/page` 取回），见 4.3。
 
 ### 7.7 变更检查清单
@@ -1525,7 +1552,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ## 附录 A 源码索引
 
-`src/` 共 62 个模块、8,003 行。跨模块消费者通过每个域的 `index.ts` 导入。
+`src/` 共 66 个模块、8,379 行。跨模块消费者通过每个域的 `index.ts` 导入。
 
 | 域 / 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
@@ -1542,7 +1569,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `transport/host.ts` | 14 | `HostAccess` |
 | `session/controller.ts` | 945 | `SessionController` |
 | `session/transcript.ts` | 774 | `Transcript`、`LivePhase`、`Message`、`MessagePart`、`ThoughtEntry`、`contentText`、`toolLine` |
-| `session/history.ts` | 320 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
+| `session/history.ts` | 339 | `historyLayout`、`releaseHistoryLayout`、`HistoryRow`、`Reasoning`、`RowKind` |
 | `session/telemetry.ts` | 108 | `Telemetry`、`QueuedInput` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
 | `session/navigation.ts` | 159 | `navigationCommand`、`sessionLabel`、`resolveTarget`、`sessionState`、`SESSION_MARKERS`、`STATE_LABELS`、`ROLLUP_STATES`、`activityAge`、`sessionStatus`、`workspaceCounts`、`workspaceSegments`、`workspaceStatus`、`ROLLUP_LEGEND`、`workspaceDetail` |
@@ -1566,30 +1593,34 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `cost/index.ts` | 10 | 域 barrel |
 | `catalog/controller.ts` | 85 | `CatalogController` |
 | `catalog/index.ts` | 2 | 域 barrel |
-| `controller/controller.ts` | 575 | `Controller` |
+| `controller/controller.ts` | 599 | `Controller` |
 | `controller/connection.ts` | 203 | `ConnectionController`、`ConnectionListener`、`ConnectionOptions` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `clearReactMeasures`、`reactMeasureNames`、`measureCount` |
 | `controller/index.ts` | 5 | 域 barrel |
-| `ui/app.tsx` | 707 | `App` |
+| `ui/app.tsx` | 720 | `App` |
 | `ui/mount.tsx` | 12 | `mount` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
 | `ui/commands/registry.ts` | 87 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMANDS`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
-| `ui/commands/parse.ts` | 137 | `Submission`、`SubmissionContext`、`classifySubmission` |
+| `ui/commands/parse.ts` | 146 | `Submission`、`SubmissionContext`、`classifySubmission` |
 | `ui/dialogs/picker.tsx` | 102 | `Picker`、`Choice`、`ChoiceCell` |
 | `ui/dialogs/index.tsx` | 196 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
 | `ui/dialogs/cost.tsx` | 33 | `CostPanel` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
-| `ui/chat/history-view.tsx` | 21 | `HistoryViewport` |
+| `ui/chat/history-view.tsx` | 23 | `HistoryViewport` |
 | `ui/chat/status.tsx` | 429 | `StatusBar`、`StatusGroups`、`compactStatusRows`、`cacheHitText`、`elapsedTime`、`clockText`、`phaseText`、`metricLines` |
 | `ui/input/input.tsx` | 88 | `TextInput`、`EditState`、`editInput` |
+| `ui/chat/shell-view.ts` | 40 | `shellRows` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
-| `ui/theme/index.ts` | 27 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
+| `ui/theme/index.ts` | 30 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
+| `shell/runner.ts` | 113 | `runShell`、`ShellRunOptions`、`ShellExit`、`ShellStream` |
+| `shell/controller.ts` | 144 | `ShellController`、`ShellBlock`、`ShellHost` |
+| `shell/index.ts` | 5 | 域 barrel |
 | `cli/index.ts` | 17 | 可执行入口：先选定 React 构建再动态导入 `dsht`（无导出） |
-| `cli/dsht.tsx` | 109 | 参数解析与环境准备（无导出） |
+| `cli/dsht.tsx` | 113 | 参数解析与环境准备（无导出） |
 
 ```mermaid
 C4Component
@@ -1598,17 +1629,19 @@ C4Component
   Component(root, "根契约", "index.ts, state.ts", "公开库门面与共享状态")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "4 文件 177 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "5 文件 359 行")
-  Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "15 文件 3174 行")
+  Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "15 文件 3193 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 853 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, index", "5 文件 947 行")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "18 文件 2228 行")
-  Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 126 行")
+  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, index", "5 文件 971 行")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, commands/, chat/, dialogs/, input/, theme/", "19 文件 2295 行")
+  Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 130 行")
+  Component(shell, "shell/", "controller, runner, index", "3 文件 262 行")
 
   Rel(root, transport, "公开门面")
   Rel(transport, session, "被依赖")
   Rel(session, controller, "被依赖")
   Rel(controller, ui, "被依赖")
+  Rel(shell, controller, "被依赖")
   Rel(ui, cli, "被依赖")
 ```
 

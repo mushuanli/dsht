@@ -6,6 +6,8 @@ import type { RowKind } from '../../session/history.ts';
 export interface Theme {
   name: string;
   colors: Record<RowKind, string>;
+  /** Bar drawn behind a local `!` command line, so it reads as this machine rather than the agent. */
+  shell: { background: string; foreground: string };
   status: Record<'working' | 'ready' | 'offline' | 'model' | 'cost' | 'context' | 'warning' | 'critical' | 'usage', string>;
   accent: string;
   border: string;
@@ -15,7 +17,8 @@ export interface Theme {
 export const mocha: Theme = {
   name: 'Catppuccin Mocha',
   colors: { user: '#89b4fa', assistant: '#a6e3a1', context: '#f9e2af', text: '#cdd6f4',
-    reasoning: '#cba6f7', tool: '#89dceb', success: '#a6e3a1', error: '#f38ba8', muted: '#a6adc8' },
+    reasoning: '#cba6f7', tool: '#89dceb', success: '#a6e3a1', error: '#f38ba8', muted: '#a6adc8', shell: '#a6adc8' },
+  shell: { background: '#cdd6f4', foreground: '#1e1e2e' },
   status: { working: '#f9e2af', ready: '#a6e3a1', offline: '#f38ba8', model: '#cba6f7',
     cost: '#89dceb', context: '#a6e3a1', warning: '#f9e2af', critical: '#f38ba8', usage: '#a6adc8' },
   accent: '#cba6f7', border: '#6c7086',

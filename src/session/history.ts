@@ -6,9 +6,11 @@ import { hasMarkdown, markdownRows, type MarkdownSpan } from './markdown.ts';
 /** Default fold mode; individual sequence overrides are view state, never stored content. */
 export type Reasoning = 'row' | 'full';
 /** Color semantics are independent of the selected terminal palette. */
-export type RowKind = MessagePart['kind'] | 'user' | 'assistant' | 'context' | 'muted';
+export type RowKind = MessagePart['kind'] | 'user' | 'assistant' | 'context' | 'muted' | 'shell';
 /** One visible terminal row; no remote ANSI is allowed into its text. */
-export interface HistoryRow { text: string; kind: RowKind; bold?: boolean; seq?: number; spans?: MarkdownSpan[] }
+export interface HistoryRow { text: string; kind: RowKind; bold?: boolean; seq?: number; spans?: MarkdownSpan[];
+  /** Draw the row on the theme's local-command bar, used by `!` commands. */
+  highlight?: boolean }
 interface Segment { message: Message; start: number; count: number; reasoning: Reasoning; heading: boolean; assistantSeen: boolean }
 interface CachedRows { width: number; reasoning: Reasoning; heading: boolean; rows: HistoryRow[] }
 
@@ -141,6 +143,23 @@ interface LiveWrap {
  * @param seq - Durable sequence, for committed parts.
  * @returns The wrapped rows.
  */
+
+/** Wrap plain local text into terminal rows, preserving its own whitespace.
+ *
+ * Command output is aligned by spaces and indented by stack traces, so this never collapses runs of
+ * whitespace the way tool summaries do; only the terminal width decides where a row breaks.
+ * @param text - Raw text, possibly containing newlines.
+ * @param width - Available terminal columns.
+ * @param kind - Row kind used for coloring.
+ * @param highlight - Whether the rows are a local command line drawn on the command bar.
+ * @returns One row per wrapped terminal line; empty text yields one empty row.
+ */
+export function plainRows(text: string, width: number, kind: RowKind, highlight = false): HistoryRow[] {
+  const columns = Math.max(1, width);
+  const wrapped = wrapAnsi(text === '' ? ' ' : text, columns, { hard: true, trim: false });
+  return wrapped.split('\n').map(line => ({ text: line, kind, ...(highlight ? { highlight: true } : {}) }));
+}
+
 function wrapRows(text: string, width: number, kind: MessagePart['kind'], seq?: number): HistoryRow[] {
   return wrapAnsi(text, width, { hard: true, trim: !['tool', 'success', 'error'].includes(kind) })
     .split('\n').map(text => ({ text, kind, seq }));

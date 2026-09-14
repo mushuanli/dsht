@@ -12,6 +12,7 @@ import { CostPanel } from './dialogs/cost.tsx';
 import { StatusBar } from './chat/status.tsx';
 import { ChatHeader } from './chat/header.tsx';
 import { ChatViewport } from './chat/viewport.tsx';
+import { mergeShellRuns } from './chat/shell-view.ts';
 import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
 import type { Choice } from './dialogs/picker.tsx';
@@ -280,6 +281,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     // The typed host path is a screen of its own, so Esc has to leave it: the picker behind it is
     // disabled while a draft exists, so a leftover path would leave no way back at all.
     if (key.escape && state.screen === 'path') { setInput(''); operate(() => controller.showPicker('workspaces')); return; }
+    if (key.ctrl && _value === 'c' && input === '' && controller.shell.running) {
+      // A local command in the transcript is the most immediate thing Ctrl+C can stop.
+      controller.shell.cancel(); return;
+    }
     if (key.ctrl && _value === 'c') {
       // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
       if (input !== '') { setInput(''); return; }
@@ -312,6 +317,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusScroll(0); setNotice(undefined);
       if (controller.running) void controller.interrupt(true);
       return;
+    }
+    if (key.escape && controller.shell.running && input === '' && !panelBlocksKeys && !pending && state.screen === 'chat') {
+      // The local command is the most immediate thing Esc can stop; the next press interrupts the agent.
+      controller.shell.cancel(); return;
     }
     if (key.escape && state.screen === 'chat') { void controller.interrupt(true); }
   });
@@ -364,6 +373,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           return;
         }
         case 'queue': controller.openQueue(true); return;
+        case 'shell': controller.shell.start(submission.command); controller.setScroll(0); return;
         case 'newSession': await controller.createSession(); return;
         case 'history': controller.setSearchPanel(undefined); controller.setHistoryPanel({ query: submission.query, contentSearch: false }); return;
         case 'sessionSearch':
@@ -482,20 +492,25 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const layout = useMemo(() => historyLayout(displayTranscript, width, reasoning, reasoningOverrides, liveReasoning),
     [displayTranscript, displayTranscript.version, width, reasoning, reasoningOverrides, liveReasoning]);
   const { length, first } = layout;
+  // Local `!` blocks live at the end of the transcript: not host records, not persisted, but they
+  // scroll with the conversation and are counted into its total so the viewport math stays honest.
+  const merged = useMemo(() => mergeShellRuns(layout, controller.shell.runs, width),
+    [layout, controller, state.version, width]);
+  const totalRows = merged.total;
   const statusNotice = !['Connected', 'Idle', 'Running…', 'Responding…'].includes(state.status);
   const showHistoryHint = dialogOpen || displayTranscript.hasMore || !!historyWindow;
   const pageSize = Math.max(1, conversationRows - (showHistoryHint ? 1 : 0));
-  const previousView = useRef({ transcript: displayTranscript, session: state.session.record, count: length, first, folds: reasoningOverrides, liveReasoning });
+  const previousView = useRef({ transcript: displayTranscript, session: state.session.record, count: totalRows, first, folds: reasoningOverrides, liveReasoning });
   const previous = previousView.current;
   const prepended = previous.first !== undefined && first !== undefined && first < previous.first;
   const adjustedScroll = previous.session !== state.session.record ? 0
-    : scroll > 0 && previous.transcript === displayTranscript && !prepended && previous.folds === reasoningOverrides && previous.liveReasoning === liveReasoning ? Math.max(0, scroll + length - previous.count) : scroll;
-  const maxScroll = Math.max(0, length - pageSize);
+    : scroll > 0 && previous.transcript === displayTranscript && !prepended && previous.folds === reasoningOverrides && previous.liveReasoning === liveReasoning ? Math.max(0, scroll + totalRows - previous.count) : scroll;
+  const maxScroll = Math.max(0, totalRows - pageSize);
   const position = Math.min(adjustedScroll, maxScroll);
   useLayoutEffect(() => {
-    previousView.current = { transcript: displayTranscript, session: state.session.record, count: length, first, folds: reasoningOverrides, liveReasoning };
+    previousView.current = { transcript: displayTranscript, session: state.session.record, count: totalRows, first, folds: reasoningOverrides, liveReasoning };
     if (position !== scroll) controller.setScroll(position);
-  }, [state.session.record, displayTranscript, length, position, scroll, reasoningOverrides, liveReasoning]);
+  }, [state.session.record, displayTranscript, totalRows, position, scroll, reasoningOverrides, liveReasoning]);
   useLayoutEffect(() => {
     controller.pinHistory(!historyWindow && (position > 0 || thoughtList || historyQuery !== undefined && !contentSearch));
   }, [controller, historyWindow, position, thoughtList, historyQuery, contentSearch, state.session.record]);
@@ -589,8 +604,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   }
   useMouseWheel(direction => { if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3)); else scrollHistory(direction * 3); }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
   const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
-  const end = Math.max(pageSize, length - position - trailingGap);
-  const visible = useMemo(() => layout.viewport(Math.max(0, end - pageSize), end), [layout, end, pageSize]);
+  const end = Math.max(pageSize, totalRows - position - trailingGap);
+  const visible = useMemo(() => merged.viewport(Math.max(0, end - pageSize), end), [merged, end, pageSize]);
   const liveThought = thoughtList && !historyWindow ? state.session.record.liveParts(width).find(part => part.kind === 'reasoning') : undefined;
   const thoughtEntries = thoughtList ? displayTranscript.thoughts : undefined;
   const thoughtChoices = useMemo(() => [...(thoughtEntries ?? [])].reverse().map(entry => ({

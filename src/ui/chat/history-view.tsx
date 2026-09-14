@@ -13,7 +13,9 @@ import { useTheme } from '../theme/index.ts';
  */
 export function HistoryViewport({ rows }: { rows: HistoryRow[] }) {
   const theme = useTheme();
-  return <Box flexDirection="column">{rows.map((row, index) => <Text key={index} color={theme.colors[row.kind]} bold={row.bold}>
+  return <Box flexDirection="column">{rows.map((row, index) => <Text key={index} bold={row.bold}
+    color={row.highlight ? theme.shell.foreground : theme.colors[row.kind]}
+    backgroundColor={row.highlight ? theme.shell.background : undefined}>
     {row.spans?.length ? row.spans.map((span, position) => <Text key={position} bold={span.bold} italic={span.italic}
       underline={span.underline} strikethrough={span.strikethrough} inverse={span.inverse}>{span.text}</Text>)
       : row.text === '' ? ' ' : row.text}

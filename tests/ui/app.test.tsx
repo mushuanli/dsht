@@ -97,6 +97,33 @@ test('the workspace picker offers this client directory, and Esc leaves the type
   assert.equal(ui.lastFrame()?.includes('+ Add workspace (this directory)'), false);
 });
 
+test('starting inside a registered workspace directory skips the workspace picker', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // The ninth argument is the directory this client runs in; the fixture registers /host/project.
+  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined,
+    undefined, undefined, undefined, '/host/project');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.screen === 'sessions' && controller.state.workspaces.length > 0);
+  assert.equal(controller.state.workspaceId, 'w1');
+  assert.match(ui.lastFrame()!, /Choose session/);
+  assert.doesNotMatch(ui.lastFrame()!, /Choose workspace/);
+  assert.match(ui.lastFrame()!, /Workspace from this directory/);
+});
+
+test('an unrelated directory leaves the workspace picker in place and matching is by segment', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined,
+    undefined, undefined, undefined, '/srv/elsewhere');
+  t.after(() => controller.stop()); controller.start();
+  await until(() => controller.state.online && controller.state.workspaces.length > 0);
+  assert.equal(controller.state.screen, 'workspaces');
+  // A directory inside a workspace still adopts it, but a sibling with a shared prefix does not.
+  assert.equal(controller.session.adoptLocalWorkspace('/host/project/src/deep'), 'w1');
+  assert.equal(controller.session.adoptLocalWorkspace('/host/project-old'), undefined);
+});
+
 test('startup requires workspace and session selection before showing the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token');
@@ -1590,6 +1617,66 @@ test('opening a session folds every user prompt from the whole history', async t
   assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, folded);
 });
 
+
+test('a local ! command runs on this machine and prints inline', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.record.ready);
+  await pressKey(ui, '! echo hello-local'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('hello-local') === true);
+  assert.match(ui.lastFrame()!, /! echo hello-local/);
+  await until(() => controller.shell.runs[0]?.status === 'exited');
+  assert.equal(controller.shell.runs[0]!.code, 0);
+  // A local command never reaches the host or the model.
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('a local ! block stays where it happened instead of pinning to the bottom', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.record.ready);
+  await pressKey(ui, '! echo blocked-here'); await pressKey(ui, '\r');
+  await until(() => controller.shell.runs[0]?.status === 'exited');
+  // A message that arrives afterwards belongs below the block, not above it.
+  fixture.follow({ type: 'event', event: { type: 'assistant/message', seq: 1, surfaceOp: 'append',
+    data: { message: { content: [{ type: 'text', text: 'reply after the command' }] } } } });
+  await until(() => ui.lastFrame()?.includes('reply after the command') === true);
+  const frame = ui.lastFrame()!;
+  assert.ok(frame.includes('! echo blocked-here'));
+  assert.ok(frame.indexOf('! echo blocked-here') < frame.indexOf('reply after the command'),
+    'the block stays above the message that followed it');
+});
+
+test('Esc stops a running local command without interrupting the agent', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.record.ready);
+  await pressKey(ui, '! sleep 30'); await pressKey(ui, '\r');
+  await until(() => controller.shell.running);
+  await pressKey(ui, '\u001b');
+  await until(() => controller.shell.runs[0]?.status === 'exited');
+  assert.notEqual(controller.shell.runs[0]!.code, 0, 'the command did not exit cleanly');
+  assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false,
+    'stopping a local command does not cancel the agent turn');
+});
+
+test('shell commands can be turned off for this client', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined,
+    undefined, undefined, undefined, false);
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.record.ready);
+  await pressKey(ui, '! echo nope'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('disabled') === true);
+  assert.equal(controller.shell.runs.length, 0);
+});
 
 test('a cost scan warms the prompt cache, so opening that session does not re-walk it', async t => {
   const fixture = await host(); t.after(() => fixture.close());

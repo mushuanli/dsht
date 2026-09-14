@@ -27,6 +27,7 @@ With no command, choose a workspace and session interactively.
   --history-mb <n>      Soft history payload budget in MiB (default 16)
   --memory-log <path>   Append runtime memory samples; a failing log stops itself
   --no-memory-log       Disable the runtime memory log (default: enabled)
+  --no-shell            Disable ! local commands (DSHT_NO_SHELL=1)
   --json               Print machine-readable list output
   --help               Show this help
 
@@ -34,6 +35,7 @@ The default host is http://127.0.0.1:3080.
 First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 /cost shows the session and today CNY estimates.
+!command runs on this machine, not on the host, and prints its output in the transcript.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
 prices.json overrides the shipped rates and is seeded on first use; every scan re-decides the
@@ -49,7 +51,7 @@ async function main(): Promise<void> {
     url: { type: 'string', default: process.env.DSH_URL ?? 'http://127.0.0.1:3080' },
     'history-records': { type: 'string' }, 'history-mb': { type: 'string' },
     workspace: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
-    'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' },
+    'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' }, 'no-shell': { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
   const list = positionals[0] === 'list' && ['workspaces', 'sessions'].includes(positionals[1] ?? '') && positionals.length === 2;
@@ -83,7 +85,9 @@ async function main(): Promise<void> {
   const costs = new CostLedger(prices, costDirectory, custom);
   await costs.load();
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
-  const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits, memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']));
+  const shellEnabled = !values['no-shell'] && process.env.DSHT_NO_SHELL !== '1';
+  const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits,
+    memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']), undefined, shellEnabled);
   const app = mount(controller);
   const terminate = () => app.unmount();
   process.once('SIGTERM', terminate);

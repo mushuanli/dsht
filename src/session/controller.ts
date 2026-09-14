@@ -301,6 +301,29 @@ export class SessionController {
   /** Prompt for a host path without starting a local agent. */
   enterPath(): void { this.store.update({ screen: 'path' }); }
 
+  /** Adopt the workspace whose registered path contains the directory this client runs in.
+   *
+   * Longest path wins, so a workspace nested in another is preferred, and the comparison is on whole
+   * path segments so `/srv/app-old` cannot match `/srv/app`. A remote host's paths usually differ
+   * from the client's, in which case nothing matches and the picker stays exactly as before.
+   * @param directory - Directory this client was started in.
+   * @returns The adopted workspace's id, or undefined when none matches.
+   */
+  adoptLocalWorkspace(directory: string): string | undefined {
+    const slashed = (value: string): string => value.replace(/\\/g, '/').replace(/\/+$/, '');
+    const target = slashed(directory);
+    if (target === '') return undefined;
+    let best: { id: string; length: number } | undefined;
+    for (const workspace of this.store.state.workspaces) {
+      const path = slashed(string(workspace.path));
+      if (path === '' || (target !== path && !target.startsWith(`${path}/`))) continue;
+      if (best === undefined || path.length > best.length) best = { id: string(workspace.workspaceId), length: path.length };
+    }
+    if (best === undefined) return undefined;
+    this.pickWorkspace(best.id);
+    return best.id;
+  }
+
   /** Register a host directory and move to its session picker.
    * @param path - Absolute directory path on the host.
    */

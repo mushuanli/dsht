@@ -25,6 +25,8 @@ export type Submission =
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
+  /** A local `!` command, run on this machine rather than the host. */
+  | { kind: 'shell'; command: string }
   | { kind: 'export'; destination?: string }
   | { kind: 'exportHtml'; destination?: string }
   | { kind: 'coredump'; tag?: string }
@@ -59,6 +61,13 @@ export function classifySubmission(raw: string, context: SubmissionContext): Sub
   if (context.copyMode) return { kind: 'ignore' };
   const value = raw.trim();
   if (!value) return { kind: 'ignore' };
+  // `!` runs on the machine this client is on; it never reaches the host or the model.
+  if (value.startsWith('!')) {
+    const command = value.slice(1).trim();
+    if (!command) return { kind: 'error', message: 'Type a command after !' };
+    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
+    return { kind: 'shell', command };
+  }
   if (value === '/copy') return { kind: 'copy' };
   if (value === '/quit') return { kind: 'quit' };
   if (value === '/cost') return { kind: 'panel', panel: 'cost' };
