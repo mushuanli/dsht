@@ -14,6 +14,7 @@ import type { FileReference } from '../contracts.ts';
 import { CostPanel, type CostSource } from './dialogs/cost.tsx';
 import { StatusBar, type StatusSource } from './chat/status.tsx';
 import { ChatHeader } from './chat/header.tsx';
+import { LoopStatus } from './chat/loop-status.tsx';
 import { ChatViewport } from './chat/viewport.tsx';
 import { mergeShellRuns } from './chat/shell-view.ts';
 import { Frozen } from './frozen.tsx';
@@ -759,9 +760,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     <Box flexDirection="column" flexShrink={0}>
       {notice && <Text dimColor>{safeText(notice)}</Text>}
       {composerIntent && <Text color={theme.colors.context}>{composerIntent.hint}</Text>}
-      {loop && <Text color={loop.phase === 'running' ? theme.colors.context : theme.colors.muted}>
-        {loop.title} · step {loop.step}/{loop.to} · attempt {loop.attempt}/{loop.tries} · best {loop.best}/{loop.score}{loop.phase === 'running' ? '' : ` · ${loop.phase}`}
-      </Text>}
+      {loop && <LoopStatus progress={loop} />}
       <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
     {queueOpen && !pending ? <QueueDialog queued={queued} rows={stdout.rows ?? 30} width={width}
