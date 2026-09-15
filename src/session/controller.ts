@@ -530,6 +530,18 @@ export class SessionController {
     this.store.update({ status: 'Accepted · waiting for host' });
   }
 
+  /** Send one prompt the client assembled, keeping its durable echo out of composer recall.
+   *
+   * The host records every prompt as a user message, so an agent loop that submits a turn per
+   * attempt would otherwise crowd out the prompts the operator actually typed. Suppressing the text
+   * before sending is what makes the later echo invisible to ↑/↓.
+   * @param text - Prompt the client assembled, not text the operator typed.
+   */
+  async promptInternal(text: string): Promise<void> {
+    this.prompts.suppress(text);
+    await this.prompt(text);
+  }
+
   /** Answer the oldest selected-session interaction, after explicit user action.
    * @param value - Structured answer value or approval outcome.
    */

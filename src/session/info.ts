@@ -29,6 +29,9 @@ export const DEFAULT_PROMPT_LIMITS: PromptLimits = { maxEntries: 2000, maxBytes:
 /** Longest single prompt worth recalling; a larger one is skipped rather than truncated in place. */
 const MAX_ENTRY_CHARS = 128 * 1024;
 
+/** Client-generated prompts remembered for recall suppression; a bounded run needs far fewer. */
+const MAX_INTERNAL_PROMPTS = 512;
+
 /** Flatten one transcript prompt into the single line the composer recalls. */
 export function promptText(value: string): string { return value.replace(/\r?\n/g, ' ').trim(); }
 
@@ -116,6 +119,12 @@ export class PromptIndex {
   private shed = false;
   private position: number | undefined;
   private draft = '';
+  /** Prompts the client sent on the operator's behalf; their durable echo never enters recall.
+   *
+   * Kept across `reset()` so re-opening the session in the same process stays clean, and bounded
+   * because an agent loop can send a prompt per attempt.
+   */
+  private readonly internal = new Set<string>();
 
   constructor(private readonly limits: PromptLimits = DEFAULT_PROMPT_LIMITS) {}
 
@@ -156,10 +165,26 @@ export class PromptIndex {
    */
   markComplete(): void { if (!this.shed) this.complete = true; }
 
-  /** Forget one session's prompts and cursor. */
+  /** Forget one session's prompts and cursor; client-generated suppression is process-wide. */
   reset(): void {
     this.entries = []; this.bytes = 0; this.newestSeq = -1; this.complete = false; this.shed = false;
     this.position = undefined; this.draft = '';
+  }
+
+  /** Remember one prompt the client sent itself, so its durable echo never enters recall.
+   *
+   * An agent loop submits many turns; without this they would crowd out what the operator typed.
+   * @param value - Prompt text the client sent on the operator's behalf.
+   */
+  suppress(value: string): void {
+    const text = promptText(value);
+    if (!text) return;
+    this.internal.delete(text); this.internal.add(text);
+    while (this.internal.size > MAX_INTERNAL_PROMPTS) {
+      const oldest = this.internal.values().next().value;
+      if (oldest === undefined) break;
+      this.internal.delete(oldest);
+    }
   }
 
   /** Fold one transcript scan: its prompts, plus the watermark it covered.
@@ -186,7 +211,9 @@ export class PromptIndex {
    * @param value - Submitted command text; consecutive repeats coalesce.
    */
   record(value: string): void {
-    const entry = { seq: this.newestSeq, text: promptText(value), durable: false };
+    const text = promptText(value);
+    if (this.internal.has(text)) return;
+    const entry = { seq: this.newestSeq, text, durable: false };
     if (!this.retainable(entry) || this.entries.at(-1)?.text === entry.text) return;
     this.entries.push(entry); this.bytes += entry.text.length * 2;
     this.trim();
@@ -198,7 +225,7 @@ export class PromptIndex {
    */
   prepend(values: readonly PromptRecord[]): number {
     const older = values.map(value => ({ seq: value.seq, text: promptText(value.text), durable: true }))
-      .filter(value => this.retainable(value));
+      .filter(value => !this.internal.has(value.text) && this.retainable(value));
     if (!older.length) return 0;
     this.entries = [...older, ...this.entries];
     this.bytes += older.reduce((sum, value) => sum + value.text.length * 2, 0);
@@ -242,7 +269,8 @@ export class PromptIndex {
   /** Retain one durable prompt; a durable echo upgrades a local entry instead of duplicating it. */
   private push(value: PromptRecord): void {
     const entry: PromptEntry = { seq: value.seq, text: promptText(value.text), durable: true };
-    if (!this.retainable(entry)) return;
+    // A prompt the client itself sent (an agent loop) is durable history, but not composer recall.
+    if (this.internal.has(entry.text) || !this.retainable(entry)) return;
     const last = this.entries.at(-1);
     if (last && last.text === entry.text) { last.seq = entry.seq; last.durable = true; return; }
     this.entries.push(entry); this.bytes += entry.text.length * 2;

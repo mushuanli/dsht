@@ -31,6 +31,21 @@ test('a durable echo upgrades a locally recorded prompt instead of duplicating i
   assert.equal(index.oldest, 7);
 });
 
+test('a suppressed prompt never enters recall, whether it arrives live or by backfill', () => {
+  const index = new PromptIndex();
+  index.suppress('client assembled prompt');
+  // The live durable echo and an older page both carry it; neither may retain an entry.
+  index.append([{ seq: 4, text: 'client assembled prompt' }]);
+  index.prepend([{ seq: 2, text: 'client assembled prompt' }]);
+  index.record('client assembled prompt');
+  assert.equal(index.length, 0);
+  assert.equal(index.oldest, undefined);
+  // Other prompts are untouched, and the watermark still advanced past the suppressed one.
+  index.append([{ seq: 5, text: 'typed by hand' }]);
+  assert.deepEqual(index.items.map(entry => entry.text), ['typed by hand']);
+  assert.equal(index.through, 5);
+});
+
 test('budgets evict the oldest entry while its durable boundary stays reloadable', () => {
   const index = new PromptIndex(small);
   index.append([{ seq: 1, text: 'one' }, { seq: 2, text: 'two' }, { seq: 3, text: 'three' }]);

@@ -88,3 +88,32 @@ test('typed text, an explicit stop and a session switch all end the loop', async
   await until(() => controller.state.sessionId === 's2');
   assert.equal(controller.queries.loop, undefined);
 });
+
+test('loop prompts stay out of composer recall while typed prompts remain', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  // The opened snapshot already contributes one prompt (the fixture's `你好`).
+  const before = controller.queries.recallLength;
+  await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  // The host echoes a prompt back as a durable user message; a loop prompt must not become recall.
+  const brief = lastPrompt(fixture);
+  fixture.follow({ type: 'event', event: { seq: 20, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: brief }] } } });
+  await until(() => controller.queries.record.messages.some(message => message.text.includes('只执行第 1 轮')));
+  assert.equal(controller.queries.recallLength, before);
+  assert.equal(controller.queries.recall(-1, 'draft'), '你好');
+  // Leave recall navigation, the way editing the composer would, before the next assertion.
+  controller.actions.resetRecall();
+
+  // A prompt the operator typed is still recalled, so the filter is not a blanket one.
+  await controller.actions.prompt('remember me');
+  fixture.follow({ type: 'event', event: { seq: 21, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: 'remember me' }] } } });
+  await until(() => controller.queries.recallLength === before + 1);
+  assert.equal(controller.queries.recall(-1, 'draft'), 'remember me');
+});

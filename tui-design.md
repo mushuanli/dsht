@@ -176,7 +176,7 @@ C4Component
   Component(root, "共享契约", "src/state.ts", "State 与 ControllerStore")
   Component(storage, "storage/", "4 文件 177 行", "全部文件系统操作：私有读写、原子替换、独占创建、流式写入与堆快照")
   Component(transport, "transport/", "6 文件 524 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
-  Component(session, "session/", "16 文件 2929 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
+  Component(session, "session/", "16 文件 2969 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 852 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
   Component(controller, "controller/", "9 文件 1803 行", "Controller 门面、命令策略、通用评分循环与设计审查协议、ConnectionController、内存日志与快捷提示词")
@@ -1171,7 +1171,7 @@ C4Component
 | 待答交互 | `interactions` | `state.pending`（每次 `update` 由映射推导） | `$events` 的 `waterfall` / `cancel` | 显式应答、宿主取消或连接结束 |
 | 工作区、会话列表与归档集 | `State.workspaces/sessions`、`Client.archivedSessionIds` | `visibleSessions`、选择器 | `showPicker`、`listWorkspaces`、`listSessions` | 每次打开选择器或重连刷新 |
 | 模型目录与 preset 名单 | `State.defaultModel/presets` | `/model`、状态栏、模式标签 | `refreshCatalog`、`loadPresetNames` | 世代与 `catalogRevision` 守卫 |
-| 会话提示词索引与回填游标 | `PromptIndex`（`session/info.ts`） | `recall()`、`refillRecall()`、`length`／`atOldest` | `session/follow` 帧的增量折叠、`adoptCachedPrompts`／`backfillPrompts` 的播种与回填、本地提交的 `record()`、边界处的 `prepend()` | `trim()` 按 2,000 条 / 512 KiB 淘汰最旧条目并置 `trimmed`（此后不再声称穷尽）；切换会话重置并取消回填 |
+| 会话提示词索引与回填游标 | `PromptIndex`（`session/info.ts`） | `recall()`、`refillRecall()`、`length`／`atOldest` | `session/follow` 帧的增量折叠、`adoptCachedPrompts`／`backfillPrompts` 的播种与回填、本地提交的 `record()`、边界处的 `prepend()`、客户端自组装提示词的 `suppress()` | `trim()` 按 2,000 条 / 512 KiB 淘汰最旧条目并置 `trimmed`（此后不再声称穷尽）；切换会话重置并取消回填，但 `suppress` 集合保留（进程级、上限 512 条），否则重开会话时回填又会把内部提示词带回来 |
 | 本地 `!` 块 | `ShellController.blocks`（`shell/controller.ts`） | 对话视口（内联追加的行） | `start()` 与 runner 的 `onLine` | 每块 200 行 / 64 KiB，最多 20 块；`stop()` 终止进程组 |
 | 跨会话提示词缓存 | `PromptCache`（`session/info.ts`） | `adoptCachedPrompts` | 计费扫描的 `rememberScanPage`／`rememberScanDone`、回填完成时的 `put()` | 按字节 LRU 淘汰最久未用的会话，至少保留一个条目；只接受 `complete` 条目 |
 | 会话草稿、光标与寄存草稿 | `SessionInfo.composer`（`session/info.ts`） | composer、`recall()` | `setComposer`／`setComposerCursor`／`parkComposer`／`restoreComposer` | `releaseTranscript()` 随会话重置；`setComposer` 只在真正变化时发布 |
@@ -1649,12 +1649,12 @@ CI 工作流 `.github/workflows/publish.yml`：
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `session/connection-view.ts` | 10 | `ConnectionView` |
-| `session/controller.ts` | 871 | `SessionController` |
+| `session/controller.ts` | 883 | `SessionController` |
 | `session/export-html.ts` | 42 | `saveTranscriptHtml` |
 | `session/export.ts` | 30 | `saveSessionLog` |
 | `session/history.ts` | 332 | `Reasoning`、`RowKind`、`HistoryRow`、`releaseHistoryLayout`、`layoutStats`、`SessionRender`、`historyLayout` |
 | `session/index.ts` | 22 | `SessionController`、`contentText`、`Transcript`、`toolLine`、`historyLayout`、`layoutStats`、`releaseHistoryLayout`、`markdownCacheStats`、`Telemetry`、`DEFAULT_HISTORY_LIMITS`、`historyLimits`、`DEFAULT_PROMPT_LIMITS` |
-| `session/info.ts` | 343 | `PromptRecord`、`PromptEntry`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText`、`ModelState`、`PanelState`、`OptionState`、`InteractionState`、`SessionInfo`、`PromptIndex`、`DEFAULT_PROMPT_CACHE_BYTES` |
+| `session/info.ts` | 371 | `PromptRecord`、`PromptEntry`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText`、`ModelState`、`PanelState`、`OptionState`、`InteractionState`、`SessionInfo`、`PromptIndex`、`DEFAULT_PROMPT_CACHE_BYTES` |
 | `session/markdown.ts` | 245 | `MarkdownSpan`、`MarkdownRow`、`markdownCacheStats`、`hasMarkdown`、`markdownRows`、`markdownHtml` |
 | `session/math.ts` | 67 | `renderMath` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
@@ -1756,7 +1756,7 @@ C4Component
   Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "7 文件 267 行")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "4 文件 177 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "6 文件 524 行")
-  Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2924 行")
+  Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2969 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 852 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
   Component(controller, "controller/", "controller, commands, loop, design-review, connection, memory-log, perf-measures, prompts, index", "9 文件 1803 行")

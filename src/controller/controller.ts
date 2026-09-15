@@ -778,7 +778,7 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private async handoff(): Promise<void> {
     await removeFile(join(this.localDirectory, HANDOFF_FILE));
-    await this.session.prompt(HANDOFF_PROMPT);
+    await this.session.promptInternal(HANDOFF_PROMPT);
   }
 
   /** Start a scored loop and send its opening step.
@@ -794,7 +794,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     loop.sent();
     this.loop = loop;
     this.update({});
-    try { await this.session.prompt(prompt); }
+    try { await this.session.promptInternal(prompt); }
     catch (error) { this.forgetLoop(); this.update({}); throw error; }
   }
 
@@ -835,7 +835,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.loopPrompt = undefined;
     loop.sent();
     this.update({});
-    try { await this.session.prompt(prompt); }
+    try { await this.session.promptInternal(prompt); }
     catch (error) {
       this.forgetLoop();
       this.update({ operation: { ...this.state.operation, error: errorText(error) } });
