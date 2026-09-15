@@ -24,6 +24,26 @@ export interface SavedPrompt { id: string; text: string }
 export type PanelName = 'help' | 'cost' | 'status' | 'queue' | 'prompts'
   | 'thoughts' | 'history' | 'search' | 'model' | 'removal';
 
+/** Progress of the client-driven `/design-review` run, as the UI reads it.
+ *
+ * The application owns the loop; the UI only renders this snapshot.
+ */
+export interface DesignReviewProgress {
+  /** First and last round of the run. */
+  from: number;
+  to: number;
+  /** Per-round passing score and the attempt budget per round. */
+  score: number;
+  tries: number;
+  /** Round and attempt in flight, both 1-based. */
+  round: number;
+  attempt: number;
+  /** Best score seen in the current round. */
+  best: number;
+  /** `reviewing` while the loop runs; the other values are terminal. */
+  phase: 'reviewing' | 'passed' | 'exhausted' | 'cancelled';
+}
+
 /** The presentational outcome of one submitted line.
  *
  * The application decides which intent a command produces; the UI only interprets these

@@ -110,7 +110,7 @@ test('commands that must be typed in full refuse a prefix', () => {
   assert.deepEqual(parseCommand('/quit'), { kind: 'quit' });
   assert.deepEqual(parseCommand('/qui'), { kind: 'error', message: 'Type the full command: /quit' });
   assert.deepEqual(parseCommand('/a'), { kind: 'error', message: 'Type the full command: /allow' });
-  assert.deepEqual(parseCommand('/de'), { kind: 'error', message: 'Type the full command: /deny' });
+  assert.deepEqual(parseCommand('/den'), { kind: 'error', message: 'Type the full command: /deny' });
 });
 
 test('the resolver reports one match, none, or the exact-only refusal', () => {
@@ -121,4 +121,21 @@ test('the resolver reports one match, none, or the exact-only refusal', () => {
   assert.equal(resolveCommand('/nope'), undefined);
   assert.deepEqual(commandMatches('/ex'), ['/export', '/export-html']);
   assert.deepEqual(commandMatches('/nope'), []);
+});
+
+test('/design-review parses its four options and rejects a malformed line', () => {
+  assert.deepEqual(parseCommand('/design-review'), { kind: 'designReview', options: {} });
+  assert.deepEqual(parseCommand('/design-review --from 3 --to 5 --score 8.5 --tries 4'), {
+    kind: 'designReview', options: { from: 3, to: 5, score: 8.5, tries: 4 } });
+  // A non-number, an out-of-range value, a flag without a value and a stray word are all refused.
+  for (const line of ['/design-review --from x', '/design-review --score 11', '/design-review --tries',
+    '/design-review --from 0', '/design-review --from 3 extra', '/design-review --nope 1']) {
+    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /design-review [--from N] [--to N] [--score X] [--tries N]' }, line);
+  }
+  // It sends a turn, so it needs a conversation and a settled answer; a costly run is typed in full.
+  assert.deepEqual(COMMAND_POLICY.designReview, { chatOnly: true, blockedByPending: true });
+  assert.deepEqual(parseCommand('/des'), { kind: 'error', message: 'Type the full command: /design-review' });
+  const hint = COMMAND_HINTS.find(item => item.command === '/design-review');
+  assert.equal(hint?.usage, '[options]');
+  assert.deepEqual(suggestedCommands('/design'), ['/design-review']);
 });

@@ -16,6 +16,10 @@ import { CostController } from '../cost/controller.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
 import { MemoryLog } from './memory-log.ts';
 import { PromptStore } from './prompts.ts';
+import { DESIGN_REVIEW_USAGE, type DesignReviewOptions } from '../slash/index.ts';
+import { latestAssistantText, parseReviewScore, resolveDesignReview } from './design-review.ts';
+import { ReviewRun } from './review-run.ts';
+import type { DesignReviewProgress } from '../contracts.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import { ShellController } from '../shell/index.ts';
@@ -74,6 +78,10 @@ export interface Actions {
   prompt(text: string): Promise<boolean>;
   /** Clear this client's HANDOFF.md, then ask the agent to write a fresh handoff there. */
   handoff(): Promise<boolean>;
+  /** Start the client-driven scored design review and send its first round. */
+  startReview(options: DesignReviewOptions): Promise<boolean>;
+  /** Stop a running review; the last progress snapshot stays visible. */
+  stopReview(): void;
   cancelTurn(): Promise<boolean>;
   answer(value: AnswerValue): Promise<boolean>;
   approve(allowed: boolean): Promise<boolean>;
@@ -124,6 +132,8 @@ export interface Queries {
   readonly recallHasOlder: boolean;
   /** Shortcut prompts the operator saved, oldest first. */
   readonly prompts: readonly SavedPrompt[];
+  /** Live progress of the selected session's design review, when one has run. */
+  readonly review: DesignReviewProgress | undefined;
   /** Why the saved prompts could not be read, when the file was malformed. */
   readonly promptsError: string | undefined;
   pendingCounts(): ReadonlyMap<string, number>;
@@ -184,6 +194,10 @@ export class Controller implements ControllerStore, ConnectionListener {
   readonly memoryLog: MemoryLog | undefined;
   /** Shortcut prompts the operator saved; in memory for this run when no path was supplied. */
   readonly promptStore: PromptStore;
+  /** Running design review, if any; the loop lives here, not in the UI. */
+  private review?: ReviewRun;
+  /** Prompt the loop still has to send, when it could not be sent immediately. */
+  private reviewPrompt?: string;
   /** Local `!` commands, run on this machine and shown inline in the transcript. */
   readonly shell: ShellController;
   /** Mutating surface the UI drives. */
@@ -270,8 +284,12 @@ export class Controller implements ControllerStore, ConnectionListener {
       ? this.session.pendingFor(next) : [];
     // The shell service owns its blocks; state carries only the plain snapshot the UI renders.
     if (this.shell) next.shell = this.shell.snapshot();
+    // A review belongs to the session it reviews; switching away ends it.
+    if (this.review !== undefined && this.review.sessionId !== next.sessionId) this.forgetReview();
     this.state = next;
     for (const observer of this.observers) observer();
+    // A prompt the loop could not send yet (offline, busy or answering) goes out as soon as it can.
+    if (this.reviewPrompt !== undefined) void this.flushReview();
   }
 
   /** Bind every mutating entry point to its private implementation. */
@@ -290,6 +308,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       searchHistory: (query, signal) => this.runActionValue(() => this.searchHistory(query, signal)),
       prompt: text => this.runAction(() => this.prompt(text)),
       handoff: () => this.runAction(() => this.handoff()),
+      startReview: options => this.runAction(() => this.startReview(options)),
+      stopReview: () => this.stopReview(),
       cancelTurn: () => this.runAction(() => this.cancelTurn()),
       answer: value => this.runAction(() => this.answer(value)),
       approve: allowed => this.runAction(() => this.approve(allowed)),
@@ -348,6 +368,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       get recallHasOlder() { return controller.recallHasOlder; },
       get prompts() { return controller.promptStore.list; },
       get promptsError() { return controller.promptStore.error; },
+      get review() { return controller.review?.progress; },
       pendingCounts: () => controller.pendingCounts(),
       recall: (direction, current) => controller.recall(direction, current),
       references: (query, signal) => controller.references(query, signal),
@@ -501,6 +522,7 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** The generation ended; invalidate session work and stop the scan. */
   async ended(): Promise<void> {
+    this.stopReview();
     this.session.endGeneration();
     await this.cost?.stop();
   }
@@ -520,7 +542,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       case 'cancel': this.session.cancelled(event.eventId); return true;
       case 'agent-status':
         this.session.status(event.sessionId, event.running);
-        if (!event.running) this.cost?.onTurnIdle();
+        if (!event.running) { this.cost?.onTurnIdle(); this.settleReview(event.sessionId); }
         return true;
       case 'catalog-invalidated': this.catalog.refresh(); return true;
       case 'session-error': this.session.reportError(event.sessionId, event.error); return true;
@@ -565,7 +587,11 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param force - Send an explicit cancellation even when the cached running flag is idle.
    * @returns True when the caller may exit.
    */
-  private interrupt(force = false): Promise<boolean> { return this.session.interrupt(force); }
+  private interrupt(force = false): Promise<boolean> {
+    // Esc and Ctrl+C stop the automated loop as well as the turn; otherwise it would keep sending.
+    this.stopReview();
+    return this.session.interrupt(force);
+  }
 
   /** One-line estimate of the selected session's cost, or `?` while the ledger has no entry for it. */
   /** Keep history stable while the user reads, searches, or expands it.
@@ -736,9 +762,15 @@ export class Controller implements ControllerStore, ConnectionListener {
   private heapSnapshot(tag?: string): string { return writeHeapSnapshot(process.cwd(), tag); }
 
   /** Admit text once as steering while running, or a new turn while idle.
+   *
+   * Text the operator typed ends an automated review: the loop must not race a human for the turn,
+   * and the reply it would parse is no longer the reply to its own prompt.
    * @param text - Composed prompt text.
    */
-  private async prompt(text: string): Promise<void> { await this.session.prompt(text); }
+  private async prompt(text: string): Promise<void> {
+    this.stopReview();
+    await this.session.prompt(text);
+  }
 
   /** Clear this client's stale handoff file, then ask the agent to write a new one.
    *
@@ -751,8 +783,72 @@ export class Controller implements ControllerStore, ConnectionListener {
     await this.session.prompt(HANDOFF_PROMPT);
   }
 
+  /** Start the scored loop and send its opening round.
+   * @param options - Flags the operator typed; defaults are applied here.
+   */
+  private async startReview(options: DesignReviewOptions): Promise<void> {
+    const run = resolveDesignReview(options);
+    const sessionId = this.state.sessionId;
+    if (run === undefined || sessionId === undefined) throw new Error(DESIGN_REVIEW_USAGE);
+    this.forgetReview();
+    const review = new ReviewRun(sessionId, run);
+    const prompt = review.start();
+    review.sent();
+    this.review = review;
+    this.update({});
+    try { await this.session.prompt(prompt); }
+    catch (error) { this.forgetReview(); this.update({}); throw error; }
+  }
+
+  /** Stop a running review; the terminal progress stays visible for the reader. */
+  private stopReview(): void {
+    if (this.review === undefined) return;
+    this.review.cancel();
+    this.reviewPrompt = undefined;
+    this.update({});
+  }
+
+  /** Drop the review entirely, without publishing a cancelled phase. */
+  private forgetReview(): void {
+    this.review = undefined;
+    this.reviewPrompt = undefined;
+  }
+
+  /** Consume one finished attempt and continue the loop when it has a next step.
+   * @param sessionId - Session the host reported idle.
+   */
+  private settleReview(sessionId: string): void {
+    const review = this.review;
+    if (review === undefined || !review.active || !review.settled || review.sessionId !== sessionId) return;
+    const text = latestAssistantText(this.state.session.record.messages);
+    const step = review.settle(parseReviewScore(text));
+    if (step.kind === 'continue') this.reviewPrompt = step.prompt;
+    this.update({});
+    if (step.kind === 'continue') void this.flushReview();
+  }
+
+  /** Send the prompt the loop is holding, once the client can actually send it. */
+  private async flushReview(): Promise<void> {
+    const review = this.review;
+    const prompt = this.reviewPrompt;
+    if (review === undefined || prompt === undefined || !review.active) return;
+    if (!this.state.online || this.state.operation.busy || this.state.pending.length) return;
+    // Consume before awaiting, so a re-entrant update cannot send the same prompt twice.
+    this.reviewPrompt = undefined;
+    review.sent();
+    this.update({});
+    try { await this.session.prompt(prompt); }
+    catch (error) {
+      this.forgetReview();
+      this.update({ operation: { ...this.state.operation, error: errorText(error) } });
+    }
+  }
+
   /** Cancel the active turn; pending queue items remain host-owned. */
-  private async cancelTurn(): Promise<void> { await this.session.cancelTurn(); }
+  private async cancelTurn(): Promise<void> {
+    this.stopReview();
+    await this.session.cancelTurn();
+  }
 
   /** Add a page before the retained window.
    * @param signal - Cancels local paging without interrupting the remote agent.

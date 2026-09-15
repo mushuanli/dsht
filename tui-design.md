@@ -179,8 +179,8 @@ C4Component
   Component(session, "session/", "16 文件 2929 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 852 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "7 文件 1449 行", "Controller 门面、命令策略、ConnectionController、内存日志与快捷提示词")
-  Component(ui, "ui/", "20 文件 2569 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
+  Component(controller, "controller/", "9 文件 1760 行", "Controller 门面、命令策略、设计审查循环、ConnectionController、内存日志与快捷提示词")
+  Component(ui, "ui/", "20 文件 2574 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
   Component(cli, "cli/", "2 文件 137 行", "参数、目录准备与进程生命周期")
   Component(shell, "shell/", "3 文件 276 行", "本地 ! 命令的执行、有界输出与进程组终止")
 
@@ -712,7 +712,7 @@ dsht [options] [list workspaces|list sessions]
 
 ### 3.4 Slash 命令接口
 
-`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 30 条：
+`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 31 条：
 
 | 命令 | 参数 | 行为 |
 | --- | --- | --- |
@@ -736,6 +736,7 @@ dsht [options] [list workspaces|list sessions]
 | `/permission` | `[preset]` | 查看或切换宿主权限预设 |
 | `/feedback` | `text` | 记录会话反馈 |
 | `/handoff` | — | 先删除客户端运行目录下的 `HANDOFF.md`，再向 agent 发送一个请求，让它在工作区根目录写出新的会话交接（起因、目标、各任务状态：已完成／仍未完成／无法完成及原因、决策与改动文件、验证方式、下一步） |
+| `/design-review` | `[--from N] [--to N] [--score X] [--tries N]` | 客户端驱动的十轮收敛审查：首轮发完整 Brief，之后发短跟进；每轮读回复结尾的 `dsht-review` JSON 分数，达标进下一轮，否则消耗一次尝试，`--tries` 用尽即停止 |
 | `/export` | `[local.zip]` | 把会话日志 ZIP 保存为新文件 |
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
 | `/coredump` | `[tag]` | 在客户端当前工作目录写出 V8 堆快照（`<tag>-<Date.now()>.heapsnapshot`，`tag` 默认 `snapshot`），供 Chrome DevTools 分析内存增长；写入同步执行，期间客户端暂停 |
@@ -750,6 +751,8 @@ dsht [options] [list workspaces|list sessions]
 补全规则：仅当草稿以 `/` 开头且不含空格时生效；唯一匹配补全为 `命令 + 空格`，多匹配则扩展到公共前缀。执行规则：`parseCommand` 先用 `resolveCommand` 解析首词——完整命令名保持原样；唯一前缀解析为该命令（参数保留），因此 `/pro Add tests` 就是 `/prompt Add tests`；无匹配或匹配多条时保留原草稿，并由 `unresolved` 返回错误：恰好一条匹配说明它是 `exactOnly` 命令（`/quit`、`/allow`、`/deny`），提示"Type the full command"；2–6 条匹配列出候选（`Ambiguous command. Matches: …`）；其余（含裸 `/`）维持 `Unknown command. Use /help.`。
 
 路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `chatOnly` 与 `blockedByPending`，`ui/routing.ts` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。命令的执行策略集中在 `controller/commands.ts`：`runCommand(controller, command, port)` 调用应用动作并返回 `CommandIntent`，其中 `port.run` 借出 UI 的"可取消操作 + 加载标签"机制；UI 只解释意图，因此新增命令不需要改动 `ui/`，除非它引入新的表现层动词或新面板。
+
+**`/design-review` 的循环属于应用层**，不属于 UI：`controller/design-review.ts` 持有协议（默认值、每轮 Brief、短跟进、`parseReviewScore`），`controller/review-run.ts` 的 `ReviewRun` 是一个无 I/O 的状态机（round / attempt / best / phase），`Controller` 负责发送、在 `agent-status running:false` 时解析回复并推进、以及在任何会打断循环的事件上停止（用户发送普通消息、`/cancel`、Esc/Ctrl+C、切换会话、断线）。状态只存在于内存并绑定当前会话，不持久化；UI 只读 `Queries.review` 的一个只读快照渲染一行进度，不做任何判断。分数从 assistant **正文**里最后一个 ```dsht-review 代码块读取（正文不裁剪，reasoning 会被折行），缺失或越界按一次失败尝试计入 `--tries`。
 
 面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由 `surfaces` 的 `keepFor` 决定）。
 
@@ -1696,17 +1699,19 @@ CI 工作流 `.github/workflows/publish.yml`：
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `slash/index.ts` | 8 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`COMMANDS`、`COMMAND_POLICY`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands`、`parseCommand` |
-| `slash/parse.ts` | 166 | `Command`、`parseCommand` |
-| `slash/registry.ts` | 146 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands` |
+| `slash/parse.ts` | 215 | `Command`、`parseCommand` |
+| `slash/registry.ts` | 148 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands` |
 
 **controller**
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `controller/connection.ts` | 159 | `ConnectionOptions`、`ConnectionListener`、`ConnectionController` |
-| `controller/controller.ts` | 804 | `Actions`、`Queries`、`Controller` |
-| `controller/commands.ts` | 160 | `RunnableCommand`、`CommandPort`、`runCommand`、`removalIntent` |
-| `controller/index.ts` | 8 | `Controller`、`ConnectionController`、`runCommand`、`removalIntent` |
+| `controller/controller.ts` | 900 | `Actions`、`Queries`、`Controller` |
+| `controller/commands.ts` | 169 | `RunnableCommand`、`CommandPort`、`runCommand`、`removalIntent` |
+| `controller/index.ts` | 10 | `Controller`、`ConnectionController`、`runCommand`、`removalIntent`、`resolveDesignReview`、`ReviewRun` |
+| `controller/design-review.ts` | 139 | `DESIGN_REVIEW_ROUNDS`、`ResolvedDesignReview`、`resolveDesignReview`、`designReviewBrief`、`designReviewFollowUp`、`parseReviewScore`、`latestAssistantText` |
+| `controller/review-run.ts` | 65 | `ReviewStep`、`ReviewRun` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
 | `controller/prompts.ts` | 154 | `SavedPrompt`、`MAX_PROMPT_CHARS`、`MAX_SAVED_PROMPTS`、`PromptStore` |
@@ -1715,7 +1720,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
-| `ui/app.tsx` | 851 | `App` |
+| `ui/app.tsx` | 856 | `App` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/history-view.tsx` | 23 | `HistoryViewport` |
 | `ui/chat/navigation-model.ts` | 133 | `SessionState`、`sessionState`、`SESSION_MARKERS`、`STATE_LABELS`、`activityAge`、`sessionStatus`、`ROLLUP_STATES`、`RollupState`、`RollupCount`、`RollupStyle`、`workspaceCounts`、`workspaceSegments` |
@@ -1747,17 +1752,17 @@ CI 工作流 `.github/workflows/publish.yml`：
 C4Component
   title 源码索引（按业务域）
 
-  Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "7 文件 244 行")
+  Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "7 文件 264 行")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "4 文件 177 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "6 文件 524 行")
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2924 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 852 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, commands, connection, memory-log, perf-measures, prompts, index", "7 文件 1449 行")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2569 行")
+  Component(controller, "controller/", "controller, commands, design-review, review-run, connection, memory-log, perf-measures, prompts, index", "9 文件 1760 行")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2574 行")
   Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 137 行")
   Component(shell, "shell/", "controller, runner, index", "3 文件 276 行")
-  Component(slash, "slash/", "registry, parse, index", "3 文件 320 行")
+  Component(slash, "slash/", "registry, parse, index", "3 文件 371 行")
 
   Rel(root, transport, "公开门面")
   Rel(ui, slash, "命令语法")

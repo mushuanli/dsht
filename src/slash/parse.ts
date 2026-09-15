@@ -29,6 +29,8 @@ export type Command =
   | { kind: 'compact' }
   /** Clear the client's own HANDOFF.md, then ask the agent to write a fresh session handoff. */
   | { kind: 'handoff' }
+  /** Start the client-driven scored design review; see `DesignReviewOptions`. */
+  | { kind: 'designReview'; options: DesignReviewOptions }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -39,6 +41,52 @@ export type Command =
   | { kind: 'coredump'; tag?: string }
   | { kind: 'error'; message: string }
   | { kind: 'prompt'; text: string };
+
+/** Options carried by `/design-review`; absent fields take their default in the application.
+ *
+ * Only the fields the user actually typed are present, so the syntax layer validates each value it
+ * sees and the application owns the defaults and the cross-field rules (`to >= from`).
+ */
+export interface DesignReviewOptions {
+  /** First round to run; default 1. */
+  from?: number;
+  /** Last round to run; default the protocol's last round. */
+  to?: number;
+  /** Per-round passing score, 0-10 and possibly fractional; default 8. */
+  score?: number;
+  /** Attempts allowed per round; default 10. */
+  tries?: number;
+}
+
+/** How each `/design-review` flag names an option and validates its value. */
+const DESIGN_REVIEW_FLAGS: Readonly<Record<string, { key: keyof DesignReviewOptions; valid: (value: number) => boolean }>> = {
+  '--from': { key: 'from', valid: value => Number.isSafeInteger(value) && value >= 1 },
+  '--to': { key: 'to', valid: value => Number.isSafeInteger(value) && value >= 1 },
+  '--score': { key: 'score', valid: value => Number.isFinite(value) && value >= 0 && value <= 10 },
+  '--tries': { key: 'tries', valid: value => Number.isSafeInteger(value) && value >= 1 },
+};
+
+/** The one message every malformed `/design-review` line receives. */
+export const DESIGN_REVIEW_USAGE = 'Use /design-review [--from N] [--to N] [--score X] [--tries N]';
+
+/** Parse `/design-review` and its flags, rejecting anything malformed.
+ * @param value - Trimmed line that starts with `/design-review`.
+ * @returns The command, or the usage error.
+ */
+function designReviewCommand(value: string): Command {
+  const options: DesignReviewOptions = {};
+  const words = value.slice('/design-review'.length).trim().split(/\s+/).filter(Boolean);
+  for (let index = 0; index < words.length; index += 2) {
+    const flag = words[index]!;
+    const raw = words[index + 1];
+    const spec = DESIGN_REVIEW_FLAGS[flag];
+    if (spec === undefined || raw === undefined) return { kind: 'error', message: DESIGN_REVIEW_USAGE };
+    const number = Number(raw);
+    if (!spec.valid(number)) return { kind: 'error', message: DESIGN_REVIEW_USAGE };
+    options[spec.key] = number;
+  }
+  return { kind: 'designReview', options };
+}
 
 /** Parse workspace and resume navigation, including their long aliases. */
 function navigationCommand(value: string): { kind: 'workspace' | 'session'; query?: string } | undefined {
@@ -114,6 +162,7 @@ export function parseCommand(line: string): Command {
     if (value !== '/handoff') return { kind: 'error', message: 'Use /handoff (no arguments)' };
     return { kind: 'handoff' };
   }
+  if (/^\/design-review(?: |$)/.test(value)) return designReviewCommand(value);
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };
   if (value === '/deny') return { kind: 'approval', allowed: false };

@@ -5,8 +5,9 @@
  * new command needs no UI change unless it introduces a genuinely new presentational verb.
  */
 import type { CommandIntent } from '../contracts.ts';
-import type { Command } from '../slash/index.ts';
+import { DESIGN_REVIEW_USAGE, type Command } from '../slash/index.ts';
 import type { Controller } from './controller.ts';
+import { resolveDesignReview } from './design-review.ts';
 
 /** A routed line that still needs an effect: a parsed command, a free-text answer, or a host path. */
 export type RunnableCommand =
@@ -154,6 +155,14 @@ export async function runCommand(controller: Controller, command: RunnableComman
       if (!await controller.actions.handoff()) return undefined;
       controller.actions.setViewWindow(undefined);
       return { closePanels: true, live: true, scroll: 0, notice: 'Handoff requested · local HANDOFF.md cleared' };
+    }
+    case 'designReview': {
+      const run = resolveDesignReview(command.options);
+      if (run === undefined) return { closePanels: true, error: DESIGN_REVIEW_USAGE };
+      if (!await controller.actions.startReview(command.options)) return undefined;
+      controller.actions.setViewWindow(undefined);
+      return { closePanels: true, live: true, scroll: 0,
+        notice: `Design review started · rounds ${run.from}–${run.to} · pass ${run.score} · ≤${run.tries} tries` };
     }
     default: return undefined;
   }

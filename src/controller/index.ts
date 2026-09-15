@@ -3,6 +3,8 @@ export { Controller } from './controller.ts';
 export type { ControllerOptions, HistorySearch, RemovalTarget, SavedPrompt, State } from './controller.ts';
 export { removalIntent, runCommand } from './commands.ts';
 export type { CommandPort, RunnableCommand } from './commands.ts';
+export { DESIGN_REVIEW_ROUNDS, resolveDesignReview } from './design-review.ts';
+export { ReviewRun } from './review-run.ts';
 export { PromptStore, MAX_PROMPT_CHARS, MAX_SAVED_PROMPTS } from './prompts.ts';
 export { ConnectionController } from './connection.ts';
 export type { ConnectionListener, ConnectionOptions } from './connection.ts';
