@@ -179,7 +179,7 @@ C4Component
   Component(session, "session/", "16 文件 2969 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 852 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "9 文件 1803 行", "Controller 门面、命令策略、通用评分循环与设计审查协议、ConnectionController、内存日志与快捷提示词")
+  Component(controller, "controller/", "10 文件 1859 行", "Controller 门面、命令策略、通用评分循环、设计审查与 /loop 协议、ConnectionController、内存日志与快捷提示词")
   Component(ui, "ui/", "21 文件 2592 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
   Component(cli, "cli/", "2 文件 137 行", "参数、目录准备与进程生命周期")
   Component(shell, "shell/", "3 文件 276 行", "本地 ! 命令的执行、有界输出与进程组终止")
@@ -712,7 +712,7 @@ dsht [options] [list workspaces|list sessions]
 
 ### 3.4 Slash 命令接口
 
-`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 31 条：
+`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 32 条：
 
 | 命令 | 参数 | 行为 |
 | --- | --- | --- |
@@ -736,6 +736,7 @@ dsht [options] [list workspaces|list sessions]
 | `/permission` | `[preset]` | 查看或切换宿主权限预设 |
 | `/feedback` | `text` | 记录会话反馈 |
 | `/handoff` | — | 先删除客户端运行目录下的 `HANDOFF.md`，再向 agent 发送一个请求，让它在工作区根目录写出新的会话交接（起因、目标、各任务状态：已完成／仍未完成／无法完成及原因、决策与改动文件、验证方式、下一步） |
+| `/loop` | `<score> <tries> <prompt>`（可前置 `[--from N] [--to N]`） | 把任意 prompt 包成同一评分循环的协议：prompt 即目标，默认单步、`tries` 每步上限 10；`--to` 可跑多轮 |
 | `/design-review` | `[--from N] [--to N] [--score X] [--tries N]` | 运行通用评分循环（`controller/loop.ts`）的十轮收敛审查协议：首步发完整 Brief，之后发短跟进；每步读回复结尾的 `dsht-loop` JSON 分数，达标进下一步，否则消耗一次尝试，`--tries` 用尽即停止 |
 | `/export` | `[local.zip]` | 把会话日志 ZIP 保存为新文件 |
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
@@ -1699,8 +1700,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `slash/index.ts` | 8 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`COMMANDS`、`COMMAND_POLICY`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands`、`parseCommand` |
-| `slash/parse.ts` | 224 | `Command`、`parseCommand` |
-| `slash/registry.ts` | 148 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands` |
+| `slash/parse.ts` | 270 | `Command`、`parseCommand` |
+| `slash/registry.ts` | 150 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands` |
 
 **controller**
 
@@ -1711,7 +1712,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/commands.ts` | 170 | `RunnableCommand`、`CommandPort`、`runCommand`、`removalIntent` |
 | `controller/index.ts` | 11 | `Controller`、`ConnectionController`、`runCommand`、`removalIntent`、`resolveLoop`、`ScoredLoop`、`DESIGN_REVIEW_PROTOCOL` |
 | `controller/loop.ts` | 154 | `LoopLimits`、`LoopProtocol`、`LoopStepResult`、`resolveLoop`、`parseLoopScore`、`latestAssistantText`、`ScoredLoop` |
-| `controller/design-review.ts` | 93 | `DESIGN_REVIEW_ROUNDS`、`DESIGN_REVIEW_PROTOCOL_MARKER`、`DESIGN_REVIEW_PROTOCOL` |
+| `controller/design-review.ts` | 93 |
+| `controller/loop-prompt.ts` | 45 | `promptLoopProtocol` | `DESIGN_REVIEW_ROUNDS`、`DESIGN_REVIEW_PROTOCOL_MARKER`、`DESIGN_REVIEW_PROTOCOL` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
 | `controller/prompts.ts` | 154 | `SavedPrompt`、`MAX_PROMPT_CHARS`、`MAX_SAVED_PROMPTS`、`PromptStore` |
@@ -1759,11 +1761,11 @@ C4Component
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2969 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 852 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, commands, loop, design-review, connection, memory-log, perf-measures, prompts, index", "9 文件 1803 行")
+  Component(controller, "controller/", "controller, commands, loop, loop-prompt, design-review, connection, memory-log, perf-measures, prompts, index", "10 文件 1859 行")
   Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "21 文件 2592 行")
   Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 137 行")
   Component(shell, "shell/", "controller, runner, index", "3 文件 276 行")
-  Component(slash, "slash/", "registry, parse, index", "3 文件 380 行")
+  Component(slash, "slash/", "registry, parse, index", "3 文件 428 行")
 
   Rel(root, transport, "公开门面")
   Rel(ui, slash, "命令语法")

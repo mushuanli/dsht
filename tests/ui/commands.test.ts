@@ -123,6 +123,28 @@ test('the resolver reports one match, none, or the exact-only refusal', () => {
   assert.deepEqual(commandMatches('/nope'), []);
 });
 
+test('/loop takes a positional score and tries plus a free-form prompt', () => {
+  assert.deepEqual(parseCommand('/loop 8 5 帮我优化这个函数'), {
+    kind: 'loop', options: { score: 8, tries: 5 }, prompt: '帮我优化这个函数' });
+  // A leading step range is optional; the two numbers and the rest of the line follow it.
+  assert.deepEqual(parseCommand('/loop --from 2 --to 4 8.5 3 do the thing'), {
+    kind: 'loop', options: { from: 2, to: 4, score: 8.5, tries: 3 }, prompt: 'do the thing' });
+  // Line breaks inside the prompt survive, because only the leading tokens are numbers.
+  const multiline = parseCommand('/loop 8 2 first line\nsecond line');
+  assert.ok(multiline.kind === 'loop');
+  assert.equal(multiline.prompt, 'first line\nsecond line');
+  for (const line of ['/loop', '/loop 8', '/loop 8 5', '/loop abc 5 x', '/loop 11 5 x', '/loop 8 0 x',
+    '/loop 8 20 x', '/loop --to 11 8 5 x', '/loop --nope 1 8 5 x']) {
+    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /loop [--from N] [--to N] <score> <tries> <prompt>' }, line);
+  }
+  assert.deepEqual(COMMAND_POLICY.loop, { chatOnly: true, blockedByPending: true });
+  // An ad-hoc loop is costly, so a prefix of it must be typed in full.
+  assert.deepEqual(parseCommand('/lo 8 5 x'), { kind: 'error', message: 'Type the full command: /loop' });
+  const hint = COMMAND_HINTS.find(item => item.command === '/loop');
+  assert.equal(hint?.usage, '<score> <tries> <prompt>');
+  assert.deepEqual(suggestedCommands('/loo'), ['/loop']);
+});
+
 test('/design-review parses its four options and rejects a malformed line', () => {
   assert.deepEqual(parseCommand('/design-review'), { kind: 'designReview', options: {} });
   assert.deepEqual(parseCommand('/design-review --from 3 --to 5 --score 8.5 --tries 4'), {

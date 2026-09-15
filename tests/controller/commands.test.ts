@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Controller, runCommand, type CommandPort, type ControllerOptions } from '../../src/controller/index.ts';
 import { parseCommand } from '../../src/slash/index.ts';
+import { array, object } from '../../src/transport/wire.ts';
 import { host, until } from '../support/host.ts';
 
 /** A port that runs nothing cancellable; none of the cases under test needs one. */
@@ -58,4 +59,15 @@ test('handoff clears the client file and asks for a live view with a notice', as
     closePanels: true, live: true, scroll: 0, notice: 'Handoff requested · local HANDOFF.md cleared' });
   await assert.rejects(() => stat(path), /ENOENT/);
   assert.ok(fixture.calls.some(call => call.method === 'session/prompt'));
+});
+
+test('a generic /loop wraps its prompt and starts the scored loop', async t => {
+  const { app, fixture } = await controller(t);
+  assert.deepEqual(await run(app, '/loop 8 2 do the thing'), {
+    closePanels: true, live: true, scroll: 0, notice: 'Loop started · steps 1–1 · pass 8 · ≤2 tries' });
+  // The wrapped prompt reached the host with the result contract the loop parses.
+  const call = fixture.calls.filter(entry => entry.method === 'session/prompt').at(-1)!;
+  const text = String(object(array(object(object(object(call.payload).args).request).content)[0]).text);
+  assert.ok(text.startsWith('do the thing\n'));
+  assert.match(text, /"kind":"loop"/);
 });

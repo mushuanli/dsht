@@ -29,8 +29,10 @@ export type Command =
   | { kind: 'compact' }
   /** Clear the client's own HANDOFF.md, then ask the agent to write a fresh session handoff. */
   | { kind: 'handoff' }
-  /** Start the client-driven scored design review; see `DesignReviewOptions`. */
+  /** Start the client-driven scored design review. */
   | { kind: 'designReview'; options: LoopOptions }
+  /** Wrap one free-form prompt in the scored loop; see `LoopOptions`. */
+  | { kind: 'loop'; options: LoopOptions; prompt: string }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -95,6 +97,49 @@ export function parseLoopOptions(rest: string): LoopOptions | undefined {
 function designReviewCommand(value: string): Command {
   const options = parseLoopOptions(value.slice('/design-review'.length));
   return options === undefined ? { kind: 'error', message: DESIGN_REVIEW_USAGE } : { kind: 'designReview', options };
+}
+
+/** The one message every malformed `/loop` line receives. */
+export const LOOP_USAGE = 'Use /loop [--from N] [--to N] <score> <tries> <prompt>';
+
+/** Largest attempt budget one `/loop` step may declare, so an ad-hoc loop stays bounded. */
+const LOOP_TRIES_MAX = 10;
+
+/** Largest last step one `/loop` may declare, for the same reason. */
+const LOOP_STEPS_MAX = 10;
+
+/** Parse `/loop <score> <tries> <prompt>`, with an optional leading step range.
+ *
+ * The prompt is free text, so only its two leading tokens are numbers; everything after them is
+ * handed to the loop verbatim, line breaks included.
+ * @param value - Trimmed line that starts with `/loop`.
+ * @returns The command, or the usage error.
+ */
+function loopCommand(value: string): Command {
+  let rest = value.slice('/loop'.length).replace(/^\s+/, '');
+  const options: LoopOptions = {};
+  // Optional step range first, so the two positional numbers and the prompt stay unambiguous.
+  for (;;) {
+    const flag = /^(--from|--to)\s+(\S+)\s*/.exec(rest);
+    if (!flag) break;
+    const name = flag[1]!;
+    const number = Number(flag[2]);
+    const valid = name === '--from'
+      ? LOOP_FLAGS['--from']!.valid(number)
+      : LOOP_FLAGS['--to']!.valid(number) && number <= LOOP_STEPS_MAX;
+    if (!valid) return { kind: 'error', message: LOOP_USAGE };
+    if (name === '--from') options.from = number; else options.to = number;
+    rest = rest.slice(flag[0].length);
+  }
+  const pair = /^(\S+)\s+(\S+)\s*/.exec(rest);
+  if (!pair) return { kind: 'error', message: LOOP_USAGE };
+  const score = Number(pair[1]);
+  const tries = Number(pair[2]);
+  if (!LOOP_FLAGS['--score']!.valid(score)) return { kind: 'error', message: LOOP_USAGE };
+  if (!Number.isSafeInteger(tries) || tries < 1 || tries > LOOP_TRIES_MAX) return { kind: 'error', message: LOOP_USAGE };
+  const prompt = rest.slice(pair[0].length).trim();
+  if (!prompt) return { kind: 'error', message: LOOP_USAGE };
+  return { kind: 'loop', options: { ...options, score, tries }, prompt };
 }
 
 /** Parse workspace and resume navigation, including their long aliases. */
@@ -172,6 +217,7 @@ export function parseCommand(line: string): Command {
     return { kind: 'handoff' };
   }
   if (/^\/design-review(?: |$)/.test(value)) return designReviewCommand(value);
+  if (/^\/loop(?: |$)/.test(value)) return loopCommand(value);
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };
   if (value === '/deny') return { kind: 'approval', allowed: false };

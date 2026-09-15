@@ -5,10 +5,11 @@
  * new command needs no UI change unless it introduces a genuinely new presentational verb.
  */
 import type { CommandIntent } from '../contracts.ts';
-import { DESIGN_REVIEW_USAGE, type Command } from '../slash/index.ts';
+import { DESIGN_REVIEW_USAGE, LOOP_USAGE, type Command } from '../slash/index.ts';
 import type { Controller } from './controller.ts';
 import { DESIGN_REVIEW_PROTOCOL } from './design-review.ts';
 import { resolveLoop } from './loop.ts';
+import { promptLoopProtocol } from './loop-prompt.ts';
 
 /** A routed line that still needs an effect: a parsed command, a free-text answer, or a host path. */
 export type RunnableCommand =
@@ -164,6 +165,15 @@ export async function runCommand(controller: Controller, command: RunnableComman
       controller.actions.setViewWindow(undefined);
       return { closePanels: true, live: true, scroll: 0,
         notice: `Design review started · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` };
+    }
+    case 'loop': {
+      const protocol = promptLoopProtocol(command.prompt);
+      const limits = resolveLoop(protocol, command.options);
+      if (limits === undefined) return { closePanels: true, error: LOOP_USAGE };
+      if (!await controller.actions.startLoop(protocol, limits)) return undefined;
+      controller.actions.setViewWindow(undefined);
+      return { closePanels: true, live: true, scroll: 0,
+        notice: `Loop started · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` };
     }
     default: return undefined;
   }
