@@ -179,8 +179,8 @@ C4Component
   Component(session, "session/", "16 文件 2929 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 852 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "6 文件 1252 行", "Controller 门面、ConnectionController、内存日志与快捷提示词")
-  Component(ui, "ui/", "20 文件 2657 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
+  Component(controller, "controller/", "6 文件 1287 行", "Controller 门面、ConnectionController、内存日志与快捷提示词")
+  Component(ui, "ui/", "20 文件 2662 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
   Component(cli, "cli/", "2 文件 137 行", "参数、目录准备与进程生命周期")
   Component(shell, "shell/", "3 文件 276 行", "本地 ! 命令的执行、有界输出与进程组终止")
 
@@ -712,7 +712,7 @@ dsht [options] [list workspaces|list sessions]
 
 ### 3.4 Slash 命令接口
 
-`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 29 条：
+`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 30 条：
 
 | 命令 | 参数 | 行为 |
 | --- | --- | --- |
@@ -735,6 +735,7 @@ dsht [options] [list workspaces|list sessions]
 | `/goal` | `[action\|objective]` | 查看或管理宿主目标 |
 | `/permission` | `[preset]` | 查看或切换宿主权限预设 |
 | `/feedback` | `text` | 记录会话反馈 |
+| `/handoff` | — | 先删除客户端运行目录下的 `HANDOFF.md`，再向 agent 发送一个请求，让它在工作区根目录写出新的会话交接（起因、目标、各任务状态：已完成／仍未完成／无法完成及原因、决策与改动文件、验证方式、下一步） |
 | `/export` | `[local.zip]` | 把会话日志 ZIP 保存为新文件 |
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
 | `/coredump` | `[tag]` | 在客户端当前工作目录写出 V8 堆快照（`<tag>-<Date.now()>.heapsnapshot`，`tag` 默认 `snapshot`），供 Chrome DevTools 分析内存增长；写入同步执行，期间客户端暂停 |
@@ -1695,15 +1696,15 @@ CI 工作流 `.github/workflows/publish.yml`：
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `slash/index.ts` | 8 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`COMMANDS`、`COMMAND_POLICY`、`commonPrefix`、`completeCommand`、`suggestedCommands`、`parseCommand` |
-| `slash/parse.ts` | 125 | `Command`、`parseCommand` |
-| `slash/registry.ts` | 116 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
+| `slash/parse.ts` | 131 | `Command`、`parseCommand` |
+| `slash/registry.ts` | 118 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
 
 **controller**
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `controller/connection.ts` | 159 | `ConnectionOptions`、`ConnectionListener`、`ConnectionController` |
-| `controller/controller.ts` | 769 | `Actions`、`Queries`、`Controller` |
+| `controller/controller.ts` | 804 | `Actions`、`Queries`、`Controller` |
 | `controller/index.ts` | 6 | `Controller`、`ConnectionController` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
@@ -1713,7 +1714,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
-| `ui/app.tsx` | 939 | `App` |
+| `ui/app.tsx` | 944 | `App` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/history-view.tsx` | 23 | `HistoryViewport` |
 | `ui/chat/navigation-model.ts` | 133 | `SessionState`、`sessionState`、`SESSION_MARKERS`、`STATE_LABELS`、`activityAge`、`sessionStatus`、`ROLLUP_STATES`、`RollupState`、`RollupCount`、`RollupStyle`、`workspaceCounts`、`workspaceSegments` |
@@ -1751,11 +1752,11 @@ C4Component
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2924 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 852 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, prompts, index", "6 文件 1252 行")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2657 行")
+  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, prompts, index", "6 文件 1287 行")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2662 行")
   Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 137 行")
   Component(shell, "shell/", "controller, runner, index", "3 文件 276 行")
-  Component(slash, "slash/", "registry, parse, index", "3 文件 249 行")
+  Component(slash, "slash/", "registry, parse, index", "3 文件 257 行")
 
   Rel(root, transport, "公开门面")
   Rel(ui, slash, "命令语法")

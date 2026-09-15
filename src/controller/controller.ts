@@ -1,6 +1,7 @@
 /** Application facade: composes the connection, session, catalog and cost domains. */
+import { join } from 'node:path';
 import { Client } from '../transport/client.ts';
-import { writeHeapSnapshot } from '../storage/index.ts';
+import { removeFile, writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { HostEvent } from '../transport/events.ts';
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from '../session/memory.ts';
@@ -37,6 +38,26 @@ function shellEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** File `/handoff` clears on this machine before it asks the agent to write a handoff. */
+const HANDOFF_FILE = 'HANDOFF.md';
+
+/** Instruction `/handoff` sends once this client's own copy of the file is gone.
+ *
+ * The sections are explicit because a handoff is read by whoever continues the work: why the
+ * session exists, the goal, and the state of every task, including the ones that cannot be done.
+ */
+const HANDOFF_PROMPT = [
+  'Write a session handoff to HANDOFF.md in the workspace root, overwriting whatever is there,',
+  'in the language of this conversation. Cover, in this order:',
+  '(1) why this session exists and what triggered it;',
+  '(2) the goal it is working toward;',
+  '(3) every task and its state — completed, still open, or impossible, each with its reason;',
+  '(4) the decisions made and the files changed;',
+  '(5) how to verify the current state;',
+  '(6) the exact next steps for whoever continues this work.',
+  'Base it only on this session; never invent work that did not happen.',
+].join(' ');
+
 /** Mutating operations the UI drives; each owns its busy/error envelope. */
 export interface Actions {
   switchWorkspace(workspaceId?: string): Promise<boolean>;
@@ -51,6 +72,8 @@ export interface Actions {
   searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: ObjectValue[]; hasMore: boolean } | undefined>;
   searchHistory(query: string, signal: AbortSignal): Promise<HistorySearch | undefined>;
   prompt(text: string): Promise<boolean>;
+  /** Clear this client's HANDOFF.md, then ask the agent to write a fresh handoff there. */
+  handoff(): Promise<boolean>;
   cancelTurn(): Promise<boolean>;
   answer(value: AnswerValue): Promise<boolean>;
   approve(allowed: boolean): Promise<boolean>;
@@ -266,6 +289,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       searchSessions: (query, workspaceOnly, signal) => this.runActionValue(() => this.searchSessions(query, workspaceOnly, signal)),
       searchHistory: (query, signal) => this.runActionValue(() => this.searchHistory(query, signal)),
       prompt: text => this.runAction(() => this.prompt(text)),
+      handoff: () => this.runAction(() => this.handoff()),
       cancelTurn: () => this.runAction(() => this.cancelTurn()),
       answer: value => this.runAction(() => this.answer(value)),
       approve: allowed => this.runAction(() => this.approve(allowed)),
@@ -715,6 +739,17 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param text - Composed prompt text.
    */
   private async prompt(text: string): Promise<void> { await this.session.prompt(text); }
+
+  /** Clear this client's stale handoff file, then ask the agent to write a new one.
+   *
+   * The deletion happens first and on this machine, so a handoff that never gets written cannot be
+   * mistaken for the previous one. The request itself is an ordinary turn: it steers a running
+   * agent and starts an idle one, exactly like submitted text.
+   */
+  private async handoff(): Promise<void> {
+    await removeFile(join(this.localDirectory, HANDOFF_FILE));
+    await this.session.prompt(HANDOFF_PROMPT);
+  }
 
   /** Cancel the active turn; pending queue items remain host-owned. */
   private async cancelTurn(): Promise<void> { await this.session.cancelTurn(); }

@@ -73,3 +73,16 @@ test('routing constraints live on the command, so the router enumerates no kinds
   assert.equal(COMMAND_POLICY.savePrompt, undefined);
   assert.equal(COMMAND_POLICY.coredump, undefined);
 });
+
+test('/handoff takes no arguments and waits for a pending answer', () => {
+  assert.deepEqual(parseCommand('/handoff'), { kind: 'handoff' });
+  assert.deepEqual(parseCommand('/handoff now'), { kind: 'error', message: 'Use /handoff (no arguments)' });
+  assert.deepEqual(parseCommand('/handoffx'), { kind: 'error', message: 'Unknown command. Use /help.' });
+  assert.deepEqual(COMMAND_POLICY.handoff, { chatOnly: true, blockedByPending: true });
+  // It sends a turn, so it needs a conversation and a settled approval or question.
+  assert.deepEqual(route('/handoff', { screen: 'workspaces' }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(route('/handoff', { pending: true }), { kind: 'error', message: 'Answer the pending question or approval first' });
+  const hint = COMMAND_HINTS.find(item => item.command === '/handoff');
+  assert.ok(hint && hint.description.length > 0);
+  assert.deepEqual(suggestedCommands('/han'), ['/handoff']);
+});

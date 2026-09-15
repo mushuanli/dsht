@@ -578,6 +578,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
             controller.actions.setViewWindow(undefined); setScroll(0);
             return ok;
           }
+          case 'handoff': {
+            const ok = await controller.actions.handoff();
+            if (ok) { controller.actions.setViewWindow(undefined); setScroll(0); setNotice('Handoff requested · local HANDOFF.md cleared'); }
+            return ok;
+          }
         }
         return true;
       } catch (error) { setNotice(errorText(error)); return false; }

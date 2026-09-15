@@ -26,6 +26,8 @@ export type Command =
   | { kind: 'think'; target: string }
   | { kind: 'older' }
   | { kind: 'compact' }
+  /** Clear the client's own HANDOFF.md, then ask the agent to write a fresh session handoff. */
+  | { kind: 'handoff' }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -102,6 +104,10 @@ export function parseCommand(line: string): Command {
   if (/^\/compact(?: |$)/.test(value)) {
     if (value !== '/compact') return { kind: 'error', message: 'Use /compact (no arguments)' };
     return { kind: 'compact' };
+  }
+  if (/^\/handoff(?: |$)/.test(value)) {
+    if (value !== '/handoff') return { kind: 'error', message: 'Use /handoff (no arguments)' };
+    return { kind: 'handoff' };
   }
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };
