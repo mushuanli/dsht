@@ -9,3 +9,4 @@ tmp/
 .agents/
 .diagnostics/
 snapshot-*
+HANDOFF.md
