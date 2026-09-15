@@ -11,7 +11,7 @@
  */
 import { releaseHistoryLayout, type Reasoning } from './history.ts';
 import { Transcript } from './transcript.ts';
-import type { HistorySearch } from './types.ts';
+import type { AnswerValue, HistorySearch } from './types.ts';
 import type { ObjectValue } from '../transport/wire.ts';
 
 /** A durable user prompt as the transcript reports it, before retention. */
@@ -32,38 +32,12 @@ const MAX_ENTRY_CHARS = 128 * 1024;
 /** Flatten one transcript prompt into the single line the composer recalls. */
 export function promptText(value: string): string { return value.replace(/\r?\n/g, ' ').trim(); }
 
-/** The selected session's composer: its draft, the caret in it, and a draft a dialog parked aside. */
-export interface ComposerState { draft: string; cursor: number; parked: string }
-
-/** How the selected session's record is being read: which window, where, and what is expanded.
- *
- * Everything here changes how the record renders, which is why it is session state rather than a
- * transient panel flag; the record's content stays in `Transcript`. `window` is a strong reference
- * released by `closeWindow`, and the layout cache keyed by it is a weak one.
- */
-export interface ViewState {
-  /** Detached record shown instead of the live transcript while reading jumped-to history. */
-  window?: Transcript;
-  scroll: number;
-  /** Reading protection: reclamation pauses until the reader returns to the live end. */
-  pinned: boolean;
-  /** Message sequences whose reasoning is expanded beyond the default fold. */
-  folds: ReadonlySet<number>;
-  /** Fold mode for the live attempt's completed reasoning. */
-  liveReasoning: Reasoning;
-}
-
-/** Composer-adjacent `@` reference menu: the highlighted row and the draft that dismissed it. */
-export interface ReferenceState { index: number; dismissed?: string }
-
 /** Model dialog step: the catalog plus the provider or model being inspected. */
 export interface ModelState { catalog: ObjectValue; provider?: string; model?: ObjectValue }
 
-/** Panels the reader opened for the selected session.
+/** Panels the reader opened; visibility and query text only, so the UI owns them.
  *
- * Only visibility and query text: every panel's rows come from the record, so closing one loses
- * nothing and a session switch may clear all of it. The row cursor inside a panel is not here — it
- * is focus, held by `Picker` and reset through its `key`.
+ * Every panel's rows come from the record, and the row cursor is focus held by `Picker`.
  */
 export interface PanelState {
   thoughts: boolean;
@@ -81,14 +55,14 @@ export interface OptionState { key: string; cursor: number; selected: string[]; 
  *  `SessionController.interactions`, which is derived per session on every publish.
  */
 export interface InteractionState {
-  answers: Record<string, ObjectValue[]>;
+  answers: Record<string, AnswerValue['answers']>;
   option?: OptionState;
   approval?: { eventId: string; index: number };
 }
 
 /** Client-owned state of the selected session, reset whenever another session is opened.
  *
- * It holds the record, the prompt index, the composer, the reading view and the local interaction
+ * It holds the record, the prompt index, the reading view and the local interaction
  * state because all five belong to one session and none of them is owned by the host beyond what the
  * record mirrors; everything derivable from `Telemetry` or `CostLedger` stays out (see the design's
  * §5.7.6). The record is referenced here and nowhere else, so "the selected session" has one entry.
@@ -97,11 +71,9 @@ export class SessionInfo {
   /** The selected session's record. Replaced — never mutated in place — when another session opens. */
   record: Transcript = new Transcript();
   readonly prompts = new PromptIndex();
-  readonly composer: ComposerState = { draft: '', cursor: 0, parked: '' };
-  readonly view: ViewState = { scroll: 0, pinned: false, folds: new Set(), liveReasoning: 'row' };
+  /** Detached history window the reader jumped to; released by `closeWindow` and `reset`. */
+  window?: Transcript;
   readonly interaction: InteractionState = { answers: {} };
-  readonly reference: ReferenceState = { index: 0 };
-  readonly panels: PanelState = { thoughts: false, queue: false };
 
   constructor(public sessionId = '') {}
 
@@ -113,21 +85,15 @@ export class SessionInfo {
     this.record.dispose();
     this.record = new Transcript();
     this.prompts.reset();
-    this.composer.draft = ''; this.composer.cursor = 0; this.composer.parked = '';
-    this.view.scroll = 0; this.view.pinned = false;
-    this.view.folds = new Set(); this.view.liveReasoning = 'row';
     this.interaction.answers = {}; this.interaction.option = undefined; this.interaction.approval = undefined;
-    this.reference.index = 0; this.reference.dismissed = undefined;
-    this.panels.thoughts = false; this.panels.queue = false;
-    this.panels.model = undefined; this.panels.history = undefined; this.panels.search = undefined;
   }
 
   /** Release the detached history window, if the reader has one open. */
   closeWindow(): void {
-    const window = this.view.window;
+    const window = this.window;
     if (!window) return;
     releaseHistoryLayout(window); window.dispose();
-    this.view.window = undefined;
+    this.window = undefined;
   }
 }
 

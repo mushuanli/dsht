@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdin, useStdout } from 'ink';
 import stringWidth from 'string-width';
-import { safeText } from '../../transport/wire.ts';
+import { safeText } from '../../text.ts';
 import { useCopyMode } from '../copy-mode.ts';
 import { useTheme } from '../theme/index.ts';
 

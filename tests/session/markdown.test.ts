@@ -10,7 +10,8 @@ import { markdownRows, markdownHtml } from '../../src/session/markdown.ts';
 import { historyLayout } from '../../src/session/history.ts';
 import { Transcript } from '../../src/session/transcript.ts';
 import { saveTranscriptHtml } from '../../src/session/export-html.ts';
-import { classifySubmission } from '../../src/ui/commands/parse.ts';
+import { parseCommand } from '../../src/slash/parse.ts';
+import { routeEnter } from '../../src/ui/routing.ts';
 
 const source = readFileSync(new URL('../fixtures/markdown.md', import.meta.url), 'utf8');
 const lines = (text: string, width = 80) => markdownRows(text, width).map(row => row.text);
@@ -118,7 +119,7 @@ test('offline HTML export includes inert SVG and MathJax math, preserves files, 
   const cancelled = join(root, 'cancelled.html');
   await assert.rejects(saveTranscriptHtml(conversation, 's1', cancelled, abort.signal), { name: 'AbortError' });
   await assert.rejects(stat(cancelled), { code: 'ENOENT' });
-  const context = { referenceOpen: false, copyMode: false, pending: false, question: false, screen: 'chat' as const };
-  assert.deepEqual(classifySubmission('/export-html "rich conversation.html"', context), { kind: 'exportHtml', destination: 'rich conversation.html' });
-  assert.deepEqual(classifySubmission('/export-html', { ...context, screen: 'sessions' }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(parseCommand('/export-html "rich conversation.html"'), { kind: 'exportHtml', destination: 'rich conversation.html' });
+  const facts = { referenceOpen: false, copyMode: false, pending: false, question: false, screen: 'sessions' as const };
+  assert.deepEqual(routeEnter({ ...facts, line: '/export-html' }), { kind: 'error', message: 'Select a session first' });
 });

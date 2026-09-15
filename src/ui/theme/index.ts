@@ -1,6 +1,6 @@
 /** Semantic terminal palette. Source: https://catppuccin.com/palette/ (Mocha). */
 import { createContext, useContext } from 'react';
-import type { RowKind } from '../../session/history.ts';
+import type { RowKind } from '../../contracts.ts';
 
 /** Themes provide semantic roles so components never depend on palette-specific color names. */
 export interface Theme {

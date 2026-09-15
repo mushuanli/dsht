@@ -5,11 +5,14 @@ import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement
 import { useMouseWheel } from './input/mouse.ts';
 import { TextInput } from './input/input.tsx';
 import { ReferenceMenu } from './input/references.tsx';
-import { historyLayout, type Reasoning } from '../session/history.ts';
-import { toolLine } from '../session/transcript.ts';
-import { activeReference, fileMention, type FileReference } from '../session/references.ts';
-import { CostPanel } from './dialogs/cost.tsx';
-import { StatusBar } from './chat/status.tsx';
+import type { PanelState, Reasoning } from '../contracts.ts';
+import type { CostTotal } from '../contracts.ts';
+import { costText } from './status/model.ts';
+import { toolLine } from '../text.ts';
+import { activeReference, fileMention } from '../references.ts';
+import type { FileReference } from '../contracts.ts';
+import { CostPanel, type CostSource } from './dialogs/cost.tsx';
+import { StatusBar, type StatusSource } from './chat/status.tsx';
 import { ChatHeader } from './chat/header.tsx';
 import { ChatViewport } from './chat/viewport.tsx';
 import { mergeShellRuns } from './chat/shell-view.ts';
@@ -17,11 +20,14 @@ import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
 import type { Choice } from './dialogs/picker.tsx';
 import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
-import { COMMAND_HINTS, completeCommand as completeDraft, suggestedCommands } from './commands/registry.ts';
-import { classifySubmission } from './commands/parse.ts';
+import { COMMAND_HINTS, completeCommand as completeDraft, suggestedCommands } from '../slash/registry.ts';
+import { routeEnter } from './routing.ts';
 import { Controller, type HistorySearch, type RemovalTarget } from '../controller/controller.ts';
-import { ROLLUP_LEGEND, sessionLabel, sessionStatus, workspaceCounts, workspaceDetail, workspaceSegments, workspaceStatus, type RollupState, type RollupStyle } from '../session/navigation.ts';
-import { array, errorText, object, safeText, string, type ObjectValue } from '../transport/wire.ts';
+import { sessionLabel } from '../session-title.ts';
+import { ROLLUP_LEGEND, sessionStatus, workspaceCounts, workspaceDetail, workspaceSegments, workspaceStatus, type RollupState, type RollupStyle } from './chat/navigation-model.ts';
+import { array, object, string, type ObjectValue } from '../json.ts';
+import { errorText } from '../text.ts';
+import { safeText } from '../text.ts';
 
 /** Transient notices expire; interactive panels remain open until dismissed. */
 const PANEL_LIFETIME_MS = 10_000;
@@ -35,25 +41,35 @@ const RECALL_PAGE_SCAN = 20;
  */
 export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = mocha }: { controller: Controller; panelLifetimeMs?: number; theme?: Theme }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
-  const presetId = controller.telemetry.view(state.sessionId).values.agentPreset;
-  useEffect(() => { if (typeof presetId === 'string') controller.loadPresetNames(); }, [controller, state.online, presetId]);
+  const presetId = controller.queries.telemetry.view(state.sessionId).values.agentPreset;
+  useEffect(() => { if (typeof presetId === 'string') controller.actions.loadPresetNames(); }, [controller, state.online, presetId]);
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [copyMode, setCopyMode] = useState(false);
   // The composer belongs to the selected session: it resets when another session opens, and every
   // callback reads the controller rather than a render closure Ink may not have refreshed yet.
-  const { draft: input, cursor } = state.session.composer;
+  const [input, setInputValue] = useState('');
+  const [cursor, setCursor] = useState(0);
+  const parkedDraft = useRef('');
   const historyPaging = useRef(false);
   const setInput = (value: string, recalled = false) => {
-    if (!recalled) controller.resetRecall();
+    if (!recalled) controller.actions.resetRecall();
     // A new message draft returns the view to the live end, so composing never needs a scroll first.
     // A slash command is not a message, and the reader keeps their place while typing one.
-    if (state.screen === 'chat' && controller.composer.draft === '' && value !== '' && !value.startsWith('/')) controller.setScroll(0);
-    controller.setComposer(value);
+    if (state.screen === 'chat' && input === '' && value !== '' && !value.startsWith('/')) setScroll(0);
+    // Replacing the text parks the caret at its end, exactly as the session-owned composer did; the
+    // editor reports its real caret straight afterwards when the change came from an in-place edit.
+    setInputValue(value);
+    setCursor(value.length);
   };
   // The reading view is session-owned too: which record is shown, where the reader is, and what is
   // expanded. `SessionInfo` releases the detached window, so the composer and this view reset together.
-  const { window: historyWindow, scroll, folds: reasoningOverrides, liveReasoning } = state.session.view;
+  // Reading position, folds and the live-reasoning fold mode are component state: switching the
+  // session remounts the screen, and the record's own detached window stays session-owned.
+  const [scroll, setScroll] = useState(0);
+  const [reasoningOverrides, setReasoningOverrides] = useState<ReadonlySet<number>>(new Set());
+  const [liveReasoning, setLiveReasoning] = useState<Reasoning>('row');
+  const historyWindow = state.session.window;
   const [historyLoading, setHistoryLoading] = useState<string>();
   const displayTranscript = historyWindow ?? state.session.record;
   const displayRef = useRef(displayTranscript); displayRef.current = displayTranscript;
@@ -66,8 +82,14 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
   });
   const [removal, setRemoval] = useState<RemovalTarget>();
-  // Session-owned panels: visibility and query text only, because every row comes from the record.
-  const { thoughts: thoughtList, queue: queueOpen, model: models, history, search: searchResults } = state.session.panels;
+  // Panels are component state: visibility and query text only, because every row comes from the record.
+  const [panels, setPanels] = useState<PanelState>({ thoughts: false, queue: false });
+  const { thoughts: thoughtList, queue: queueOpen, model: models, history, search: searchResults } = panels;
+  const openThoughts = (open: boolean) => setPanels(current => ({ ...current, thoughts: open }));
+  const openQueue = (open: boolean) => setPanels(current => ({ ...current, queue: open }));
+  const setModelPanel = (model?: PanelState['model']) => setPanels(current => ({ ...current, model }));
+  const setHistoryPanel = (history?: PanelState['history']) => setPanels(current => ({ ...current, history }));
+  const setSearchPanel = (search?: PanelState['search']) => setPanels(current => ({ ...current, search }));
   const historyQuery = history?.query;
   const contentSearch = history?.contentSearch === true;
   const historyMatches = history?.matches;
@@ -76,7 +98,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [costExpanded, setCostExpanded] = useState(false);
   const [statusExpanded, setStatusExpanded] = useState(false);
   const reasoning: Reasoning = 'row';
-  useEffect(() => { controller.setLiveReasoning('row'); }, [state.session.record, state.session.record.liveAttemptKey]);
+  useEffect(() => { setLiveReasoning('row'); }, [state.session.record, state.session.record.liveAttemptKey]);
   const [notice, setNotice] = useState<string>();
   const [help, setHelp] = useState(false);
   const [helpPage, setHelpPage] = useState(0);
@@ -92,7 +114,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Answers and menu highlights are session-owned too: the waterfall itself is derived per session
   // by the controller, so only the local selection is kept here.
   const { answers, option: optionState, approval: approvalSelection } = state.session.interaction;
-  const { index: referenceIndex, dismissed: dismissedReference } = state.session.reference;
+  const [referenceIndex, setReferenceIndex] = useState(0);
+  const [dismissedReference, setDismissedReference] = useState<string>();
   const [lookup, setLookup] = useState<{ draft: string; sessionId: string; items: FileReference[]; error?: string }>();
   // Interactive panels remain stable while read; only transient notices expire.
   useEffect(() => {
@@ -105,15 +128,20 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Esc closes it sooner, and its own content search stays open until the reader leaves it.
   useEffect(() => {
     if (copyMode || contentSearch || historyQuery === undefined) return;
-    const timer = setTimeout(() => { controller.setHistoryPanel(undefined); }, panelLifetimeMs);
+    const timer = setTimeout(() => { setHistoryPanel(undefined); }, panelLifetimeMs);
     return () => clearTimeout(timer);
   }, [historyQuery, contentSearch, panelLifetimeMs, copyMode]);
   const pending = state.pending[0];
-  const queued = controller.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
-  useEffect(() => { controller.openQueue(false); }, [state.sessionId, pending?.eventId]);
+  const queued = controller.queries.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
+  useEffect(() => {
+    setPanels({ thoughts: false, queue: false }); setReferenceIndex(0); setDismissedReference(undefined);
+    setInputValue(''); setCursor(0); parkedDraft.current = '';
+    setScroll(0); setReasoningOverrides(new Set()); setLiveReasoning('row');
+  }, [state.sessionId]);
+  useEffect(() => { openQueue(false); }, [state.sessionId, pending?.eventId]);
   // A replayed interaction (same eventId after a reconnect) starts unselected again.
-  useEffect(() => { controller.setApproval(undefined); }, [state.sessionId, state.online, pending?.eventId]);
-  const token = state.screen === 'chat' && state.online && !state.busy && !pending
+  useEffect(() => { controller.actions.setApproval(undefined); }, [state.sessionId, state.online, pending?.eventId]);
+  const token = state.screen === 'chat' && state.online && !state.operation.busy && !pending
     && !input.startsWith('/') && dismissedReference !== input && cursor === input.length
     ? activeReference(input) : undefined;
   const referenceOpen = token !== undefined;
@@ -126,8 +154,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (!referenceOpen) return;
     const abort = new AbortController();
     setLookup(undefined);
-    controller.setReferenceIndex(0);
-    void controller.references(activeReference(input)!.query, abort.signal).then(items => {
+    setReferenceIndex(0);
+    void controller.queries.references(activeReference(input)!.query, abort.signal).then(items => {
       if (!abort.signal.aborted) setLookup({ draft: input, sessionId: state.sessionId!, items });
     }, error => {
       if (!abort.signal.aborted) setLookup({ draft: input, sessionId: state.sessionId!, items: [], error: errorText(error) });
@@ -136,7 +164,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   }, [controller, input, state.sessionId, referenceOpen]);
   const pickReference = () => {
     const candidate = matches?.items[referenceIndex];
-    if (!candidate || !token || controller.composer.draft !== input) return;
+    if (!candidate || !token) return;
     const mention = fileMention(candidate, token.quoted)!;
     setInput(input.slice(0, -token.prefix.length) + mention + (candidate.kind === 'file' ? ' ' : ''));
   };
@@ -145,12 +173,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const completed = completeDraft(input);
     if (completed !== undefined) setInput(completed);
   };
-  const questions = pending?.event === 'user-questions/request' ? array(object(pending.request).questions).map(object) : [];
-  const eventId = pending ? string(pending.eventId) : '';
+  const questions = pending?.kind === 'question' ? pending.questions : [];
+  const eventId = pending?.eventId ?? '';
   const answered = answers[eventId] ?? [];
   const question = questions[answered.length];
   const optionKey = `${eventId}:${answered.length}`;
-  const options = question ? array(question.options ?? []).map(object) : [];
+  const options: readonly { label: string; description?: string }[] = question ? question.options : [];
   const choiceState = optionState?.key === optionKey ? optionState : { key: optionKey, cursor: 0, selected: [], custom: false };
   const optionCursor = Math.min(choiceState.cursor, options.length);
   // Reserve the header, composer and question instructions; each choice may have a description.
@@ -166,32 +194,45 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // A dialog that demands an answer owns the keyboard until it is settled: the draft being written is
   // parked rather than typed into, and comes back when the last one closes. A question switches to
   // the composer itself for a free-text or "Other" answer, so it keeps the keys then.
-  const answerPending = !!pending && (pending.event === 'approval/request' || options.length > 0 && !choiceState.custom);
+  const answerPending = !!pending && (pending.kind === 'approval' || options.length > 0 && !choiceState.custom);
   useEffect(() => {
-    if (answerPending) { controller.parkComposer(); return; }
+    // A dialog that demands an answer parks the draft: the text is moved aside while it owns the
+    // keyboard and given back when it closes. Restoring writes the draft directly, so it neither
+    // counts as a recall nor moves a reader's scroll position.
+    if (answerPending) {
+      if (input !== '') { parkedDraft.current = input; setInputValue(''); setCursor(0); }
+      return;
+    }
     if (pending) return;
-    // Restoring writes the draft directly: it was neither recalled from history nor a new message,
-    // so it must not move a reader's scroll position.
-    controller.restoreComposer();
+    if (parkedDraft.current !== '') {
+      const parked = parkedDraft.current; parkedDraft.current = '';
+      setInputValue(parked); setCursor(parked.length);
+    }
   }, [answerPending, pending]);
-  const approvalKeysActive = pending?.event === 'approval/request' && !copyMode && !panelBlocksKeys;
+  const approvalKeysActive = pending?.kind === 'approval' && !copyMode && !panelBlocksKeys;
   const approvalIndex = approvalSelection?.eventId === eventId ? approvalSelection.index : -1;
-  const answerQuestion = async (selected: string[], custom?: string) => {
+  const answerQuestion = async (selected: string[], custom?: string): Promise<boolean> => {
     if (controller.state.pending[0]?.eventId !== eventId) throw new Error('The pending question has changed');
-    const answer = { id: string(question!.id), selected, ...(custom ? { custom } : {}) };
+    const answer = { id: question!.id, selected, ...(custom ? { custom } : {}) };
     const next = [...answered, answer];
     if (next.length === questions.length) {
-      await controller.answer({ answers: next });
-      const rest = { ...controller.interaction.answers }; delete rest[eventId]; controller.setAnswers(rest);
-    } else controller.setAnswers({ ...controller.interaction.answers, [eventId]: next });
-    controller.setOption(undefined);
+      // A rejected submission keeps the collected answers and the keyboard state, so the reader can
+      // retry the same answer instead of rebuilding it.
+      if (!await controller.actions.answer({ answers: next })) return false;
+      const rest = { ...controller.queries.interaction.answers }; delete rest[eventId]; controller.actions.setAnswers(rest);
+    } else controller.actions.setAnswers({ ...controller.queries.interaction.answers, [eventId]: next });
+    controller.actions.setOption(undefined);
+    return true;
   };
 
-  const operate = (fn: () => Promise<void>) => { void controller.perform(fn); };
-  const requestRemoval = async (kind: 'workspace' | 'session', query: string) => {
-    const target = await controller.removalTarget(kind, query);
-    if (target.kind === 'session' && target.empty) await controller.removeTarget(target);
-    else setRemoval(target);
+  // Actions own their busy/error envelope; this only surfaces a UI-local orchestration failure.
+  const operate = (fn: () => Promise<unknown>) => { void fn().catch(error => setNotice(errorText(error))); };
+  const requestRemoval = async (kind: 'workspace' | 'session', query: string): Promise<boolean> => {
+    const target = await controller.actions.removalTarget(kind, query);
+    if (target === undefined) return false;
+    if (target.kind === 'session' && target.empty) return await controller.actions.removeTarget(target);
+    setRemoval(target);
+    return true;
   };
   useInput((_value, key) => {
     if (key.eventType === 'release') return;
@@ -203,49 +244,49 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if ((key.escape || key.ctrl && _value === 'c') && historyAbort.current) {
       historyAbort.current.abort();
       // Esc also leaves a history list that was already on screen when the load was aborted.
-      if (key.escape && historyQuery !== undefined) { controller.setHistoryPanel(undefined); }
+      if (key.escape && historyQuery !== undefined) { setHistoryPanel(undefined); }
       return;
     }
     if ((key.escape || key.ctrl && _value === 'c') && controller.state.pending.length) {
-      if (key.ctrl && controller.composer.draft) setInput('');
+      if (key.ctrl && input) setInput('');
       if (key.escape) {
-        controller.setApproval(undefined);
-        setRemoval(undefined); controller.setModelPanel(undefined); controller.openThoughts(false); controller.setSearchPanel(undefined);
-        controller.setHistoryPanel(undefined); setHelp(false); setCostExpanded(false); setStatusExpanded(false);
+        controller.actions.setApproval(undefined);
+        setRemoval(undefined); setModelPanel(undefined); openThoughts(false); setSearchPanel(undefined);
+        setHistoryPanel(undefined); setHelp(false); setCostExpanded(false); setStatusExpanded(false);
         // A question batch is one request, so Esc leaves the whole set the way the Web client's
         // close button does. The free-text row keeps its own step back: its first Esc returns to
         // the options, and only the next one dismisses. Approval keeps every choice explicit.
-        if (pending?.event === 'user-questions/request' && !choiceState.custom) {
-          if (controller.state.online && !controller.state.busy && controller.state.pending[0]?.eventId === eventId) {
-            controller.setOption(undefined);
-            const rest = { ...controller.interaction.answers }; delete rest[eventId]; controller.setAnswers(rest);
-            operate(() => controller.dismissQuestion());
+        if (pending?.kind === 'question' && !choiceState.custom) {
+          if (controller.state.online && !controller.state.operation.busy && controller.state.pending[0]?.eventId === eventId) {
+            controller.actions.setOption(undefined);
+            const rest = { ...controller.queries.interaction.answers }; delete rest[eventId]; controller.actions.setAnswers(rest);
+            operate(() => controller.actions.dismissQuestion());
           }
           return;
         }
-        controller.setOption({ ...choiceState, custom: false });
+        controller.actions.setOption({ ...choiceState, custom: false });
       }
       return;
     }
-    if (approvalKeysActive && !controller.composer.draft && controller.state.online && !controller.state.busy
+    if (approvalKeysActive && !input && controller.state.online && !controller.state.operation.busy
       && controller.state.pending[0]?.eventId === eventId && !key.ctrl && !key.meta) {
       const digit = /^[1-3]$/.test(_value) ? Number(_value) - 1 : -1;
       if (digit >= 0 || key.upArrow || key.downArrow) {
         // An unselected list enters at the first, non-destructive choice, so a stray arrow plus Enter cannot cancel.
         const index = digit >= 0 ? digit : approvalIndex < 0 ? 0
           : Math.max(0, Math.min(2, approvalIndex + (key.upArrow ? -1 : 1)));
-        controller.setApproval({ eventId, index }); return;
+        controller.actions.setApproval({ eventId, index }); return;
       }
       if (key.return) {
         // Choice 3 cancels the turn instead of answering the request, so it sends no event result.
-        if (approvalIndex >= 0) operate(() => approvalIndex === 2 ? controller.cancelTurn() : controller.approve(approvalIndex === 0));
+        if (approvalIndex >= 0) operate(() => approvalIndex === 2 ? controller.actions.cancelTurn() : controller.actions.approve(approvalIndex === 0));
         return;
       }
     }
-    if (questionKeysActive && !controller.composer.draft && !controller.state.busy && !key.ctrl && !key.meta) {
+    if (questionKeysActive && !input && !controller.state.operation.busy && !key.ctrl && !key.meta) {
       const digit = /^[1-9]$/.test(_value) ? Number(_value) - 1 : -1;
       if (key.upArrow || key.downArrow) {
-        controller.setOption({ ...choiceState, cursor: Math.max(0, Math.min(options.length, optionCursor + (key.upArrow ? -1 : 1))) }); return;
+        controller.actions.setOption({ ...choiceState, cursor: Math.max(0, Math.min(options.length, optionCursor + (key.upArrow ? -1 : 1))) }); return;
       }
       if (digit >= 0 && digit <= options.length || _value === ' ' && question!.multiSelect === true && optionCursor < options.length) {
         const index = digit >= 0 ? digit : optionCursor;
@@ -253,10 +294,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         const selected = question!.multiSelect === true && label
           ? choiceState.selected.includes(label) ? choiceState.selected.filter(item => item !== label) : [...choiceState.selected, label]
           : choiceState.selected;
-        controller.setOption({ ...choiceState, cursor: index, selected }); return;
+        controller.actions.setOption({ ...choiceState, cursor: index, selected }); return;
       }
       if (key.return) {
-        if (optionCursor === options.length) { controller.setOption({ ...choiceState, custom: true }); return; }
+        if (optionCursor === options.length) { controller.actions.setOption({ ...choiceState, custom: true }); return; }
         const selected = question!.multiSelect === true ? choiceState.selected : [string(options[optionCursor]!.label)];
         if (!selected.length) { setNotice('Select at least one option with Space or a number'); return; }
         operate(() => answerQuestion(selected)); return;
@@ -272,167 +313,204 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setStatusScroll(value => Math.max(0, value + (key.pageUp ? -statusViewRows : statusViewRows))); return;
     }
     if (key.pageUp || key.pageDown) { scrollHistory(key.pageUp ? 10 : -10); return; }
-    if (key.escape && queueOpen) { controller.openQueue(false); return; }
+    if (key.escape && queueOpen) { openQueue(false); return; }
     if (key.escape && removal) { setRemoval(undefined); return; }
-    if (key.escape && models) { controller.setModelPanel(undefined); return; }
-    if (key.escape && thoughtList) { controller.openThoughts(false); if (controller.running) void controller.interrupt(true); return; }
-    if (key.escape && searchResults) { controller.setSearchPanel(undefined); if (controller.running) void controller.interrupt(true); return; }
-    if (key.escape && historyQuery !== undefined) { controller.setHistoryPanel(undefined); if (controller.running) void controller.interrupt(true); return; }
+    if (key.escape && models) { setModelPanel(undefined); return; }
+    if (key.escape && thoughtList) { openThoughts(false); if (controller.queries.running) void controller.actions.interrupt(true); return; }
+    if (key.escape && searchResults) { setSearchPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); return; }
+    if (key.escape && historyQuery !== undefined) { setHistoryPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); return; }
     // The typed host path is a screen of its own, so Esc has to leave it: the picker behind it is
     // disabled while a draft exists, so a leftover path would leave no way back at all.
-    if (key.escape && state.screen === 'path') { setInput(''); operate(() => controller.showPicker('workspaces')); return; }
-    if (key.ctrl && _value === 'c' && input === '' && controller.shell.running) {
+    if (key.escape && state.screen === 'path') { setInput(''); operate(() => controller.actions.showPicker('workspaces')); return; }
+    if (key.ctrl && _value === 'c' && input === '' && state.shell.running) {
       // A local command in the transcript is the most immediate thing Ctrl+C can stop.
       controller.shell.cancel(); return;
     }
     if (key.ctrl && _value === 'c') {
       // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
       if (input !== '') { setInput(''); return; }
-      void controller.interrupt().then(shouldExit => { if (shouldExit) exit(); });
+      void controller.actions.interrupt().then(shouldExit => { if (shouldExit) exit(); });
       return;
     }
     if (referenceOpen) {
-      if (key.escape) { controller.setReferenceDismissed(input); if (controller.running) void controller.interrupt(true); }
+      if (key.escape) { setDismissedReference(input); if (controller.queries.running) void controller.actions.interrupt(true); }
       else if (key.tab) pickReference();
-      else if (key.upArrow) controller.setReferenceIndex(Math.max(0, controller.reference.index - 1));
-      else if (key.downArrow) controller.setReferenceIndex(Math.max(0, Math.min((matches?.items.length ?? 1) - 1, controller.reference.index + 1)));
+      else if (key.upArrow) setReferenceIndex(Math.max(0, referenceIndex - 1));
+      else if (key.downArrow) setReferenceIndex(Math.max(0, Math.min((matches?.items.length ?? 1) - 1, referenceIndex + 1)));
       return;
     }
     const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
     const recallNext = key.downArrow || key.ctrl && _value === 'n';
-    if ((recallPrevious || recallNext) && state.online && !controller.state.busy && !pending
+    if ((recallPrevious || recallNext) && state.online && !controller.state.operation.busy && !pending
       && !queueOpen && (!recallBlocked || key.ctrl)
-      && (state.screen === 'chat' || controller.composer.draft !== '' || key.ctrl)) {
+      && (state.screen === 'chat' || input !== '' || key.ctrl)) {
       // The oldest seeded entry is where the session happened to open, not where it began: stepping
       // past it fetches the page before the retained window, and the step is applied once the page
       // lands, so recall covers prompts from before this client connected. Paging stays with the
       // conversation: on a picker screen the arrows only ever walked what was already retained.
       if (recallPrevious && state.screen === 'chat' && !historyPaging.current
-        && (controller.recallAtOldest || controller.recallLength === 0)
-        && state.session.record.ready && controller.recallHasOlder) { void recallOlderPrompts(); return; }
-      setInput(controller.recall(recallPrevious ? -1 : 1, controller.composer.draft), true); return;
+        && (controller.queries.recallAtOldest || controller.queries.recallLength === 0)
+        && state.session.record.ready && controller.queries.recallHasOlder) { void recallOlderPrompts(); return; }
+      setInput(controller.queries.recall(recallPrevious ? -1 : 1, input), true); return;
     }
     if (key.tab) { completeCommand(); return; }
     if (key.escape && (help || costExpanded || statusExpanded || notice !== undefined)) {
       setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusScroll(0); setNotice(undefined);
-      if (controller.running) void controller.interrupt(true);
+      if (controller.queries.running) void controller.actions.interrupt(true);
       return;
     }
-    if (key.escape && controller.shell.running && input === '' && !panelBlocksKeys && !pending && state.screen === 'chat') {
+    if (key.escape && state.shell.running && input === '' && !panelBlocksKeys && !pending && state.screen === 'chat') {
       // The local command is the most immediate thing Esc can stop; the next press interrupts the agent.
       controller.shell.cancel(); return;
     }
-    if (key.escape && state.screen === 'chat') { void controller.interrupt(true); }
+    if (key.escape && state.screen === 'chat') { void controller.actions.interrupt(true); }
   });
 
   const submit = async (raw: string) => {
-    const submission = classifySubmission(raw, {
-      referenceOpen, copyMode, pending: pending !== undefined, question: question !== undefined, screen: state.screen,
-    });
+    const submission = routeEnter({ line: raw,
+      referenceOpen, copyMode, pending: pending !== undefined, question: question !== undefined, screen: state.screen });
     if (submission.kind === 'ignore') return;
     if (submission.kind === 'reference') { pickReference(); return; }
     const value = raw.trim();
-    if (!pending && !/^\/feedback(?:\s|$)/.test(value)) controller.recordRecall(value);
+    if (!pending && !/^\/feedback(?:\s|$)/.test(value)) controller.actions.recordRecall(value);
     if (submission.kind === 'copy') { setInput(''); setCopyMode(true); return; }
     setRemoval(undefined);
     // Each panel belongs to the command that opened it, so any other command closes it.
-    if (value !== '/queue') controller.openQueue(false);
-    if (!/^\/model(?: |$)/.test(value)) controller.setModelPanel(undefined);
+    if (value !== '/queue') openQueue(false);
+    if (!/^\/model(?: |$)/.test(value)) setModelPanel(undefined);
     if (value !== '/help') setHelp(false);
     if (value !== '/cost') setCostExpanded(false);
     if (value !== '/status') setStatusExpanded(false);
-    if (!/^\/think(?: |$)/.test(value)) controller.openThoughts(false);
+    if (!/^\/think(?: |$)/.test(value)) openThoughts(false);
     if (submission.kind === 'quit') { exit(); return; }
     if (submission.kind === 'panel') {
       if (submission.panel === 'cost') {
         setCostExpanded(value => !value); setInput('');
-        if (!costExpanded) void controller.perform(() => historyOperation(signal => controller.refreshCosts(signal)));
+        if (!costExpanded) void historyOperation(signal => controller.actions.refreshCosts(signal));
       } else if (submission.panel === 'status') { setStatusExpanded(value => !value); setStatusScroll(0); setInput(''); }
       else { setHelp(value => !value); setHelpPage(0); setInput(''); }
       return;
     }
-    const accepted = await controller.perform(async () => {
-      switch (submission.kind) {
-        case 'remove': await requestRemoval(submission.target, submission.query); return;
-        case 'navigate': {
-          controller.setHistoryPanel(undefined);
-          controller.setSearchPanel(undefined);
-          if (submission.target === 'workspace') await controller.switchWorkspace(submission.query);
-          else await controller.switchSession(submission.query);
-          controller.setScroll(0);
-          return;
-        }
-        case 'path': await controller.createWorkspace(submission.value); return;
-        case 'latest':
-          controller.setViewWindow(undefined); controller.setHistoryPanel(undefined); controller.setSearchPanel(undefined);
-          controller.setFolds(new Set()); controller.setScroll(0); controller.pinHistory(false);
-          return;
-        case 'models': {
-          if (!submission.args.length) { controller.setHistoryPanel(undefined); controller.setSearchPanel(undefined); controller.setModelPanel({ catalog: await controller.modelCatalog() }); }
-          else { await controller.selectModel(submission.args[0]!, submission.args[1]!, submission.args[2]); controller.setModelPanel(undefined); }
-          return;
-        }
-        case 'queue': controller.openQueue(true); return;
-        case 'shell': controller.shell.start(submission.command); controller.setScroll(0); return;
-        case 'newSession': await controller.createSession(); return;
-        case 'history': controller.setSearchPanel(undefined); controller.setHistoryPanel({ query: submission.query, contentSearch: false }); return;
-        case 'sessionSearch':
-          await historyOperation(async signal => {
-            const result = await controller.searchSessions(submission.query, submission.command === '/ssearch', signal);
-            controller.setHistoryPanel(undefined); controller.setSearchPanel({ query: submission.query, ...result });
-          });
-          return;
-        case 'historySearch':
-          await historyOperation(async signal => {
-            controller.setHistoryPanel({ query: submission.query, contentSearch: true,
-              matches: await controller.searchHistory(submission.query, signal) });
-            controller.setSearchPanel(undefined);
-          });
-          return;
-        case 'think': {
-          if (submission.target === 'live') {
-            controller.setLiveReasoning(controller.view.liveReasoning === 'row' ? 'full' : 'row'); controller.openThoughts(false); controller.setScroll(0);
-          } else if (submission.target) {
-            const seq = Number(submission.target);
-            if (!Number.isSafeInteger(seq) || !displayTranscript.thoughts.some(entry => entry.seq === seq)) throw new Error('Use /think <message sequence> for a loaded reasoning block');
-            const next = new Set(reasoningOverrides);
-            if (next.delete(seq)) { controller.setFolds(next); return; }
-            next.add(seq); controller.setFolds(next);
-            await jumpHistory(seq, next);
-          } else {
-            controller.setHistoryPanel(undefined); controller.setSearchPanel(undefined); controller.openThoughts(true);
+    // Each action owns its busy/error envelope and reports completion, so the composer clears only
+    // when the line actually ran; a UI-local failure surfaces as the transient notice.
+    const accepted = await (async (): Promise<boolean> => {
+      try {
+        switch (submission.kind) {
+          case 'remove': return await requestRemoval(submission.target, submission.query);
+          case 'navigate': {
+            setHistoryPanel(undefined);
+            setSearchPanel(undefined);
+            const ok = submission.target === 'workspace'
+              ? await controller.actions.switchWorkspace(submission.query)
+              : await controller.actions.switchSession(submission.query);
+            setScroll(0);
+            return ok;
           }
-          return;
+          case 'path': return await controller.actions.createWorkspace(submission.value);
+          case 'latest':
+            controller.actions.setViewWindow(undefined); setHistoryPanel(undefined); setSearchPanel(undefined);
+            setReasoningOverrides(new Set()); setScroll(0); controller.actions.pinHistory(false);
+            return true;
+          case 'models': {
+            if (!submission.args.length) {
+              setHistoryPanel(undefined); setSearchPanel(undefined);
+              const catalog = await controller.actions.modelCatalog();
+              if (catalog === undefined) return false;
+              setModelPanel({ catalog });
+              return true;
+            }
+            const ok = await controller.actions.selectModel(submission.args[0]!, submission.args[1]!, submission.args[2]);
+            if (ok) setModelPanel(undefined);
+            return ok;
+          }
+          case 'queue': openQueue(true); return true;
+          case 'shell': controller.shell.start(submission.command); setScroll(0); return true;
+          case 'newSession': return await controller.actions.createSession();
+          case 'history': setSearchPanel(undefined); setHistoryPanel({ query: submission.query, contentSearch: false }); return true;
+          case 'sessionSearch':
+            return await historyOperation(async signal => {
+              const result = await controller.actions.searchSessions(submission.query, submission.command === '/ssearch', signal);
+              if (result === undefined) return false;
+              setHistoryPanel(undefined); setSearchPanel({ query: submission.query, ...result });
+              return true;
+            }, 'Searching sessions…') ?? false;
+          case 'historySearch':
+            return await historyOperation(async signal => {
+              const matches = await controller.actions.searchHistory(submission.query, signal);
+              if (matches === undefined) return false;
+              setHistoryPanel({ query: submission.query, contentSearch: true, matches });
+              setSearchPanel(undefined);
+              return true;
+            }, 'Searching history…') ?? false;
+          case 'think': {
+            if (submission.target === 'live') {
+              setLiveReasoning(liveReasoning === 'row' ? 'full' : 'row'); openThoughts(false); setScroll(0);
+            } else if (submission.target) {
+              const seq = Number(submission.target);
+              if (!Number.isSafeInteger(seq) || !displayTranscript.thoughts.some(entry => entry.seq === seq)) throw new Error('Use /think <message sequence> for a loaded reasoning block');
+              const next = new Set(reasoningOverrides);
+              if (next.delete(seq)) { setReasoningOverrides(next); return true; }
+              next.add(seq); setReasoningOverrides(next);
+              await jumpHistory(seq, next);
+            } else {
+              setHistoryPanel(undefined); setSearchPanel(undefined); openThoughts(true);
+            }
+            return true;
+          }
+          case 'older': {
+            const ok = await controller.actions.older(undefined, displayTranscript);
+            setScroll(scroll + 10);
+            return ok;
+          }
+          case 'compact':
+            setNotice(undefined);
+            return await historyOperation(async signal => {
+              const text = await controller.actions.command('/compact', signal);
+              if (text === undefined) return false;
+              setNotice(text); return true;
+            }, 'Compacting history…') ?? false;
+          case 'cancel': return await controller.actions.cancelTurn();
+          case 'approval': return await controller.actions.approve(submission.allowed);
+          case 'hostCommand':
+            setNotice(undefined);
+            return await historyOperation(async signal => {
+              const text = await controller.actions.command(submission.line, signal);
+              if (text === undefined) return false;
+              setNotice(text); return true;
+            }, 'Running command…') ?? false;
+          case 'export':
+            return await historyOperation(async signal => {
+              const saved = await controller.actions.exportLog(submission.destination, signal);
+              if (saved === undefined) return false;
+              setNotice(`Saved session log: ${saved}`);
+              return true;
+            }, 'Exporting session log…') ?? false;
+          case 'exportHtml':
+            return await historyOperation(async signal => {
+              const saved = await controller.actions.exportHtml(submission.destination, signal);
+              if (saved === undefined) return false;
+              setNotice(`Saved loaded conversation: ${saved}`);
+              return true;
+            }, 'Exporting loaded conversation…') ?? false;
+          case 'coredump':
+            // V8 serializes the heap synchronously, so the client stalls until the file is written;
+            // the path is reported afterwards so the snapshot can be opened in DevTools.
+            await historyOperation(async () => {
+              setNotice(`Heap snapshot saved: ${controller.actions.heapSnapshot(submission.tag)}`);
+            }, 'Writing heap snapshot…');
+            return true;
+          case 'answer':
+            return await answerQuestion(question!.multiSelect === true ? choiceState.selected : [], submission.text);
+          case 'error': throw new Error(submission.message);
+          case 'prompt': {
+            const ok = await controller.actions.prompt(submission.text);
+            controller.actions.setViewWindow(undefined); setScroll(0);
+            return ok;
+          }
         }
-        case 'older': await controller.older(undefined, displayTranscript); controller.setScroll(controller.view.scroll + 10); return;
-        case 'compact':
-          setNotice(undefined);
-          await historyOperation(async signal => { setNotice(await controller.command('/compact', signal)); }, 'Compacting history…');
-          return;
-        case 'cancel': await controller.cancelTurn(); return;
-        case 'approval': await controller.approve(submission.allowed); return;
-        case 'hostCommand':
-          setNotice(undefined);
-          await historyOperation(async signal => { setNotice(await controller.command(submission.line, signal)); }, 'Running command…');
-          return;
-        case 'export':
-          await historyOperation(async signal => { setNotice(`Saved session log: ${await controller.exportLog(submission.destination, signal)}`); }, 'Exporting session log…');
-          return;
-        case 'exportHtml':
-          await historyOperation(async signal => { setNotice(`Saved loaded conversation: ${await controller.exportHtml(submission.destination, signal)}`); }, 'Exporting loaded conversation…');
-          return;
-        case 'coredump':
-          // V8 serializes the heap synchronously, so the client stalls until the file is written;
-          // the path is reported afterwards so the snapshot can be opened in DevTools.
-          await historyOperation(async () => {
-            setNotice(`Heap snapshot saved: ${controller.heapSnapshot(submission.tag)}`);
-          }, 'Writing heap snapshot…');
-          return;
-        case 'answer': await answerQuestion(question!.multiSelect === true ? choiceState.selected : [], submission.text); return;
-        case 'error': throw new Error(submission.message);
-        case 'prompt': await controller.prompt(submission.text); controller.setViewWindow(undefined); controller.setScroll(0); return;
-      }
-    });
+        return true;
+      } catch (error) { setNotice(errorText(error)); return false; }
+    })();
     if (accepted) setInput('');
   };
 
@@ -447,7 +525,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Session activity is a list-level fact, so both pickers read it without loading any history.
   const listAge = Date.now();
   // Unanswered interactions are held per session already; a list only has to read the counts.
-  const pendingCounts = controller.pendingCounts();
+  const pendingCounts = controller.queries.pendingCounts();
   const isPending = (session: ObjectValue): boolean => (pendingCounts.get(string(session.sessionId)) ?? 0) > 0;
   const sessionsOf = (workspace: ObjectValue): ObjectValue[] => {
     const ids = new Set(array(workspace.sessionIds).map(string));
@@ -472,29 +550,30 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         cells: workspaceSegments(counts, rollupStyle).map(segment => ({ text: segment.text, color: stateColor[segment.state] })),
         ...(detail ? { detail } : {}),
         remove: () => setRemoval({ kind: 'workspace', id: string(workspace.workspaceId), name: string(workspace.title), path: string(workspace.path) }),
-        action: () => controller.pickWorkspace(string(workspace.workspaceId)) };
+        action: () => controller.actions.pickWorkspace(string(workspace.workspaceId)) };
     }),
-    { key: '@all', label: 'All sessions', action: () => operate(() => controller.switchSession('all')) },
+    { key: '@all', label: 'All sessions', action: () => operate(() => controller.actions.switchSession('all')) },
     // The directory this client runs in is the one case where no path has to be typed, and offering
     // it only while the host has not registered it keeps the row from repeating itself.
     ...(state.workspaces.some(workspace => string(workspace.path) === controller.localDirectory) ? []
       : [{ key: '@here', label: `+ Add workspace (this directory)  ${controller.localDirectory}`,
-        action: () => operate(() => controller.createWorkspace(controller.localDirectory)) }]),
-    { key: '@new', label: '+ Add workspace (host directory)', action: () => controller.enterPath() },
+        action: () => operate(() => controller.actions.createWorkspace(controller.localDirectory)) }]),
+    { key: '@new', label: '+ Add workspace (host directory)', action: () => controller.actions.enterPath() },
   ] : [
-    ...(state.workspaceId && !state.showAllSessions ? [{ key: '@new', label: '+ New session', action: () => operate(() => controller.createSession()) }] : []),
-    ...controller.visibleSessions.map(session => ({ key: string(session.sessionId),
+    ...(state.workspaceId && !state.showAllSessions ? [{ key: '@new', label: '+ New session', action: () => operate(() => controller.actions.createSession()) }] : []),
+    ...controller.queries.visibleSessions.map(session => ({ key: string(session.sessionId),
       label: `${sessionStatus(session, listAge, isPending(session))} ${sessionLabel(session)}  ${session.sessionId}`,
       remove: () => operate(() => requestRemoval('session', string(session.sessionId))),
-      action: () => { controller.setScroll(0); operate(() => controller.selectSession(string(session.sessionId))); } })),
-    { key: '@back', label: '← Workspaces', action: () => operate(() => controller.showPicker('workspaces')) },
+      action: () => { setScroll(0); operate(() => controller.actions.selectSession(string(session.sessionId))); } })),
+    { key: '@back', label: '← Workspaces', action: () => operate(() => controller.actions.showPicker('workspaces')) },
   ];
-  const layout = useMemo(() => historyLayout(displayTranscript, width, reasoning, reasoningOverrides, liveReasoning),
-    [displayTranscript, displayTranscript.version, width, reasoning, reasoningOverrides, liveReasoning]);
+  const layout = useMemo(
+    () => controller.queries.render({ transcript: displayTranscript, width, folds: reasoningOverrides, liveReasoning }),
+    [controller, displayTranscript, displayTranscript.version, width, reasoningOverrides, liveReasoning]);
   const { length, first } = layout;
   // Local `!` blocks live at the end of the transcript: not host records, not persisted, but they
   // scroll with the conversation and are counted into its total so the viewport math stays honest.
-  const merged = useMemo(() => mergeShellRuns(layout, controller.shell.runs, width),
+  const merged = useMemo(() => mergeShellRuns(layout, state.shell.blocks, width),
     [layout, controller, state.version, width]);
   const totalRows = merged.total;
   const statusNotice = !['Connected', 'Idle', 'Running…', 'Responding…'].includes(state.status);
@@ -509,17 +588,17 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const position = Math.min(adjustedScroll, maxScroll);
   useLayoutEffect(() => {
     previousView.current = { transcript: displayTranscript, session: state.session.record, count: totalRows, first, folds: reasoningOverrides, liveReasoning };
-    if (position !== scroll) controller.setScroll(position);
+    if (position !== scroll) setScroll(position);
   }, [state.session.record, displayTranscript, totalRows, position, scroll, reasoningOverrides, liveReasoning]);
   useLayoutEffect(() => {
-    controller.pinHistory(!historyWindow && (position > 0 || thoughtList || historyQuery !== undefined && !contentSearch));
+    controller.actions.pinHistory(!historyWindow && (position > 0 || thoughtList || historyQuery !== undefined && !contentSearch));
   }, [controller, historyWindow, position, thoughtList, historyQuery, contentSearch, state.session.record]);
   useEffect(() => {
     const first = displayTranscript.beforeSeq;
     if (first === undefined) return;
-    const previous = controller.view.folds;
+    const previous = reasoningOverrides;
     const next = new Set([...previous].filter(seq => seq >= first));
-    if (next.size !== previous.size) controller.setFolds(next);
+    if (next.size !== previous.size) setReasoningOverrides(next);
   }, [displayTranscript, displayTranscript.memoryRevision]);
   const loadingPage = useRef(false);
   const scrollIntent = useRef(0);
@@ -528,21 +607,21 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   function scrollHistory(delta: number): void {
     if (copyMode || state.screen !== 'chat') return;
     const intent = ++scrollIntent.current;
-    const next = Math.max(0, Math.min(maxScroll, controller.view.scroll + delta));
-    controller.setScroll(next);
-    if (delta <= 0 || next < maxScroll || loadingPage.current || state.busy || !state.online || !displayTranscript.ready || !displayTranscript.hasMore) return;
+    const next = Math.max(0, Math.min(maxScroll, scroll + delta));
+    setScroll(next);
+    if (delta <= 0 || next < maxScroll || loadingPage.current || state.operation.busy || !state.online || !displayTranscript.ready || !displayTranscript.hasMore) return;
     loadingPage.current = true;
     const transcript = displayTranscript;
-    void controller.perform(() => historyOperation(signal => controller.older(signal, transcript))).then(accepted => {
+    void historyOperation(signal => controller.actions.older(signal, transcript)).then(accepted => {
       if (accepted && mounted.current && displayRef.current === transcript && scrollIntent.current === intent) {
-        controller.setScroll(controller.view.scroll + delta);
+        setScroll(scroll + delta);
       }
     }).finally(() => { loadingPage.current = false; });
   }
-  async function historyOperation(operation: (signal: AbortSignal) => Promise<void>, label = 'Loading history…'): Promise<void> {
+  async function historyOperation<T>(operation: (signal: AbortSignal) => Promise<T>, label = 'Loading history…'): Promise<T | undefined> {
     const abort = new AbortController();
     historyAbort.current = abort; setHistoryLoading(label);
-    try { await operation(abort.signal); }
+    try { return await operation(abort.signal); }
     finally { if (historyAbort.current === abort) { historyAbort.current = undefined; setHistoryLoading(undefined); } }
   }
 
@@ -558,30 +637,30 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const transcript = state.session.record;
     const sessionId = state.sessionId;
     // Recover from the loaded window first: no request, no focus change, no loading label.
-    if (controller.refillRecall() || !transcript.hasMore) { setInput(controller.recall(-1, controller.composer.draft), true); return; }
+    if (controller.actions.refillRecall() || !transcript.hasMore) { setInput(controller.queries.recall(-1, input), true); return; }
     historyPaging.current = true;
     try {
-      const accepted = await controller.perform(() => historyOperation(async signal => {
+      const accepted = await historyOperation(async signal => {
         // A prompt can be many pages back in an agent session, so scan a healthy stretch before
         // giving up; the loading label stays visible and Esc cancels the scan.
         for (let page = 0; page < RECALL_PAGE_SCAN; page++) {
           if (transcript.beforeSeq === undefined || !transcript.hasMore) break;
-          await controller.older(signal, transcript);
+          await controller.actions.older(signal, transcript);
           signal.throwIfAborted();
-          if (controller.refillRecall()) return;
+          if (controller.actions.refillRecall()) return;
         }
-      }, 'Loading older prompts…'));
+      }, 'Loading older prompts…');
       if (accepted && mounted.current && controller.state.sessionId === sessionId) {
-        setInput(controller.recall(-1, controller.composer.draft), true);
+        setInput(controller.queries.recall(-1, input), true);
       }
     } finally { historyPaging.current = false; }
   }
   async function openSearchSession(sessionId: string, query: string): Promise<void> {
     await historyOperation(async signal => {
-      await controller.selectSession(sessionId);
-      await controller.waitForHistory(signal);
-      controller.setHistoryPanel({ query, contentSearch: true, matches: await controller.searchHistory(query, signal) });
-      controller.setSearchPanel(undefined);
+      await controller.actions.selectSession(sessionId);
+      await controller.actions.waitForHistory(signal);
+      setHistoryPanel({ query, contentSearch: true, matches: await controller.actions.searchHistory(query, signal) });
+      setSearchPanel(undefined);
     });
   }
   async function jumpHistory(target: number, folds = reasoningOverrides): Promise<void> {
@@ -592,14 +671,14 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     try {
       const transcript = displayTranscript.messages.some(message => message.seq === target) ? displayTranscript
         : state.session.record.messages.some(message => message.seq === target) ? state.session.record
-        : await controller.historyAt(target, abort.signal);
+        : await controller.queries.historyAt(target, abort.signal);
       abort.signal.throwIfAborted();
-      const current = historyLayout(transcript, width, reasoning, folds, liveReasoning);
+      const current = controller.queries.render({ transcript, width, folds, liveReasoning });
       const row = current.offsets.get(target);
       if (row === undefined) throw new Error('No visible message at this sequence; use /history to choose a record');
-      controller.setViewWindow(transcript === state.session.record ? undefined : transcript);
-      controller.setHistoryPanel(undefined); controller.openThoughts(false);
-      controller.setScroll(Math.max(0, current.length - pageSize - row));
+      controller.actions.setViewWindow(transcript === state.session.record ? undefined : transcript);
+      setHistoryPanel(undefined); openThoughts(false);
+      setScroll(Math.max(0, current.length - pageSize - row));
     } finally { if (historyAbort.current === abort) historyAbort.current = undefined; }
   }
   useMouseWheel(direction => { if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3)); else scrollHistory(direction * 3); }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
@@ -610,19 +689,19 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const thoughtEntries = thoughtList ? displayTranscript.thoughts : undefined;
   const thoughtChoices = useMemo(() => [...(thoughtEntries ?? [])].reverse().map(entry => ({
     key: String(entry.seq), label: `${toolLine(`#${entry.seq} User · ${entry.prompt}`, width - 2)}\n  ${toolLine(`◇ ${entry.preview}`, width - 4)}`,
-    action: () => operate(async () => { const next = new Set(reasoningOverrides); next.add(entry.seq); controller.setFolds(next); await jumpHistory(entry.seq, next); }),
+    action: () => operate(async () => { const next = new Set(reasoningOverrides); next.add(entry.seq); setReasoningOverrides(next); await jumpHistory(entry.seq, next); }),
   })), [thoughtEntries, width, pageSize, reasoningOverrides, liveReasoning, displayTranscript]);
   const thoughtOptions = useMemo(() => [
           ...(liveThought ? [{ key: 'live', label: `${toolLine(`Now · User · ${state.session.record.latestPrompt}`, width - 2)}\n  ${toolLine(liveThought.text, width - 4)}`,
-            action: () => { controller.setLiveReasoning('full'); controller.openThoughts(false); const expanded = historyLayout(state.session.record, width, reasoning, reasoningOverrides, 'full'); controller.setScroll(Math.max(0, expanded.length - pageSize - expanded.liveOffset)); } }] : []),
+            action: () => { setLiveReasoning('full'); openThoughts(false); const expanded = controller.queries.render({ transcript: state.session.record, width, folds: reasoningOverrides, liveReasoning: 'full' }); setScroll(Math.max(0, expanded.length - pageSize - expanded.liveOffset)); } }] : []),
           ...thoughtChoices,
-          ...(displayTranscript.hasMore ? [{ key: 'older', label: '↑ Load older reasoning', action: () => operate(() => historyOperation(signal => controller.older(signal, displayTranscript))) }] : []),
-          { key: 'close', label: '← Back to conversation', action: () => controller.openThoughts(false) },
+          ...(displayTranscript.hasMore ? [{ key: 'older', label: '↑ Load older reasoning', action: () => operate(() => historyOperation(signal => controller.actions.older(signal, displayTranscript))) }] : []),
+          { key: 'close', label: '← Back to conversation', action: () => openThoughts(false) },
         ], [liveThought, thoughtChoices, displayTranscript, displayTranscript.hasMore, width, pageSize, reasoningOverrides]);
   const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
   const workspaceName = workspace ? string(workspace.title) || string(workspace.path) : state.workspaceId;
-  const headerTitle = controller.sessionName
-    ? [controller.sessionName, width >= 60 ? workspaceName : undefined].filter(Boolean).join(' · ')
+  const headerTitle = controller.queries.sessionName
+    ? [controller.queries.sessionName, width >= 60 ? workspaceName : undefined].filter(Boolean).join(' · ')
     : workspaceName || 'All workspaces';
   const commandSuggestions = input.startsWith('/') && !input.includes(' ') ? suggestedCommands(input) : undefined;
   // Reading older history pauses the clock without freezing the connection state on picker screens.
@@ -632,13 +711,62 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     : state.screen === 'chat' && position > 0 ? 'history'
     : undefined;
   const statusFrozen = pauseReason !== undefined;
+  // The bar renders plain data: the composition root is the one place that reads the controller.
+  const statusSource: StatusSource = (() => {
+    const view = controller.queries.telemetry.view(state.sessionId);
+    const ledger = controller.costs;
+    const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
+    const line = (total: CostTotal) => ({ text: costText(total), amount: total.amount, unknown: total.unknown });
+    const sessionOf = () => state.sessionId !== undefined && ledger !== undefined && ledger.hasSession(state.sessionId)
+      ? ledger.total(state.sessionId) : undefined;
+    const session = sessionOf();
+    return {
+      host: controller.base, online: state.online, status: state.status,
+      running: controller.queries.running, since: controller.queries.workingSince,
+      sessionId: state.sessionId, sessionMode: controller.queries.sessionMode,
+      workspaceLabel: workspace ? `${string(workspace.title)} · ${string(workspace.path)}` : 'none selected',
+      activeTurnStartedAt: state.session.record.activeTurnStartedAt,
+      pendingCount: state.pending.length,
+      ...(state.session.record.livePhase === undefined ? {} : { livePhase: state.session.record.livePhase }),
+      values: view.values, queued: view.queued, jobs: view.jobs,
+      ...(state.defaultModel === undefined ? {} : { defaultModel: state.defaultModel }),
+      ...(ledger === undefined ? {} : { cost: {
+        sessionText: session === undefined ? '?' : costText(session),
+        today: () => line(ledger.today()),
+        session: () => { const total = sessionOf(); return total === undefined ? undefined : line(total); },
+        coverage: ledger.coverage,
+        ...(ledger.error === undefined ? {} : { error: ledger.error }),
+      } }),
+      ...(state.controlError === undefined ? {} : { controlError: state.controlError }),
+      ...(state.presetError === undefined ? {} : { presetError: state.presetError }),
+      ...(state.modelError === undefined ? {} : { modelError: state.modelError }),
+    };
+  })();
+
+  const costSource: CostSource | undefined = (() => {
+    const ledger = controller.costs;
+    if (ledger === undefined) return undefined;
+    const line = (total: CostTotal) => ({ text: costText(total), unknown: total.unknown, records: total.records });
+    const id = state.sessionId;
+    const session = id !== undefined && ledger.hasSession(id) ? ledger.total(id) : undefined;
+    return {
+      ...(session === undefined ? {} : { session: line(session) }),
+      today: line(ledger.today()),
+      scanning: ledger.scanning, coverage: ledger.coverage,
+      ...(ledger.scannedAt === undefined ? {} : { scannedAt: ledger.scannedAt }),
+      customPrices: ledger.customPrices,
+      ...(ledger.error === undefined ? {} : { error: ledger.error }),
+      missing: ledger.missing(),
+    };
+  })();
+
   return <ThemeContext.Provider value={theme}><CopyMode.Provider value={copyMode}><Frozen frozen={copyMode} identity={`${width}:${stdout.rows}`}><Box flexDirection="column" paddingX={1} height={Math.max(1, (stdout.rows ?? 30) - 1)} overflowY="hidden">
     {copyMode && <Text color={theme.accent}>Copy mode · drag to select · Esc / Ctrl+S resumes</Text>}
-    <ChatHeader title={headerTitle} mode={controller.sessionMode} width={width} frozen={displayPaused} identity={`${width}:${state.sessionId}`} />
+    <ChatHeader title={headerTitle} mode={controller.queries.sessionMode} width={width} frozen={displayPaused} identity={`${width}:${state.sessionId}`} />
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden">
     {historyLoading && <Text dimColor>{historyLoading} · Esc / Ctrl+C cancel</Text>}
     <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
-    {state.error && <Text color={theme.colors.error}>{state.error}</Text>}
+    {state.operation.error && <Text color={theme.colors.error}>{state.operation.error}</Text>}
       {state.screen === 'chat' && <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
         historyWindow={!!historyWindow} frozen={displayPaused}
         identity={`${width}:${state.sessionId}:${position}:${pageSize}`} boxRef={conversationBox} />}
@@ -649,41 +777,41 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
     {queueOpen && !pending ? <QueueDialog queued={queued} rows={stdout.rows ?? 30} width={width}
       unavailable={!!state.controlError}
-      enabled={!input && !state.busy && state.online}
-      canSelect={() => !controller.composer.draft && !controller.state.busy && controller.state.online && !controller.state.pending.length}
-      onRemove={id => operate(() => controller.removeQueued(id))} /> : removal ? <RemovalDialog removal={removal}
-      enabled={!input && !state.busy && state.online}
-      canSelect={() => !controller.composer.draft && !controller.state.busy && controller.state.online}
+      enabled={!input && !state.operation.busy && state.online}
+      canSelect={() => !input && !controller.state.operation.busy && controller.state.online && !controller.state.pending.length}
+      onRemove={id => operate(() => controller.actions.removeQueued(id))} /> : removal ? <RemovalDialog removal={removal}
+      enabled={!input && !state.operation.busy && state.online}
+      canSelect={() => !input && !controller.state.operation.busy && controller.state.online}
       onCancel={() => setRemoval(undefined)}
-      onConfirm={() => operate(async () => { await controller.removeTarget(removal); setRemoval(undefined); })} /> : models ? <ModelDialog models={models} rows={stdout.rows ?? 30} width={width}
-      enabled={!input && !state.busy && state.online}
-      canSelect={() => !controller.composer.draft && !controller.state.busy && controller.state.online}
-      onChoose={(provider, model, effort) => operate(async () => { await controller.selectModel(provider, model, effort); controller.setModelPanel(undefined); })}
-      onOpen={(provider, model) => controller.setModelPanel({ catalog: models.catalog, provider, model })}
-      onBack={() => controller.setModelPanel({ catalog: models.catalog })}
-      onClose={() => controller.setModelPanel(undefined)} /> : searchResults ? <SearchResultsDialog query={searchResults.query} items={searchResults.items} hasMore={searchResults.hasMore} width={width}
-      enabled={!input && !state.busy} canSelect={() => !controller.composer.draft && !controller.state.busy}
+      onConfirm={() => operate(async () => { if (await controller.actions.removeTarget(removal)) setRemoval(undefined); })} /> : models ? <ModelDialog models={models} rows={stdout.rows ?? 30} width={width}
+      enabled={!input && !state.operation.busy && state.online}
+      canSelect={() => !input && !controller.state.operation.busy && controller.state.online}
+      onChoose={(provider, model, effort) => operate(async () => { if (await controller.actions.selectModel(provider, model, effort)) setModelPanel(undefined); })}
+      onOpen={(provider, model) => setModelPanel({ catalog: models.catalog, provider, model })}
+      onBack={() => setModelPanel({ catalog: models.catalog })}
+      onClose={() => setModelPanel(undefined)} /> : searchResults ? <SearchResultsDialog query={searchResults.query} items={searchResults.items} hasMore={searchResults.hasMore} width={width}
+      enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy}
       onOpen={sessionId => operate(() => openSearchSession(sessionId, searchResults.query))}
-      onClose={() => controller.setSearchPanel(undefined)} /> : state.screen === 'workspaces' || state.screen === 'sessions' ? <PickerScreen
+      onClose={() => setSearchPanel(undefined)} /> : state.screen === 'workspaces' || state.screen === 'sessions' ? <PickerScreen
       title={state.screen === 'workspaces' ? 'Choose workspace' : state.showAllSessions ? 'Choose session · All workspaces' : 'Choose session'}
       identity={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices} width={pickerWidth}
       // A rollup of badges is read through the key beside it; spelled-out states need no key, and a
       // terminal too narrow for the whole key gets the badges alone rather than half a legend.
       legend={state.screen === 'workspaces' && rollupStyle === 'badges' && pickerWidth >= 40 ? ROLLUP_LEGEND : undefined}
-      enabled={state.online && !state.busy && !input}
-      canSelect={() => !controller.composer.draft && controller.state.online && !controller.state.busy} /> : <>
+      enabled={state.online && !state.operation.busy && !input}
+      canSelect={() => !input && controller.state.online && !controller.state.operation.busy} /> : <>
       {thoughtList && <ThoughtsDialog identity={`thoughts:${state.sessionId}`} options={thoughtOptions} empty={!thoughtEntries?.length && !liveThought}
-        rows={stdout.rows ?? 30} enabled={!input && !state.busy} canSelect={() => !controller.composer.draft && !controller.state.busy} />}
+        rows={stdout.rows ?? 30} enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy} />}
       {state.screen === 'chat' && historyQuery !== undefined && <HistoryDialog identity={`history:${historyQuery}`}
         contentSearch={contentSearch} matches={historyMatches} query={historyQuery} messages={layout.messages} width={width}
-        enabled={!input && !state.busy} canSelect={() => !controller.composer.draft && !controller.state.busy}
+        enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy}
         onJump={seq => operate(() => jumpHistory(seq))}
-        onClose={() => controller.setHistoryPanel(undefined)} />}
+        onClose={() => setHistoryPanel(undefined)} />}
       {pending && <Box flexShrink={0} flexDirection="column">
-        <Text bold color={theme.colors.context}>{question ? `Question ${answered.length + 1}/${questions.length}${question.header ? ` · ${safeText(string(question.header))}` : ''}` : 'Approval required'}</Text>
-        <Text>{safeText(question ? string(question.question) : JSON.stringify(pending.request, null, 2))}</Text>
-        {question?.detail && <Text>{safeText(string(question.detail))}</Text>}
-        {pending.event === 'approval/request' && <Box flexDirection="column" flexShrink={0}>
+        <Text bold color={theme.colors.context}>{question ? `Question ${answered.length + 1}/${questions.length}${question.header ? ` · ${safeText(question.header)}` : ''}` : 'Approval required'}</Text>
+        <Text>{safeText(question ? question.question : pending.kind === 'approval' ? pending.description : '')}</Text>
+        {question?.detail && <Text>{safeText(question.detail)}</Text>}
+        {pending.kind === 'approval' && <Box flexDirection="column" flexShrink={0}>
           {/* Choices 1 and 2 are the host's `allowed-once` and `rejected` outcomes; 3 cancels the turn. */}
           {['Allow once', 'Deny', 'Stop turn'].map((label, index) => <Text key={label} color={approvalIndex === index ? theme.accent : undefined}>
             {approvalIndex === index ? '❯ ' : '  '}{index + 1}. {label}
@@ -691,10 +819,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           <Text dimColor>↑ ↓ / 1–3 select · Enter confirm</Text>
         </Box>}
         {options.length > 0 && <Box flexDirection="column" flexShrink={0}>
-          {[...options, { label: 'Other answer — type below' }].map((option, index) => ({ option, index }))
+          {[...options, { label: 'Other answer — type below' } as { label: string; description?: string }].map((option, index) => ({ option, index }))
             .slice(optionStart, optionStart + optionPageSize).map(({ option, index }) => <Box key={index} flexDirection="column" flexShrink={0}>
-              <Text color={index === optionCursor ? theme.accent : undefined} wrap="truncate-end">{index === optionCursor ? '❯ ' : '  '}{index + 1}. {question?.multiSelect === true && index < options.length ? choiceState.selected.includes(string(option.label)) ? '[x] ' : '[ ] ' : ''}{safeText(string(option.label))}</Text>
-              {option.description && <Text dimColor wrap="truncate-end">{'     '}{safeText(string(option.description))}</Text>}
+              <Text color={index === optionCursor ? theme.accent : undefined} wrap="truncate-end">{index === optionCursor ? '❯ ' : '  '}{index + 1}. {question?.multiSelect === true && index < options.length ? choiceState.selected.includes(option.label) ? '[x] ' : '[ ] ' : ''}{safeText(option.label)}</Text>
+              {option.description && <Text dimColor wrap="truncate-end">{'     '}{safeText(option.description)}</Text>}
             </Box>)}
           <Text dimColor>{choiceState.custom ? 'Type your answer below · Esc returns to options' : question?.multiSelect === true
             ? '↑ ↓ move · Space / 1–9 toggle · Enter confirm · Esc dismisses' : '↑ ↓ / 1–9 select · Enter confirm · Esc dismisses'}</Text>
@@ -707,16 +835,16 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     </>}
         </Box>
         {!queueOpen && !pending && state.screen === 'chat' && queued.length > 0 && <QueuedPreview queued={queued} width={width} />}
-        <TextInput value={input} onChange={setInput} onCursorChange={cursor => controller.setComposerCursor(cursor)} onSubmit={() => { void submit(controller.composer.draft); }}
+        <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(input); }}
           reservedKeys={approvalKeysActive ? ['1','2','3'] : queueOpen && !pending ? ['d'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
           width={draftWidth} maxRows={composerRows} promptColor={answerPending ? theme.colors.muted : theme.accent}
-          focus={state.online && !state.busy && !copyMode && !answerPending} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
+          focus={state.online && !state.operation.busy && !copyMode && !answerPending} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
       </Box>
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
-      {costExpanded && <CostPanel controller={controller} />}
-      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}:${pauseReason ?? ''}`}><StatusBar controller={controller} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} onRows={setStatusBarRows} pauseReason={pauseReason} revision={state.version} /></Frozen>
+      {costExpanded && <CostPanel source={costSource} />}
+      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}:${pauseReason ?? ''}`}><StatusBar source={statusSource} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} onRows={setStatusBarRows} pauseReason={pauseReason} revision={state.version} /></Frozen>
     </Box>
   </Box></Frozen></CopyMode.Provider></ThemeContext.Provider>;
 }

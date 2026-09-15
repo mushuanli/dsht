@@ -5,7 +5,7 @@ import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 import { stripVTControlCharacters } from 'node:util';
 import { decodeHTML } from 'entities';
-import { safeText } from '../transport/wire.ts';
+import { safeText } from '../text.ts';
 import { renderMath } from './math.ts';
 
 /** Local styles only; remote control sequences never become terminal instructions. */

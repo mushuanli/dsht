@@ -7,13 +7,14 @@ import { CostLedger, loadPrices } from '../cost/index.ts';
 import { parseArgs } from 'node:util';
 import { mount } from '../ui/mount.tsx';
 import { ensureDirectory } from '../storage/index.ts';
-import { sessionLabel } from '../session/navigation.ts';
+import { sessionLabel } from '../session-title.ts';
 import { CookieStore, login } from '../transport/auth.ts';
 import { Client } from '../transport/client.ts';
 import { historyLimits } from '../session/memory.ts';
 import { Controller } from '../controller/controller.ts';
 import { endpoint } from '../transport/endpoint.ts';
-import { errorText, safeText, string } from '../transport/wire.ts';
+import { errorText, string } from '../transport/wire.ts';
+import { safeText } from '../text.ts';
 
 const HELP = `Usage: dsht [options] [list workspaces|list sessions]
 

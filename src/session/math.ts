@@ -8,7 +8,7 @@ import { TextNode, type MmlNode } from '@mathjax/src/js/core/MmlTree/MmlNode.js'
 import { SerializedMmlVisitor } from '@mathjax/src/js/core/MmlTree/SerializedMmlVisitor.js';
 import '@mathjax/src/js/input/tex/base/BaseConfiguration.js';
 import '@mathjax/src/js/input/tex/ams/AmsConfiguration.js';
-import { safeText } from '../transport/wire.ts';
+import { safeText } from '../text.ts';
 
 RegisterHTMLHandler(liteAdaptor());
 const superscripts = Object.fromEntries([...('0123456789+-=()ni')].map((c, i) => [c, [...'⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ'][i]!]));

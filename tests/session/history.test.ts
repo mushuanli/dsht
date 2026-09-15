@@ -30,15 +30,17 @@ test('workspace search preserves global truncation and validates host responses'
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   t.after(() => controller.stop()); controller.start();
-  await until(() => controller.record.ready);
+  await until(() => controller.queries.record.ready);
   fixture.searchResult = { items: [{ sessionId: 's1', snippet: 'one' }, { sessionId: 's2', snippet: 'two' }], hasMore: true };
   const signal = new AbortController().signal;
-  assert.deepEqual(await controller.searchSessions('one', true, signal), { items: [{ sessionId: 's1', snippet: 'one' }], hasMore: true });
-  assert.equal((await controller.searchSessions('one', false, signal)).items.length, 2);
+  assert.deepEqual(await controller.actions.searchSessions('one', true, signal), { items: [{ sessionId: 's1', snippet: 'one' }], hasMore: true });
+  assert.equal((await controller.actions.searchSessions('one', false, signal))!.items.length, 2);
   fixture.searchResult = { items: [{ sessionId: 1, snippet: 'bad' }], hasMore: false };
-  await assert.rejects(controller.searchSessions('one', false, signal), /Invalid session search item/);
+  assert.equal(await controller.actions.searchSessions('one', false, signal), undefined);
+  assert.match(controller.state.operation.error, /Invalid session search item/);
   fixture.searchResult = { items: [], hasMore: 'false' };
-  await assert.rejects(controller.searchSessions('one', false, signal), /Invalid session search response/);
+  assert.equal(await controller.actions.searchSessions('one', false, signal), undefined);
+  assert.match(controller.state.operation.error, /Invalid session search response/);
 });
 
 test('paging stops on an unadvancing host page and respects cancellation', async t => {
@@ -47,10 +49,12 @@ test('paging stops on an unadvancing host page and respects cancellation', async
   fixture.onPage = async () => ({ records: [], hasMore: true });
   const controller = new Controller(fixture.url, 'fixture-token', 's1');
   t.after(() => controller.stop()); controller.start();
-  await until(() => controller.record.ready);
-  await assert.rejects(controller.historyThrough('first', new AbortController().signal), /did not advance/);
+  await until(() => controller.queries.record.ready);
+  assert.equal(await controller.actions.historyThrough('first', new AbortController().signal), false);
+  assert.match(controller.state.operation.error, /did not advance/);
   const abort = new AbortController(); abort.abort();
-  await assert.rejects(controller.historyThrough('first', abort.signal), { name: 'AbortError' });
+  assert.equal(await controller.actions.historyThrough('first', abort.signal), false);
+  assert.match(controller.state.operation.error, /abort/i);
 });
 
 test('stream frames reuse the history index, bound row caching, and retrieve evicted rows on demand', () => {

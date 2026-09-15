@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, pricesDigest, pricesFrom, priceAt, chargeFor, candidates, canonicalModel, costRecords, costAddresses, costDay, costText, type CostTotal } from '../../src/cost/index.ts';
+import { CostLedger, DEFAULT_PRICES, pricesDigest, pricesFrom, priceAt, chargeFor, candidates, canonicalModel, costRecords, costAddresses, costDay, type CostTotal } from '../../src/cost/index.ts';
+import { costText } from '../../src/ui/status/model.ts';
 import { Controller } from '../../src/controller/controller.ts';
 import { host, until } from '../support/host.ts';
 import type { ObjectValue } from '../../src/transport/wire.ts';
@@ -278,7 +279,7 @@ test('a reconnect re-reads every session, so a gap in this client cannot lose us
   // Within one connection the recorded time is what keeps the minute timer affordable: a pass over
   // an unchanged session does not read its history again.
   fixture.followSnapshot = page([first, record(1, at('2026-09-10T11:00:00'))]);
-  await controller.refreshCosts();
+  await controller.actions.refreshCosts();
   assert.equal(ledger.total('s1').records, 1);
   // A new generation starts with that bookkeeping dropped, so the first scan after a reconnect reads
   // every session again and the totals catch up with whatever the host did meanwhile.
@@ -327,7 +328,7 @@ test('cancelling a shared billing refresh aborts paging without cancelling the a
   const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
   t.after(async () => { release?.(); await controller.stop(); }); controller.start();
   await until(() => requested);
-  const abort = new AbortController(); const refresh = controller.refreshCosts(abort.signal);
+  const abort = new AbortController(); const refresh = controller.actions.refreshCosts(abort.signal);
   abort.abort(); await refresh;
   assert.equal(ledger.scanning, false);
   assert.equal(ledger.scannedAt, undefined);

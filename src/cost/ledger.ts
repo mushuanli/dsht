@@ -136,4 +136,3 @@ export class CostLedger {
  * @param total - Summary from the ledger.
  * @returns Yuan amount and incompleteness marker.
  */
-export function costText(total: CostTotal): string { return `~¥${total.amount.toFixed(4)}${total.unknown ? '*' : ''}`; }

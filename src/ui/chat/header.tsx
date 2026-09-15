@@ -1,6 +1,6 @@
 /** Fixed conversation header: session title, workspace, and the agent-preset label. */
 import { Box, Text } from 'ink';
-import { toolLine } from '../../session/transcript.ts';
+import { toolLine } from '../../text.ts';
 import { Frozen } from '../frozen.tsx';
 import { useTheme } from '../theme/index.ts';
 

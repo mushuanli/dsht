@@ -34,6 +34,12 @@ export interface ShellBlock {
   endedAt?: number;
 }
 
+/** Plain read-only view of the local `!` runs, so the UI never reads the service object. */
+export interface ShellSnapshot {
+  running: boolean;
+  blocks: readonly ShellBlock[];
+}
+
 /** What one shell controller needs from its owner. */
 export interface ShellHost {
   /** Repaint after output or a status change. */
@@ -63,6 +69,9 @@ export class ShellController {
 
   /** Whether a command is still running. */
   get running(): boolean { return this.blocks.some(block => block.status === 'running'); }
+
+  /** The plain snapshot `AppState.shell` publishes; blocks stay owned here. */
+  snapshot(): ShellSnapshot { return { running: this.running, blocks: this.blocks }; }
 
   /** Start one command.
    *

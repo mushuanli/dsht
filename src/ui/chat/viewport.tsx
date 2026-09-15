@@ -1,7 +1,7 @@
 /** Measured conversation viewport: only visible rows become React nodes. */
 import { Box, Text, type DOMElement } from 'ink';
 import type { RefObject } from 'react';
-import type { HistoryRow } from '../../session/history.ts';
+import type { HistoryRow } from '../../contracts.ts';
 import { Frozen } from '../frozen.tsx';
 import { useTheme } from '../theme/index.ts';
 import { HistoryViewport } from './history-view.tsx';

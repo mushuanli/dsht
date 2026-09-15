@@ -1,6 +1,6 @@
 /** Only visible semantic rows become React nodes; ANSI colors are applied after remote text sanitation. */
 import { Box, Text } from 'ink';
-import type { HistoryRow } from '../../session/history.ts';
+import type { HistoryRow } from '../../contracts.ts';
 import { useTheme } from '../theme/index.ts';
 
 /** Render a viewport with role, reasoning, tool and result colors from the selected theme.

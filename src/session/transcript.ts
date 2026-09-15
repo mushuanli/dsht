@@ -2,7 +2,8 @@
 import sliceAnsi from 'slice-ansi';
 import type { HistoryLimits } from './memory.ts';
 import type { PromptRecord } from './info.ts';
-import { array, object, safeText, string, type Json, type ObjectValue } from '../transport/wire.ts';
+import { array, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
+import { safeText, toolLine } from '../text.ts';
 
 interface ToolSummary { name: string; operation?: string; command?: string }
 
@@ -22,17 +23,6 @@ function toolSummary(block: ObjectValue): ToolSummary {
     ...(typeof command === 'string' && command !== operation ? { command: command.split(/\r?\n/)[0]! } : {}) };
 }
 
-/** Fit a tool operation to one terminal row without exposing the result body.
- * @param text - Tool name, status icon and optional operation.
- * @param width - Available terminal columns.
- * @returns A single line with an ellipsis when shortened.
- */
-export function toolLine(text: string, width: number): string {
-  const clean = safeText(text).replace(/\s+/gu, ' ').trim();
-  if (width < 2) return width === 1 ? '…' : '';
-  const clipped = sliceAnsi(clean, 0, width);
-  return clipped.length < clean.length ? sliceAnsi(clean, 0, width - 1) + '…' : clean;
-}
 
 /** Render known content blocks and preserve unknown plugin blocks as JSON.
  * @param content - Message content blocks.

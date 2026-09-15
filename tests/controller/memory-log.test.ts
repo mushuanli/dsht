@@ -15,7 +15,7 @@ async function harness(t: Parameters<typeof test>[0] extends never ? never : { a
   const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined, undefined, path);
   t.after(async () => { await controller.stop(); });
   controller.start();
-  await until(() => controller.record.ready);
+  await until(() => controller.queries.record.ready);
   return { fixture, controller };
 }
 
@@ -23,7 +23,7 @@ test('a memory sample records the reclamation state and appends one bounded line
   const directory = await mkdtemp(join(tmpdir(), 'dsht-memory-')); t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, 'memory.log');
   const { controller } = await harness(t, path);
-  controller.pinHistory(true);
+  controller.actions.pinHistory(true);
   await controller.memoryLog!.sample();
   const lines = (await readFile(path, 'utf8')).trimEnd().split('\n');
   assert.match(lines[0]!, /^# dsht memory samples/);
@@ -46,7 +46,7 @@ test('a sample reports the layout, render cache and scan counters beside the ret
   const path = join(directory, 'memory.log');
   const { controller } = await harness(t, path);
   // Build the layout the UI builds, so its row cache is measurable rather than absent.
-  const transcript = controller.record;
+  const transcript = controller.queries.record;
   historyLayout(transcript, 100);
   await controller.memoryLog!.sample();
   const sample = JSON.parse((await readFile(path, 'utf8')).trimEnd().split('\n').at(-1)!) as Record<string, unknown>;

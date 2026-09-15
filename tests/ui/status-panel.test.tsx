@@ -8,6 +8,7 @@ import { render } from 'ink-testing-library';
 import { Controller } from '../../src/controller/controller.ts';
 import { CostLedger, costRecords } from '../../src/cost/index.ts';
 import { StatusBar } from '../../src/ui/chat/status.tsx';
+import { statusSource } from '../support/status-source.ts';
 import { App } from '../../src/ui/app.tsx';
 import { renderAt } from '../support/tty.ts';
 import { host, until } from '../support/host.ts';
@@ -37,7 +38,7 @@ function flat(frame: string): string {
 test('a narrow panel wraps long values instead of truncating them', () => {
   const controller = panelController();
   for (const width of [44, 32, 24]) {
-    const ui = render(<Box width={width}><StatusBar controller={controller} expanded width={width} /></Box>);
+    const ui = render(<Box width={width}><StatusBar source={statusSource(controller)} expanded width={width} /></Box>);
     const frame = ui.lastFrame()!;
     ui.unmount(); ui.cleanup();
     assert.doesNotMatch(frame, /…/u, `width ${width} truncated a value`);
@@ -50,7 +51,7 @@ test('every detail line survives scrolling, and the footer names the visible ran
   const controller = panelController();
   const settled: number[] = [];
   const view = (scroll: number) => {
-    const ui = render(<Box width={44}><StatusBar controller={controller} expanded width={44} scroll={scroll} pageSize={6}
+    const ui = render(<Box width={44}><StatusBar source={statusSource(controller)} expanded width={44} scroll={scroll} pageSize={6}
       onScroll={next => settled.push(next)} /></Box>);
     const frame = ui.lastFrame()!;
     ui.unmount(); ui.cleanup();
@@ -87,7 +88,7 @@ test('arrows and PgUp/PgDn scroll the open panel through the running application
   const ui = renderAt(<App controller={controller} />, 40, 12);
   t.after(async () => { ui.close(); await controller.stop(); });
   controller.start();
-  await until(() => controller.record.ready && controller.state.screen === 'chat');
+  await until(() => controller.queries.record.ready && controller.state.screen === 'chat');
   const press = async (value: string) => {
     const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
     Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });

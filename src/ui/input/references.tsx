@@ -1,6 +1,6 @@
 /** Trailing `@` host-path completion menu. */
 import { Box, Text } from 'ink';
-import type { FileReference } from '../../session/references.ts';
+import type { FileReference } from '../../contracts.ts';
 import { useTheme } from '../theme/index.ts';
 
 /** Candidates for the unfinished reference at the end of the draft.

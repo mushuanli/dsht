@@ -29,7 +29,7 @@ async function mount(t: { after(fn: () => void | Promise<void>): void }, columns
   const ui = renderAt(<App controller={controller} />, columns, rows);
   t.after(async () => { ui.close(); await controller.stop(); });
   controller.start();
-  await until(() => controller.record.ready && (ui.lastFrame() ?? '').includes('你好') === true);
+  await until(() => controller.queries.record.ready && (ui.lastFrame() ?? '').includes('你好') === true);
   const press = async (value: string) => {
     const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
     Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });

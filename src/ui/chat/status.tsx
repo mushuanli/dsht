@@ -4,10 +4,50 @@ import { memo, useEffect, useState } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stringWidth from 'string-width';
-import { costText, type CostTotal } from '../../cost/index.ts';
-import { toolLine } from '../../session/transcript.ts';
-import type { Controller } from '../../controller/controller.ts';
-import { safeText, type Json, type ObjectValue } from '../../transport/wire.ts';
+import type { CostTotal } from '../../contracts.ts';
+import { costText } from '../status/model.ts';
+import { toolLine } from '../../text.ts';
+import type { Coverage, LivePhase } from '../../contracts.ts';
+
+/** One formatted cost scope, with the raw totals the money column needs. */
+export interface StatusCostLine { text: string; amount: number; unknown: number }
+
+/** Everything the status bar renders, as plain data the composition root assembles. */
+export interface StatusSource {
+  /** Host origin, so a reader can tell which deployment the numbers describe. */
+  host: string;
+  online: boolean;
+  status: string;
+  running: boolean;
+  /** Epoch start of the active turn, when known. */
+  since?: number;
+  sessionId?: string;
+  sessionMode?: string;
+  workspaceLabel: string;
+  activeTurnStartedAt?: number;
+  pendingCount: number;
+  /** What the live attempt is doing now, straight from the record. */
+  livePhase?: LivePhase;
+  /** Retained host projections for the selected session. */
+  values: ObjectValue;
+  queued?: number;
+  jobs?: number;
+  defaultModel?: ObjectValue;
+  /** Billing summary; absent when this run has no ledger. */
+  cost?: {
+    sessionText: string;
+    /** Read on every render, so a day rollover reaches the bar without an application re-render. */
+    today(): StatusCostLine;
+    session(): StatusCostLine | undefined;
+    coverage: Coverage;
+    error?: string;
+  };
+  controlError?: string;
+  presetError?: string;
+  modelError?: string;
+}
+import type { Json, ObjectValue } from '../../json.ts';
+import { safeText } from '../../text.ts';
 
 /** One detail row of the expanded panel before it is wrapped to the terminal width. */
 interface StatusDetail { key: string; text: string; color?: string; dim?: boolean }
@@ -251,8 +291,8 @@ function measure(row: StatusSegment[]): number {
 }
 
 /** Render a live clock and selected-session metadata; the timer belongs to this mounted bar. */
-export const StatusBar = memo(function StatusBar({ controller, expanded = false, width, scroll = 0, pageSize, onScroll, onOverflow, onRows, pauseReason }:
-{ controller: Controller; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number;
+export const StatusBar = memo(function StatusBar({ source, expanded = false, width, scroll = 0, pageSize, onScroll, onOverflow, onRows, pauseReason }:
+{ source: StatusSource; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number;
   onScroll?(next: number): void; onOverflow?(overflow: boolean): void; onRows?(rows: number): void;
   /** Why the display is paused, so a frozen clock can say so instead of looking stalled. */
   pauseReason?: 'copy' | 'dialog' | 'history' }) {
@@ -261,8 +301,8 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
   const { stdout } = useStdout();
   const [now, setNow] = useState(Date.now);
   const [reported, setReported] = useState(1);
-  const running = controller.running;
-  const since = controller.workingSince;
+  const running = source.running;
+  const since = source.since;
   useEffect(() => {
     setNow(Date.now());
     if (paused) return;
@@ -271,15 +311,13 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     const timer = setInterval(() => setNow(Date.now()), running ? 1000 : 60_000);
     return () => clearInterval(timer);
   }, [running, since, paused]);
-  const state = controller.state;
-  const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
-  const view = controller.telemetry.view(state.sessionId);
-  const costs = controller.costs;
-  const sessionCost = controller.sessionCostText;
-  const todayCost = costs ? costText(costs.today()) : '?';
+  const state = source;
+  const view = { values: source.values, queued: source.queued, jobs: source.jobs };
+  const costs = source.cost;
+  const sessionCost = source.cost?.sessionText ?? '?';
   // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
-  const coverage = costs?.coverage ?? 'complete';
-  const label = workspace ? `${workspace.title} · ${workspace.path}` : 'none selected';
+  const coverage = source.cost?.coverage ?? 'complete';
+  const label = source.workspaceLabel;
   if (!expanded) {
     const selection = record(view.values.modelSelection);
     const route = record(running ? selection.lastUsed ?? selection.next ?? state.defaultModel : selection.next ?? selection.lastUsed ?? state.defaultModel);
@@ -297,7 +335,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     const billed = buckets[0] === undefined || buckets[2] === undefined ? undefined : buckets[0] + buckets[2] + (buckets[3] ?? 0);
     const hit = cacheHitText(buckets[2], billed);
     const compactCount = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
-    const phase = state.session.record.livePhase;
+    const phase = source.livePhase;
     const clock = running && since !== undefined ? ` ${clockText(now - since)}` : '';
     const phaseLabel = phase === undefined ? undefined
       : phase.kind === 'tool' ? `${phase.name ?? 'tool'} ${phaseText(now - phase.startedAt)}`
@@ -305,11 +343,11 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     // The state token reports a fact and never guesses: a paused clock is named, offline and errors
     // take the token over, and an unknown phase simply leaves the phase group empty. An answer this
     // client still owes outranks the paused reason, because that reason is only why the clock stopped.
-    const stateToken: StatusSegment = !state.online
+    const stateToken: StatusSegment = !source.online
       ? { text: '! Offline', color: theme.status.offline }
-      : state.controlError || state.modelError
+      : source.controlError || source.modelError
         ? { text: '⚠ Error', color: theme.status.warning }
-        : state.pending.length > 0
+        : source.pendingCount > 0
           ? { text: '? Needs you', color: theme.status.critical }
           : pauseReason !== undefined
             ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
@@ -317,10 +355,11 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
     // One marker covers both scopes, because either an unpriceable record or a scan that has not
     // covered every session makes the pair inexact as a reading.
     const inexact = coverage !== 'complete';
-    const money = (session: CostTotal | undefined, today: CostTotal): string =>
+    const money = (session: StatusCostLine | undefined, today: StatusCostLine): string =>
       `¥: ${session === undefined ? '?' : session.amount.toFixed(2)}(${today.amount.toFixed(2)})${session?.unknown || today.unknown || inexact ? '*' : ''}`;
+    // Read here rather than from a snapshot, so the bar's own clock drives a day rollover.
     const todayTotal = costs?.today();
-    const sessionTotal = costs !== undefined && costs.hasSession(state.sessionId) ? costs.total(state.sessionId) : undefined;
+    const sessionTotal = costs?.session();
     const contextColor = percent === undefined ? theme.status.usage
       : percent >= 95 ? theme.status.critical : percent >= 80 ? theme.status.warning : theme.status.context;
     // Ten cells resolve context to tenths, the same resolution the percentage beside them reports.
@@ -348,7 +387,7 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
       {row.map((segment, position) => <Text key={position} color={segment.color ?? theme.colors.muted}
         bold={index === 0 && position === 0}>{segment.text}</Text>)}</Text>)}</Box>;
   }
-  return <StatusDetails controller={controller} theme={theme} width={width} now={now} scroll={scroll} pageSize={pageSize} onScroll={onScroll} onOverflow={onOverflow} />;
+  return <StatusDetails source={source} theme={theme} width={width} now={now} scroll={scroll} pageSize={pageSize} onScroll={onScroll} onOverflow={onOverflow} />;
 });
 
 /** Expanded detail panel.
@@ -356,20 +395,19 @@ export const StatusBar = memo(function StatusBar({ controller, expanded = false,
  * It is a separate component because it is the only branch that scrolls, and a hook behind the
  * collapsed branch's early return would change the hook order between the two states.
  */
-const StatusDetails = memo(function StatusDetails({ controller, theme, width, now, scroll, pageSize, onScroll, onOverflow }:
-{ controller: Controller; theme: Theme; width?: number; now: number; scroll: number; pageSize?: number; onScroll?(next: number): void; onOverflow?(overflow: boolean): void }) {
+const StatusDetails = memo(function StatusDetails({ source, theme, width, now, scroll, pageSize, onScroll, onOverflow }:
+{ source: StatusSource; theme: Theme; width?: number; now: number; scroll: number; pageSize?: number; onScroll?(next: number): void; onOverflow?(overflow: boolean): void }) {
   const { stdout } = useStdout();
-  const state = controller.state;
-  const running = controller.running;
-  const since = controller.workingSince;
-  const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
-  const view = controller.telemetry.view(state.sessionId);
-  const costs = controller.costs;
-  const sessionCost = controller.sessionCostText;
-  const todayCost = costs ? costText(costs.today()) : '?';
+  const state = source;
+  const running = source.running;
+  const since = source.since;
+  const view = { values: source.values, queued: source.queued, jobs: source.jobs };
+  const costs = source.cost;
+  const sessionCost = source.cost?.sessionText ?? '?';
+  const todayCost = source.cost?.today().text ?? '?';
   // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
-  const coverage = costs?.coverage ?? 'complete';
-  const label = workspace ? `${workspace.title} · ${workspace.path}` : 'none selected';
+  const coverage = source.cost?.coverage ?? 'complete';
+  const label = source.workspaceLabel;
   // Every detail row wraps to the terminal width, so a narrow terminal loses nothing; lines that
   // still do not fit are scrolled rather than dropped, because the panel shares the screen height.
   // Rows are merged and labelled compactly so a normal terminal shows every detail on one screen;
@@ -377,23 +415,23 @@ const StatusDetails = memo(function StatusDetails({ controller, theme, width, no
   const turns = count(numeric(record(view.values.sessionStats).turns));
   const duration = since === undefined ? 'unknown duration' : elapsedTime(now - since);
   const detail: StatusDetail[] = [
-    { key: 'activity', color: state.pending.length > 0 ? theme.status.critical : running ? theme.colors.context : theme.colors.muted, text: state.pending.length > 0
+    { key: 'activity', color: source.pendingCount > 0 ? theme.status.critical : running ? theme.colors.context : theme.colors.muted, text: source.pendingCount > 0
       ? '? Needs you · answer the request above to continue'
       : running
-        ? `◐ Working · ${duration}${state.session.record.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
+        ? `◐ Working · ${duration}${source.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
         : '● Ready · Ctrl+C exit' },
-    { key: 'host', text: `${safeText(controller.base)} · ${safeText(state.status)}${!state.online ? ' · offline, last known status' : ''}` },
-    ...state.sessionId
-      ? [{ key: 'session', text: `Session ${safeText(state.sessionId)}${controller.sessionMode ? ` · ${safeText(controller.sessionMode)}` : ''}` }] : [],
+    { key: 'host', text: `${safeText(source.host)} · ${safeText(state.status)}${!source.online ? ' · offline, last known status' : ''}` },
+    ...source.sessionId
+      ? [{ key: 'session', text: `Session ${safeText(source.sessionId)}${source.sessionMode ? ` · ${safeText(source.sessionMode)}` : ''}` }] : [],
     { key: 'workspace', text: `Workspace ${safeText(label)}` },
-    ...metricLines(view.values, state.defaultModel, running).map((line, index) => ({ key: `metric-${index}`, text: safeText(line), dim: true })),
+    ...metricLines(view.values, source.defaultModel, running).map((line, index) => ({ key: `metric-${index}`, text: safeText(line), dim: true })),
     ...costs ? [{ key: 'cost', text: `Cost ${sessionCost} session · ${todayCost} today · ${turns} turns`, dim: true }] : [],
     { key: 'queued', text: `Queued ${count(view.queued)} · Jobs ${count(view.jobs)}${costs ? '' : ` · ${turns} turns`}`, dim: true },
     ...costs && coverage === 'partial'
       ? [{ key: 'coverage', color: theme.colors.context, text: `Cost coverage incomplete: ${costs.error ? safeText(costs.error) : 'no complete scan yet'}` }] : [],
-    ...state.controlError ? [{ key: 'control-error', color: theme.colors.context, text: safeText(state.controlError) }] : [],
-    ...state.presetError ? [{ key: 'preset-error', color: theme.colors.context, text: `Preset names unavailable: ${safeText(state.presetError)}` }] : [],
-    ...state.modelError ? [{ key: 'model-error', color: theme.colors.context, text: `Model catalog unavailable: ${safeText(state.modelError)}` }] : [],
+    ...source.controlError ? [{ key: 'control-error', color: theme.colors.context, text: safeText(source.controlError) }] : [],
+    ...source.presetError ? [{ key: 'preset-error', color: theme.colors.context, text: `Preset names unavailable: ${safeText(source.presetError)}` }] : [],
+    ...source.modelError ? [{ key: 'model-error', color: theme.colors.context, text: `Model catalog unavailable: ${safeText(source.modelError)}` }] : [],
   ];
   // Border and horizontal padding take four columns, so a detail row wraps inside what is left.
   const inner = Math.max(1, (width ?? Math.max(3, (stdout.columns ?? 80) - 2)) - 4);

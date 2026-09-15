@@ -1,17 +1,18 @@
-/** Classify one submitted composer line into the action the terminal performs. */
-import { navigationCommand } from '../../session/navigation.ts';
-import type { State } from '../../state.ts';
+/** Slash-command syntax: one composer line in, one semantic command out.
+ *
+ * This module is a pure leaf. It reads no UI facts, performs no effects and imports nothing from the
+ * application, so "what the line means" stays separate from "what Enter currently does" (which is
+ * `ui/routing.ts`) and from "may this run now" (which is the application's dispatch).
+ */
 
-/** One classified submission; every side effect stays with the caller. */
-export type Submission =
+/** One parsed command; every side effect stays with the caller. */
+export type Command =
   | { kind: 'ignore' }
-  | { kind: 'reference' }
   | { kind: 'copy' }
   | { kind: 'quit' }
   | { kind: 'panel'; panel: 'cost' | 'status' | 'help' }
   | { kind: 'remove'; target: 'workspace' | 'session'; query: string }
   | { kind: 'navigate'; target: 'workspace' | 'session'; query?: string }
-  | { kind: 'path'; value: string }
   | { kind: 'latest' }
   | { kind: 'models'; args: string[] }
   | { kind: 'queue' }
@@ -30,43 +31,34 @@ export type Submission =
   | { kind: 'export'; destination?: string }
   | { kind: 'exportHtml'; destination?: string }
   | { kind: 'coredump'; tag?: string }
-  | { kind: 'answer'; text: string }
   | { kind: 'error'; message: string }
   | { kind: 'prompt'; text: string };
 
-/** UI facts the classification reads; everything else stays with the caller. */
-export interface SubmissionContext {
-  /** Completion menu owns the draft while open. */
-  referenceOpen: boolean;
-  /** Copy mode ignores submissions entirely. */
-  copyMode: boolean;
-  /** A question or approval of the selected session is pending. */
-  pending: boolean;
-  /** The pending interaction is a question. */
-  question: boolean;
-  screen: State['screen'];
+/** Parse workspace and resume navigation, including their long aliases. */
+function navigationCommand(value: string): { kind: 'workspace' | 'session'; query?: string } | undefined {
+  const match = /^\/(ws|workspace|workspaces|resume|session|sessions)(?:\s+(.+))?$/.exec(value);
+  if (!match) return undefined;
+  return { kind: match[1] === 'ws' || match[1]!.startsWith('workspace') ? 'workspace' : 'session', query: match[2] };
 }
 
-/** Classify one composer draft without performing any of its effects.
+/** Strip one pair of surrounding quotes from an argument. */
+function unquote(value: string): string { return value.replace(/^(["'])(.*)\1$/, '$2'); }
+
+/** Parse one composer line into a command without performing any of its effects.
  *
- * The order of the checks is the command precedence: reference completion, copy mode, the panels
- * that toggle in place, navigation and removal, then the session and host commands, then answers,
- * then a plain prompt.
- * @param raw - Draft exactly as submitted.
- * @param context - Current UI facts.
- * @returns The action to perform.
+ * The order of the checks is the command precedence: the in-place panels, navigation and removal,
+ * then the session and host commands, then a plain prompt. Facts about the current screen or a
+ * pending interaction are deliberately absent: they decide whether a command may run, not what it is.
+ * @param line - Draft exactly as submitted.
+ * @returns The parsed command.
  */
-export function classifySubmission(raw: string, context: SubmissionContext): Submission {
-  if (context.referenceOpen) return { kind: 'reference' };
-  if (context.copyMode) return { kind: 'ignore' };
-  const value = raw.trim();
+export function parseCommand(line: string): Command {
+  const value = line.trim();
   if (!value) return { kind: 'ignore' };
   // `!` runs on the machine this client is on; it never reaches the host or the model.
   if (value.startsWith('!')) {
     const command = value.slice(1).trim();
-    if (!command) return { kind: 'error', message: 'Type a command after !' };
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
-    return { kind: 'shell', command };
+    return command ? { kind: 'shell', command } : { kind: 'error', message: 'Type a command after !' };
   }
   if (value === '/copy') return { kind: 'copy' };
   if (value === '/quit') return { kind: 'quit' };
@@ -80,24 +72,15 @@ export function classifySubmission(raw: string, context: SubmissionContext): Sub
     return { kind: 'remove', target: navigation.kind, query };
   }
   if (navigation) return { kind: 'navigate', target: navigation.kind, query: navigation.query };
-  if (context.screen === 'path') return { kind: 'path', value };
   if (value === '/latest') return { kind: 'latest' };
   if (/^\/model(?: |$)/.test(value)) {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
     const args = value.split(/\s+/).slice(1);
     if (args.length && (args.length < 2 || args.length > 3)) return { kind: 'error', message: 'Use /model [provider model [effort]]' };
     return { kind: 'models', args };
   }
-  if (value === '/queue') {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
-    if (context.pending) return { kind: 'error', message: 'Answer the pending question or approval first' };
-    return { kind: 'queue' };
-  }
+  if (value === '/queue') return { kind: 'queue' };
   if (value === '/new') return { kind: 'newSession' };
-  if (value === '/history' || value.startsWith('/history ')) {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
-    return { kind: 'history', query: value.slice(8).trim() };
-  }
+  if (value === '/history' || value.startsWith('/history ')) return { kind: 'history', query: value.slice(8).trim() };
   if (/^\/(?:search|ssearch|wsearch)(?: |$)/.test(value)) {
     const [command, ...words] = value.split(' ');
     const query = words.join(' ').trim();
@@ -105,42 +88,29 @@ export function classifySubmission(raw: string, context: SubmissionContext): Sub
     return command === '/search' ? { kind: 'historySearch', query }
       : { kind: 'sessionSearch', command: command as '/ssearch' | '/wsearch', query };
   }
-  if (/^\/think(?: |$)/.test(value)) {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
-    return { kind: 'think', target: value.slice(6).trim() };
-  }
+  if (/^\/think(?: |$)/.test(value)) return { kind: 'think', target: value.slice(6).trim() };
   if (value === '/older') return { kind: 'older' };
   if (/^\/compact(?: |$)/.test(value)) {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
     if (value !== '/compact') return { kind: 'error', message: 'Use /compact (no arguments)' };
     return { kind: 'compact' };
   }
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };
   if (value === '/deny') return { kind: 'approval', allowed: false };
-  if (/^\/(?:plan|goal|permission|feedback)(?:\s|$)/.test(value)) {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
-    if (context.pending) return { kind: 'error', message: 'Answer the pending question or approval first' };
-    return { kind: 'hostCommand', line: value };
-  }
+  if (/^\/(?:plan|goal|permission|feedback)(?:\s|$)/.test(value)) return { kind: 'hostCommand', line: value };
   if (/^\/export(?:\s|$)/.test(value)) {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
-    const destination = value.slice(7).trim().replace(/^(["'])(.*)\1$/, '$2');
+    const destination = unquote(value.slice(7).trim());
     return { kind: 'export', ...(destination ? { destination } : {}) };
   }
   if (/^\/export-html(?:\s|$)/.test(value)) {
-    if (context.screen !== 'chat') return { kind: 'error', message: 'Select a session first' };
-    const destination = value.slice(12).trim().replace(/^(["'])(.*)\1$/, '$2');
+    const destination = unquote(value.slice(12).trim());
     return { kind: 'exportHtml', ...(destination ? { destination } : {}) };
   }
   if (/^\/coredump(?:\s|$)/.test(value)) {
     // A diagnostic of this client's own heap needs neither a session nor a connected host.
-    const tag = value.slice(9).trim().replace(/^(["'])(.*)\1$/, '$2');
+    const tag = unquote(value.slice(9).trim());
     return { kind: 'coredump', ...(tag ? { tag } : {}) };
   }
-  if (context.question) return { kind: 'answer', text: value };
-  if (context.pending) return { kind: 'error', message: 'Answer the approval with /allow or /deny' };
   if (value.startsWith('/')) return { kind: 'error', message: 'Unknown command. Use /help.' };
-  if (context.screen !== 'chat') return { kind: 'error', message: 'Choose a session or type /ws or /resume' };
   return { kind: 'prompt', text: value };
 }

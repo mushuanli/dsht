@@ -6,6 +6,7 @@ import { cacheHitText, clockText, compactStatusRows, metricLines, elapsedTime, p
 import wrapAnsi from 'wrap-ansi';
 import stringWidth from 'string-width';
 import { Telemetry } from '../../src/session/telemetry.ts';
+import { controlFrame, projectionSnapshot } from '../../src/transport/events.ts';
 
 test('shows current and pending models, approximate occupancy and disjoint usage totals', () => {
   const values = {
@@ -29,27 +30,27 @@ test('shows current and pending models, approximate occupancy and disjoint usage
 
 test('projection snapshots preserve newer keys, remove absent capabilities and reset on reconnect', () => {
   const telemetry = new Telemetry();
-  assert.throws(() => telemetry.accept({ type: 'queue', sessionId: 's', items: [] }), /before baseline/);
-  telemetry.accept({ type: 'baseline', value: { projections: { s: { asOfSeq: 10, values: { tokenUsage: 1, contextPressure: 2 } } },
-    queues: { s: [1, 2].map(id => ({ id: String(id), placement: 'steering', message: { id: String(id), content: [{ type: 'text', text: `Pending ${id}` }] } })) }, jobs: { s: [{ status: 'running' }, { status: 'completed' }] } } });
-  telemetry.accept({ type: 'projection', sessionId: 's', key: 'tokenUsage', seq: 20, value: 3 });
-  telemetry.snapshot('s', { asOfSeq: 15, values: { tokenUsage: 2 } });
+  assert.throws(() => telemetry.accept(controlFrame({ type: 'queue', sessionId: 's', items: [] })), /before baseline/);
+  telemetry.accept(controlFrame({ type: 'baseline', value: { projections: { s: { asOfSeq: 10, values: { tokenUsage: 1, contextPressure: 2 } } },
+    queues: { s: [1, 2].map(id => ({ id: String(id), placement: 'steering', message: { id: String(id), content: [{ type: 'text', text: `Pending ${id}` }] } })) }, jobs: { s: [{ status: 'running' }, { status: 'completed' }] } } }));
+  telemetry.accept(controlFrame({ type: 'projection', sessionId: 's', key: 'tokenUsage', seq: 20, value: 3 }));
+  telemetry.snapshot('s', projectionSnapshot({ asOfSeq: 15, values: { tokenUsage: 2 } }));
   assert.deepEqual({ ...telemetry.view('s').values }, { tokenUsage: 3 });
-  telemetry.accept({ type: 'projection', sessionId: 's', key: 'contextPressure', seq: 14, value: 999 });
+  telemetry.accept(controlFrame({ type: 'projection', sessionId: 's', key: 'contextPressure', seq: 14, value: 999 }));
   assert.equal(telemetry.view('s').values.contextPressure, undefined);
   assert.equal(telemetry.view('s').queued, 2);
   assert.deepEqual(telemetry.pending('s').map(item => item.text), ['Pending 1', 'Pending 2']);
   assert.deepEqual(telemetry.pending('other'), []);
   assert.equal(telemetry.view('s').jobs, 1);
-  telemetry.accept({ type: 'queue', sessionId: 's', items: [] });
-  telemetry.accept({ type: 'jobs', sessionId: 's', items: [{ status: 'stopping' }] });
+  telemetry.accept(controlFrame({ type: 'queue', sessionId: 's', items: [] }));
+  telemetry.accept(controlFrame({ type: 'jobs', sessionId: 's', items: [{ status: 'stopping' }] }));
   assert.equal(telemetry.view('s').queued, 0);
-  telemetry.accept({ type: 'baseline', value: { projections: {}, queues: {}, jobs: {} } });
+  telemetry.accept(controlFrame({ type: 'baseline', value: { projections: {}, queues: {}, jobs: {} } }));
   assert.deepEqual(telemetry.view('s').values, {});
   assert.equal(telemetry.view('s').queued, undefined);
   assert.deepEqual(telemetry.pending('s'), []);
-  assert.throws(() => telemetry.snapshot('s', { asOfSeq: 'bad', values: {} }), /watermark/);
-  assert.throws(() => telemetry.accept({ type: 'projection', sessionId: 's', key: 'x', seq: 2 }), /Missing/);
+  assert.throws(() => projectionSnapshot({ asOfSeq: 'bad', values: {} }), /watermark/);
+  assert.throws(() => controlFrame({ type: 'projection', sessionId: 's', key: 'x', seq: 2 }), /Missing/);
 });
 
 test('working duration handles minutes, hours and clock skew', () => {

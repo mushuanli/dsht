@@ -1,7 +1,8 @@
 /** Pin the independent client's path syntax to Harness's path-only mentions. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeReference, fileMention, fileReferences } from '../../src/session/references.ts';
+import { fileReferences } from '../../src/session/references.ts';
+import { activeReference, fileMention } from '../../src/references.ts';
 
 test('finds trailing mentions without treating emails or closed quotes as queries', () => {
   assert.equal(activeReference('email a@b.com'), undefined);

@@ -1,7 +1,8 @@
 /** Indexed semantic history with bounded terminal-row caching and viewport-only materialization. */
 import wrapAnsi from 'wrap-ansi';
-import { toolLine, type Message, type MessagePart, type Transcript } from './transcript.ts';
+import { type Message, type MessagePart, type Transcript } from './transcript.ts';
 import { hasMarkdown, markdownRows, type MarkdownSpan } from './markdown.ts';
+import { toolLine } from '../text.ts';
 
 /** Default fold mode; individual sequence overrides are view state, never stored content. */
 export type Reasoning = 'row' | 'full';
@@ -144,21 +145,6 @@ interface LiveWrap {
  * @returns The wrapped rows.
  */
 
-/** Wrap plain local text into terminal rows, preserving its own whitespace.
- *
- * Command output is aligned by spaces and indented by stack traces, so this never collapses runs of
- * whitespace the way tool summaries do; only the terminal width decides where a row breaks.
- * @param text - Raw text, possibly containing newlines.
- * @param width - Available terminal columns.
- * @param kind - Row kind used for coloring.
- * @param highlight - Whether the rows are a local command line drawn on the command bar.
- * @returns One row per wrapped terminal line; empty text yields one empty row.
- */
-export function plainRows(text: string, width: number, kind: RowKind, highlight = false): HistoryRow[] {
-  const columns = Math.max(1, width);
-  const wrapped = wrapAnsi(text === '' ? ' ' : text, columns, { hard: true, trim: false });
-  return wrapped.split('\n').map(line => ({ text: line, kind, ...(highlight ? { highlight: true } : {}) }));
-}
 
 function wrapRows(text: string, width: number, kind: MessagePart['kind'], seq?: number): HistoryRow[] {
   return wrapAnsi(text, width, { hard: true, trim: !['tool', 'success', 'error'].includes(kind) })
@@ -298,6 +284,13 @@ export function layoutStats(transcript: Transcript): { rows: number; cacheBytes:
  * @param liveReasoning - Fold mode for completed live blocks; below 60 content columns it also folds active reasoning.
  * @returns Row count, sequence offsets, and a viewport reader; `lines` materializes all rows for exports only.
  */
+/** Plain view of one laid-out record: the projection engine's only public product.
+ *
+ * It exposes rows through `viewport` and message positions through `offsets`, so a caller can render
+ * a window without holding the record itself.
+ */
+export type SessionRender = ReturnType<typeof historyLayout>;
+
 export function historyLayout(transcript: Transcript, width: number, reasoning: Reasoning = 'row', overrides = noOverrides, liveReasoning: Reasoning = reasoning) {
   let index = indexes.get(transcript);
   if (!index || index.width !== width || index.reasoning !== reasoning || index.overrides !== overrides) {

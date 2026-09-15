@@ -1,20 +1,23 @@
 /** Workspace and resume navigation retain explicit scope and long aliases. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activityAge, navigationCommand, ROLLUP_LEGEND, sessionState, sessionStatus, SESSION_MARKERS, STATE_LABELS, workspaceCounts, workspaceDetail, workspaceStatus } from '../../src/session/navigation.ts';
+import { resolveTarget } from '../../src/session/navigation.ts';
+import { sessionLabel } from '../../src/session-title.ts';
+import { activityAge, ROLLUP_LEGEND, sessionState, sessionStatus, SESSION_MARKERS, STATE_LABELS, workspaceCounts, workspaceDetail, workspaceStatus } from '../../src/ui/chat/navigation-model.ts';
+import { parseCommand } from '../../src/slash/parse.ts';
 
 test('workspace and resume commands resolve with their aliases', () => {
   for (const name of ['ws', 'workspace', 'workspaces']) {
-    assert.deepEqual(navigationCommand(`/${name}`), { kind: 'workspace', query: undefined });
-    assert.deepEqual(navigationCommand(`/${name} Project α`), { kind: 'workspace', query: 'Project α' });
+    assert.deepEqual(parseCommand(`/${name}`), { kind: 'navigate', target: 'workspace', query: undefined });
+    assert.deepEqual(parseCommand(`/${name} Project α`), { kind: 'navigate', target: 'workspace', query: 'Project α' });
   }
   for (const name of ['resume', 'session', 'sessions']) {
-    assert.deepEqual(navigationCommand(`/${name} all`), { kind: 'session', query: 'all' });
-    assert.deepEqual(navigationCommand(`/${name} "all"`), { kind: 'session', query: '"all"' });
+    assert.deepEqual(parseCommand(`/${name} all`), { kind: 'navigate', target: 'session', query: 'all' });
+    assert.deepEqual(parseCommand(`/${name} "all"`), { kind: 'navigate', target: 'session', query: '"all"' });
   }
-  assert.equal(navigationCommand('/s all'), undefined);
-  assert.equal(navigationCommand('/steer hello'), undefined);
-  assert.equal(navigationCommand('/wsuffix'), undefined);
+  assert.equal(parseCommand('/s all').kind, 'error');
+  assert.equal(parseCommand('/steer hello').kind, 'error');
+  assert.equal(parseCommand('/wsuffix').kind, 'error');
 });
 
 test('a session summary classifies into a marker without inferring a stall', () => {

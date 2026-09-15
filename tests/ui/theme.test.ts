@@ -22,7 +22,7 @@ const script = `
 import { createElement } from 'react';
 import { renderToString } from 'ink';
 import { HistoryViewport } from './src/ui/chat/history-view.tsx';
-import { safeText } from './src/transport/wire.ts';
+import { safeText } from './src/text.ts';
 const rows = [
   {kind:'user',text:'❯ User',bold:true}, {kind:'assistant',text:'✦ Assistant',bold:true},
   {kind:'reasoning',text:'◇ /think 1 · reasoning'}, {kind:'tool',text:'⚙ bash · Run tests'},
@@ -63,19 +63,21 @@ import { createElement } from 'react';
 import { renderToString } from 'ink';
 import { StatusBar } from './src/ui/chat/status.tsx';
 import { Controller } from './src/controller/controller.ts';
+import { controlFrame } from './src/transport/events.ts';
+import { statusSource } from './tests/support/status-source.ts';
 const controller = new Controller('http://fixture', undefined);
 controller.state = {...controller.state, online:true, sessionId:'s1', sessions:[{sessionId:'s1',running:false}]};
 const frames = [];
 for (const percent of [25,80,95]) {
- controller.telemetry.accept({type:'baseline',value:{projections:{s1:{asOfSeq:0,values:{
+ controller.queries.telemetry.accept(controlFrame({type:'baseline',value:{projections:{s1:{asOfSeq:0,values:{
   modelSelection:{next:{provider:'p',model:'flash',reasoningEffort:'high'}},
   contextPressure:{projectedTokens:percent,contextWindow:100}, sessionStats:{turns:42},
   tokenUsage:{uncachedInputTokens:100,outputTokens:200,cacheReadTokens:0,cacheWriteTokens:0}
- }}},queues:{},jobs:{}}});
- for (const width of [140,60,24]) frames.push(renderToString(createElement(StatusBar,{controller,width}),{columns:width}));
+ }}},queues:{},jobs:{}}}));
+ for (const width of [140,60,24]) frames.push(renderToString(createElement(StatusBar,{source:statusSource(controller),width}),{columns:width}));
 }
 controller.state = {...controller.state,online:false};
-frames.push(renderToString(createElement(StatusBar,{controller,width:140}),{columns:140}));
+frames.push(renderToString(createElement(StatusBar,{source:statusSource(controller),width:140}),{columns:140}));
 process.stdout.write(JSON.stringify(frames));
 `;
   const colored = JSON.parse(renderFixture(statusScript, '3')) as string[];

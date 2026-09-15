@@ -5,8 +5,9 @@
  * the bottom of the screen.
  */
 import stringWidth from 'string-width';
-import { plainRows, type HistoryRow } from '../../session/history.ts';
-import type { ShellBlock } from '../../shell/index.ts';
+import wrapAnsi from 'wrap-ansi';
+import type { HistoryRow, RowKind } from '../../contracts.ts';
+import type { ShellBlock } from '../../contracts.ts';
 
 /** First output row's marker, so a block reads as the command's result. */
 const MARKER = '  ⎿  ';
@@ -120,4 +121,20 @@ export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], w
       return rows;
     },
   };
+}
+
+/** Wrap plain local text into terminal rows, preserving its own whitespace.
+ *
+ * Command output is aligned by spaces and indented by stack traces, so this never collapses runs of
+ * whitespace the way tool summaries do; only the terminal width decides where a row breaks.
+ * @param text - Raw text, possibly containing newlines.
+ * @param width - Available terminal columns.
+ * @param kind - Row kind used for coloring.
+ * @param highlight - Whether the rows are a local command line drawn on the command bar.
+ * @returns One row per wrapped terminal line; empty text yields one empty row.
+ */
+export function plainRows(text: string, width: number, kind: RowKind, highlight = false): HistoryRow[] {
+  const columns = Math.max(1, width);
+  const wrapped = wrapAnsi(text === '' ? ' ' : text, columns, { hard: true, trim: false });
+  return wrapped.split('\n').map(line => ({ text: line, kind, ...(highlight ? { highlight: true } : {}) }));
 }

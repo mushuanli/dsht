@@ -7,15 +7,20 @@ import { array, errorText, object, string, type Json, type ObjectValue } from '.
 import type { ControllerStore, State } from '../state.ts';
 import { saveSessionLog } from './export.ts';
 import { saveTranscriptHtml } from './export-html.ts';
-import { releaseHistoryLayout } from './history.ts';
+import { historyLayout, releaseHistoryLayout, type SessionRender } from './history.ts';
 import type { HistoryLimits } from './memory.ts';
-import { resolveTarget, sessionLabel } from './navigation.ts';
+import { resolveTarget } from './navigation.ts';
+import { sessionLabel } from '../session-title.ts';
 import { fileReferences, type FileReference } from './references.ts';
-import { PromptCache, type ComposerState, type InteractionState, type ModelState, type OptionState, type PanelState, type PromptIndex, type ReferenceState, type SessionInfo, type ViewState } from './info.ts';
+import { SessionRuntime } from './runtime.ts';
+import type { Telemetry } from './telemetry.ts';
+import { PromptCache, type InteractionState, type ModelState, type OptionState, type PanelState, type PromptIndex, type SessionInfo } from './info.ts';
 import type { Reasoning } from './history.ts';
-import { recordPrompts, Transcript, toolLine } from './transcript.ts';
+import { recordPrompts, Transcript } from './transcript.ts';
 import type { ConnectionView } from './connection-view.ts';
-import type { HistorySearch, RemovalTarget } from './types.ts';
+import type { HistorySearch, AnswerValue, PendingInteraction, RemovalTarget } from './types.ts';
+import { projectionSnapshot, type ControlFrame, type HostEvent } from '../transport/events.ts';
+import { toolLine } from '../text.ts';
 
 /** Built-in preset identifiers and the labels the web session header shows. */
 const BUILT_IN_MODES = new Map([['standard', 'Standard mode'], ['ptc', 'PTC mode'], ['minimal', 'Minimal mode'], ['cordis', 'Creator mode']]);
@@ -29,7 +34,11 @@ const PROMPT_BACKFILL_PAGES = 200;
 /** Owns the selected session: its follow stream, transcript, history window and interactions. */
 export class SessionController {
   private follow: Subscription | undefined;
-  private interactions = new Map<string, ObjectValue>();
+  private interactions = new Map<string, PendingInteraction>();
+  /** Reading protection: reclamation pauses while the reader is away from the live end. */
+  private historyPinned = false;
+  /** Host runtime mirrors for every session this connection has seen. */
+  private readonly runtime = new SessionRuntime();
   /** Cancels the background prompt backfill of the previous selection. */
   private promptBackfill?: AbortController;
   /** Prompts of sessions this process has already read, so re-opening one costs no page request. */
@@ -46,7 +55,7 @@ export class SessionController {
   /** Host running state covers model generation, tools, and waits between assistant attempts. */
   get running(): boolean {
     const id = this.store.state.sessionId;
-    return id !== undefined && (this.connection.runningFor(id)
+    return id !== undefined && (this.runtime.runningFor(id)
       ?? this.store.state.sessions.find(row => row.sessionId === id)?.running === true);
   }
 
@@ -54,7 +63,7 @@ export class SessionController {
   get sessionName(): string | undefined {
     const id = this.store.state.sessionId;
     if (!id) return;
-    const title = this.connection.telemetryView().view(id).values.title;
+    const title = this.runtime.telemetry.view(id).values.title;
     const row = this.store.state.sessions.find(item => item.sessionId === id);
     return title !== undefined ? sessionLabel({ sessionId: id, projections: { values: { title } } })
       : row ? sessionLabel(row) : id;
@@ -63,7 +72,7 @@ export class SessionController {
   /** Current agent-preset name, matching the web header's built-in labels and custom metadata. */
   get sessionMode(): string | undefined {
     if (!this.store.state.sessionId) return undefined;
-    const id = this.connection.telemetryView().view(this.store.state.sessionId).values.agentPreset;
+    const id = this.runtime.telemetry.view(this.store.state.sessionId).values.agentPreset;
     if (typeof id !== 'string') return undefined;
     const preset = this.store.state.presets?.find(item => item.id === id);
     return preset?.trust === 'system' && BUILT_IN_MODES.has(id) ? BUILT_IN_MODES.get(id)
@@ -73,7 +82,7 @@ export class SessionController {
   /** Epoch start from the retained turn log, or when this client first observed the run. */
   get workingSince(): number | undefined {
     if (!this.running || !this.store.state.sessionId) return undefined;
-    return this.info.record.activeTurnStartedAt ?? this.connection.observedAt(this.store.state.sessionId);
+    return this.info.record.activeTurnStartedAt ?? this.runtime.observedAt(this.store.state.sessionId);
   }
 
   /** Present only sessions explicitly accounted to the selected workspace. */
@@ -88,11 +97,39 @@ export class SessionController {
   /** Whether a turn, cancellation or prompt admission is still in flight. */
   get active(): boolean { return this.interruptTask !== undefined || this.running || this.admission !== undefined; }
 
+  /** @returns The detached history window the reader opened, if any. */
+  get window(): Transcript | undefined { return this.info.window; }
+
+  /** Show a detached history window, releasing the one it replaces.
+   * @param window - Record to display, or undefined to return to the live transcript.
+   */
+  setViewWindow(window?: Transcript): void {
+    if (this.info.window === window) return;
+    this.info.closeWindow();
+    this.info.window = window;
+    this.store.update({});
+  }
+
+  /** @returns Host projection store of the current generation, owned by this session's runtime. */
+  get telemetry(): Telemetry { return this.runtime.telemetry; }
+
+  /** Lay out one record for a terminal width.
+   *
+   * The projection engine stays in this domain; the UI receives plain rows and offsets instead of
+   * importing it, and `Reasoning` for committed messages is always the folded default.
+   */
+  render(input: { transcript: Transcript; width: number; folds: ReadonlySet<number>; liveReasoning: Reasoning }): SessionRender {
+    return historyLayout(input.transcript, input.width, 'row', input.folds, input.liveReasoning);
+  }
+
+  /** Apply one normalized control frame to this session's runtime. */
+  acceptControl(frame: ControlFrame): void { this.runtime.acceptControl(frame); }
+
   /** Whether reading protects the loaded window, suspending history reclamation. */
-  get pinned(): boolean { return this.info.view.pinned; }
+  get pinned(): boolean { return this.historyPinned; }
 
   /** Drop generation-scoped state before a new connection generation begins. */
-  beginGeneration(): void { this.stoppingSession = undefined; }
+  beginGeneration(): void { this.stoppingSession = undefined; this.runtime.reset(); }
 
   /** Invalidate in-flight work and drop transient interactions when a generation ends. */
   endGeneration(): void {
@@ -111,8 +148,8 @@ export class SessionController {
    * @param state - State being published.
    * @returns Retained question and approval frames for that session.
    */
-  pendingFor(state: State): ObjectValue[] {
-    return [...this.interactions.values()].filter(frame => frame.agentId === state.sessionId);
+  pendingFor(state: State): PendingInteraction[] {
+    return [...this.interactions.values()].filter(frame => frame.sessionId === state.sessionId);
   }
 
   /** Unanswered interactions by session, so a list can show who is waiting without opening them.
@@ -126,19 +163,24 @@ export class SessionController {
   pendingCounts(): ReadonlyMap<string, number> {
     const counts = new Map<string, number>();
     for (const frame of this.interactions.values()) {
-      if (typeof frame.agentId !== 'string') continue;
-      counts.set(frame.agentId, (counts.get(frame.agentId) ?? 0) + 1);
+      if (frame.sessionId === '') continue;
+      counts.set(frame.sessionId, (counts.get(frame.sessionId) ?? 0) + 1);
     }
     return counts;
   }
 
-  /** Retain a recognized host waterfall; unknown events stay with the connection to delegate.
-   * @param frame - One decoded waterfall frame.
-   * @returns Whether this domain retained the frame for an answer.
+  /** Retain a recognized host interaction; anything else belongs to the connection to delegate.
+   * @param event - One normalized host event.
+   * @returns Whether this domain retained the event for an answer.
    */
-  waterfall(frame: ObjectValue): boolean {
-    if (!['approval/request', 'user-questions/request'].includes(string(frame.event))) return false;
-    this.interactions.set(string(frame.eventId), frame);
+  accept(event: HostEvent): boolean {
+    if (event.kind === 'approval-request') {
+      this.interactions.set(event.eventId, { kind: 'approval', eventId: event.eventId, sessionId: event.sessionId,
+        description: event.description });
+    } else if (event.kind === 'question-request') {
+      this.interactions.set(event.eventId, { kind: 'question', eventId: event.eventId, sessionId: event.sessionId,
+        questions: event.questions });
+    } else return false;
     this.store.update({});
     return true;
   }
@@ -153,6 +195,7 @@ export class SessionController {
    * @param running - Whether the host still runs that session.
    */
   status(sessionId: string, running: boolean): void {
+    this.runtime.accept(sessionId, running);
     if (!running && this.stoppingSession === sessionId) this.stoppingSession = undefined;
     this.store.update({ sessions: this.store.state.sessions.map(row => row.sessionId === sessionId ? { ...row, running } : row),
       ...(sessionId === this.store.state.sessionId ? { status: running ? 'Running…' : 'Idle' } : {}) });
@@ -160,10 +203,10 @@ export class SessionController {
 
   /** Surface a host-reported error for the selected session.
    * @param sessionId - Session the host reported on.
-   * @param error - Error payload as delivered by the host.
+   * @param error - Already-normalized error text.
    */
-  reportError(sessionId: unknown, error: unknown): void {
-    if (sessionId === this.store.state.sessionId) this.store.update({ status: 'Agent error', error: errorText(error) });
+  reportError(sessionId: string, error: string): void {
+    if (sessionId === this.store.state.sessionId) this.store.update({ status: 'Agent error', operation: { ...this.store.state.operation, error } });
   }
 
   /** Stop the selected turn, or allow exit only while idle. Repeated keys share one request.
@@ -173,11 +216,11 @@ export class SessionController {
   interrupt(force = false): Promise<boolean> {
     if (this.interruptTask) return this.interruptTask;
     if (!force && !this.running && !this.admission && this.store.state.pending.length === 0) {
-      return Promise.resolve(!this.store.state.busy);
+      return Promise.resolve(!this.store.state.operation.busy);
     }
     const sessionId = this.sessionId;
     this.stoppingSession = sessionId;
-    this.store.update({ status: 'Stopping…', error: '' });
+    this.store.update({ status: 'Stopping…', operation: { ...this.store.state.operation, error: '' } });
     const task = (async () => {
       try {
         // Admission must settle before cancellation can address the newly submitted turn.
@@ -185,7 +228,7 @@ export class SessionController {
         await this.admission?.catch(() => undefined);
         await this.host.require().call('session/cancel', { request: { sessionId } });
         if (this.stoppingSession === sessionId && this.store.state.sessionId === sessionId) this.store.update({ status: 'Cancellation requested · waiting for host' });
-      } catch (error) { this.stoppingSession = undefined; this.store.update({ status: 'Cancellation failed', error: errorText(error) }); }
+      } catch (error) { this.stoppingSession = undefined; this.store.update({ status: 'Cancellation failed', operation: { ...this.store.state.operation, error: errorText(error) } }); }
       return false;
     })();
     this.interruptTask = task;
@@ -197,7 +240,8 @@ export class SessionController {
    * @param pinned - Whether the main transcript is actively being read away from its tail.
    */
   pinHistory(pinned: boolean): void {
-    this.info.view.pinned = pinned;
+    if (this.historyPinned === pinned) return;
+    this.historyPinned = pinned;
     if (!pinned && this.reclaimHistory()) this.store.update({});
   }
 
@@ -229,9 +273,9 @@ export class SessionController {
     return kind === 'workspace' ? { kind, id: string(row.workspaceId), name: string(row.title), path: string(row.path) }
       : { kind, id: string(row.sessionId), name: sessionLabel(row),
         empty: row.blank === true && row.running === false
-          && !this.connection.runningFor(string(row.sessionId))
-          && !(this.connection.telemetryView().view(string(row.sessionId)).queued ?? 0)
-          && !(this.connection.telemetryView().view(string(row.sessionId)).jobs ?? 0)
+          && !this.runtime.runningFor(string(row.sessionId))
+          && !(this.runtime.telemetry.view(string(row.sessionId)).queued ?? 0)
+          && !(this.runtime.telemetry.view(string(row.sessionId)).jobs ?? 0)
           && !(this.store.state.sessionId === row.sessionId && this.admission) };
   }
 
@@ -256,7 +300,7 @@ export class SessionController {
       status: target.kind === 'workspace' ? 'Workspace registration removed' : 'Session archived' });
     // A refresh failure must not make a successful mutation look like a rejected deletion.
     try { await this.showPicker(target.kind === 'workspace' ? 'workspaces' : 'sessions'); }
-    catch (error) { this.store.update({ error: `Removal completed; list refresh failed: ${errorText(error)}` }); }
+    catch (error) { this.store.update({ operation: { ...this.store.state.operation, error: `Removal completed; list refresh failed: ${errorText(error)}` } }); }
   }
 
   /** Pick a workspace, or use all sessions when the identity is omitted.
@@ -354,7 +398,7 @@ export class SessionController {
     const workspace = this.store.state.workspaces.find(item => array(item.sessionIds).includes(sessionId));
     const workspaceId = workspace ? string(workspace.workspaceId)
       : this.store.state.sessions.some(item => item.sessionId === sessionId) ? undefined : this.store.state.workspaceId;
-    this.connection.observe(sessionId);
+    this.runtime.observe(sessionId);
     this.store.update({ sessionId, workspaceId, showAllSessions: false, screen: 'chat', status: 'Loading session…' });
     this.follow = this.host.require().subscribe('session/follow', {
       request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true },
@@ -366,14 +410,14 @@ export class SessionController {
           this.prompts.fold(transcript.promptsSince(this.prompts.through));
           this.reclaimHistory();
           const frame = object(value);
-          if (frame.type === 'snapshot') this.connection.telemetryView().snapshot(sessionId, frame.projections);
+          if (frame.type === 'snapshot') this.runtime.telemetry.snapshot(sessionId, projectionSnapshot(frame.projections));
           this.store.update({ status: this.stoppingSession === sessionId ? this.store.state.status : transcript.hasLiveContent ? 'Responding…' : 'Connected' });
         } catch (error) { this.connection.fail(new Error(errorText(error))); }
       },
       end: error => {
         if (selection !== this.store.selection()) return;
         transcript.ready = false;
-        this.store.update({ status: 'Session disconnected', error: errorText(error ?? 'Session stream ended') });
+        this.store.update({ status: 'Session disconnected', operation: { ...this.store.state.operation, error: errorText(error ?? 'Session stream ended') } });
       },
     });
     this.backfillPrompts(sessionId, selection);
@@ -489,11 +533,11 @@ export class SessionController {
   /** Answer the oldest selected-session interaction, after explicit user action.
    * @param value - Structured answer value or approval outcome.
    */
-  async answer(value: Json): Promise<void> {
+  async answer(value: AnswerValue): Promise<void> {
     const pending = this.store.state.pending[0];
     if (!pending) throw new Error('No pending interaction');
-    await this.reply(pending, { kind: 'result', value });
-    this.interactions.delete(string(pending.eventId));
+    await this.reply(pending.eventId, { kind: 'result', value });
+    this.interactions.delete(pending.eventId);
     this.store.update({});
   }
 
@@ -501,8 +545,11 @@ export class SessionController {
    * @param allowed - Whether the request is approved once.
    */
   async approve(allowed: boolean): Promise<void> {
-    if (this.store.state.pending[0]?.event !== 'approval/request') throw new Error('No pending approval');
-    await this.answer(allowed ? 'allowed-once' : 'rejected');
+    const pending = this.store.state.pending[0];
+    if (pending?.kind !== 'approval') throw new Error('No pending approval');
+    await this.reply(pending.eventId, { kind: 'result', value: allowed ? 'allowed-once' : 'rejected' });
+    this.interactions.delete(pending.eventId);
+    this.store.update({});
   }
 
   /** Dismiss the whole selected-session question set without answering it.
@@ -513,11 +560,11 @@ export class SessionController {
    */
   async dismissQuestion(): Promise<void> {
     const pending = this.store.state.pending[0];
-    if (pending?.event !== 'user-questions/request') throw new Error('No pending question');
-    await this.reply(pending, { kind: 'rejected', error: {
+    if (pending?.kind !== 'question') throw new Error('No pending question');
+    await this.reply(pending.eventId, { kind: 'rejected', error: {
       name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED',
     } });
-    this.interactions.delete(string(pending.eventId));
+    this.interactions.delete(pending.eventId);
     this.store.update({});
   }
 
@@ -550,88 +597,13 @@ export class SessionController {
    */
   recall(direction: -1 | 1, current: string): string { return this.prompts.move(direction, current); }
 
-  /** Composer draft, caret and parked draft, as the selected session holds them. */
-  get composer(): ComposerState { return this.info.composer; }
-
-  /** Replace the composer text and caret, publishing only when either actually changed. */
-  setComposer(draft: string, cursor = draft.length): void {
-    const composer = this.info.composer;
-    if (composer.draft === draft && composer.cursor === cursor) return;
-    composer.draft = draft; composer.cursor = cursor;
-    this.store.update({});
-  }
-
-  /** Move the caret without changing the text. */
-  setComposerCursor(cursor: number): void {
-    const composer = this.info.composer;
-    if (composer.cursor === cursor) return;
-    composer.cursor = cursor;
-    this.store.update({});
-  }
-
-  /** Move a non-empty draft aside while a dialog owns the keyboard. */
-  parkComposer(): void {
-    const composer = this.info.composer;
-    if (composer.draft === '') return;
-    composer.parked = composer.draft; composer.draft = ''; composer.cursor = 0;
-    this.store.update({});
-  }
-
-  /** Give a parked draft back once no dialog needs the keyboard. */
-  restoreComposer(): void {
-    const composer = this.info.composer;
-    if (composer.parked === '') return;
-    composer.draft = composer.parked; composer.cursor = composer.parked.length; composer.parked = '';
-    this.store.update({});
-  }
-
-  /** How the selected session's record is being read right now. */
-  get view(): ViewState { return this.info.view; }
-
-  /** Show a detached history window, releasing the one it replaces.
-   * @param window - Record to display, or undefined to return to the live transcript.
-   */
-  setViewWindow(window?: Transcript): void {
-    if (this.info.view.window === window) return;
-    this.info.closeWindow();
-    this.info.view.window = window;
-    this.store.update({});
-  }
-
-  /** Move the reader's position inside the displayed record.
-   * @param scroll - Rows scrolled back from the live end.
-   */
-  setScroll(scroll: number): void {
-    if (this.info.view.scroll === scroll) return;
-    this.info.view.scroll = scroll;
-    this.store.update({});
-  }
-
-  /** Replace the set of expanded reasoning blocks, keyed by message sequence.
-   * @param folds - Sequences to expand beyond the default fold.
-   */
-  setFolds(folds: ReadonlySet<number>): void {
-    if (this.info.view.folds === folds) return;
-    this.info.view.folds = folds;
-    this.store.update({});
-  }
-
-  /** Set the fold mode of the live attempt's completed reasoning.
-   * @param reasoning - `row` to fold, `full` to keep the streamed text.
-   */
-  setLiveReasoning(reasoning: Reasoning): void {
-    if (this.info.view.liveReasoning === reasoning) return;
-    this.info.view.liveReasoning = reasoning;
-    this.store.update({});
-  }
-
   /** Local answer state for the selected session's pending waterfalls. */
   get interaction(): InteractionState { return this.info.interaction; }
 
   /** Replace the partly collected answers, keyed by the waterfall event id.
    * @param answers - Answers collected so far, by event id.
    */
-  setAnswers(answers: Record<string, ObjectValue[]>): void {
+  setAnswers(answers: Record<string, AnswerValue['answers']>): void {
     this.info.interaction.answers = answers;
     this.store.update({});
   }
@@ -651,75 +623,6 @@ export class SessionController {
   setApproval(approval?: InteractionState['approval']): void {
     if (this.info.interaction.approval === approval) return;
     this.info.interaction.approval = approval;
-    this.store.update({});
-  }
-
-  /** Composer-adjacent `@` reference menu state. */
-  get reference(): ReferenceState { return this.info.reference; }
-
-  /** Highlight one row of the open reference menu.
-   * @param index - Row index into the current matches.
-   */
-  setReferenceIndex(index: number): void {
-    if (this.info.reference.index === index) return;
-    this.info.reference.index = index;
-    this.store.update({});
-  }
-
-  /** Remember the draft that dismissed the reference menu, so it does not reopen while it stands.
-   * @param draft - Composer text at dismissal, or undefined to allow the menu again.
-   */
-  setReferenceDismissed(draft?: string): void {
-    if (this.info.reference.dismissed === draft) return;
-    this.info.reference.dismissed = draft;
-    this.store.update({});
-  }
-
-  /** Panels the selected session has open. */
-  get panels(): PanelState { return this.info.panels; }
-
-  /** Show or hide the reasoning panel.
-   * @param open - Whether `/think` is open.
-   */
-  openThoughts(open: boolean): void {
-    if (this.info.panels.thoughts === open) return;
-    this.info.panels.thoughts = open;
-    this.store.update({});
-  }
-
-  /** Show or hide the pending-input panel.
-   * @param open - Whether `/queue` is open.
-   */
-  openQueue(open: boolean): void {
-    if (this.info.panels.queue === open) return;
-    this.info.panels.queue = open;
-    this.store.update({});
-  }
-
-  /** Show the model dialog at one step, or close it.
-   * @param model - Catalog plus the provider or model being inspected; undefined closes the dialog.
-   */
-  setModelPanel(model?: ModelState): void {
-    if (this.info.panels.model === model) return;
-    this.info.panels.model = model;
-    this.store.update({});
-  }
-
-  /** Show the history or content-search dialog, or close it.
-   * @param history - Query, content-search mode and matches; undefined closes the dialog.
-   */
-  setHistoryPanel(history?: PanelState['history']): void {
-    if (this.info.panels.history === history) return;
-    this.info.panels.history = history;
-    this.store.update({});
-  }
-
-  /** Show the host session-search results, or close them.
-   * @param search - Query, results and truncation flag; undefined closes the dialog.
-   */
-  setSearchPanel(search?: PanelState['search']): void {
-    if (this.info.panels.search === search) return;
-    this.info.panels.search = search;
     this.store.update({});
   }
 
@@ -943,7 +846,7 @@ export class SessionController {
    * @returns Number of removed records.
    */
   private reclaimHistory(): number {
-    if (this.info.view.pinned || !this.store.state.online) return 0;
+    if (this.historyPinned || !this.store.state.online) return 0;
     const removed = this.info.record.trimHistory(this.historyLimits);
     if (removed) releaseHistoryLayout(this.info.record);
     return removed;
@@ -962,7 +865,7 @@ export class SessionController {
   }
 
   /** Answer one retained waterfall through the connection's event-result endpoint. */
-  private async reply(frame: ObjectValue, outcome: ObjectValue): Promise<void> {
-    await this.connection.reply(frame, outcome);
+  private async reply(eventId: string, outcome: Json): Promise<void> {
+    await this.connection.reply(eventId, outcome);
   }
 }

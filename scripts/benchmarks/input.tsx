@@ -21,7 +21,7 @@ for (const count of [20, 500, 2000]) {
   }
   try {
     controller.start();
-    await until(() => controller.record.ready);
+    await until(() => controller.queries.record.ready);
     const records = Array.from({ length: count }, (_, seq) => ({ type: 'event', event: {
       seq, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: `Synthetic message ${seq}: ` + 'Text 中文 example. '.repeat(20) }] },
     } }));

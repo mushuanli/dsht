@@ -2,7 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import wrapAnsi from 'wrap-ansi';
-import { Transcript, toolLine } from '../../src/session/transcript.ts';
+import { Transcript } from '../../src/session/transcript.ts';
+import { toolLine } from '../../src/text.ts';
 import { historyLayout, releaseHistoryLayout } from '../../src/session/history.ts';
 import { markdownRows } from '../../src/session/markdown.ts';
 

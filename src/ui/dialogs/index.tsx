@@ -1,10 +1,12 @@
 /** Modal panels and list screens rendered inside the shared composer frame. */
 import { Box, Text } from 'ink';
-import { array, object, safeText, string, type ObjectValue } from '../../transport/wire.ts';
-import { toolLine, type Message } from '../../session/transcript.ts';
-import type { HistorySearch, RemovalTarget } from '../../session/types.ts';
-import type { QueuedInput } from '../../session/telemetry.ts';
-import { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH } from '../commands/registry.ts';
+import { array, object, string, type ObjectValue } from '../../json.ts';
+import { safeText } from '../../text.ts';
+import { type Message } from '../../contracts.ts';
+import { toolLine } from '../../text.ts';
+import type { HistorySearch, RemovalTarget } from '../../contracts.ts';
+import type { QueuedInput } from '../../contracts.ts';
+import { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH } from '../../slash/registry.ts';
 import { useTheme } from '../theme/index.ts';
 import { Picker, type Choice } from './picker.tsx';
 
@@ -51,7 +53,7 @@ export function RemovalDialog({ removal, enabled, canSelect, onCancel, onConfirm
   </Box>;
 }
 
-import type { ModelState } from '../../session/index.ts';
+import type { ModelState } from '../../contracts.ts';
 
 /** Two-step model and reasoning-effort selector; the state shape is shared with the session. */
 export type { ModelState };

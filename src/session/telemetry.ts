@@ -1,19 +1,13 @@
-/** Host projection values with per-key watermarks; snapshots never roll back newer updates. */
-import { array, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
+/** Host projection values with per-key watermarks; snapshots never roll back newer updates.
+ *
+ * The wire shape is decoded by `transport/events.ts`; this class only applies semantic control frames
+ * to its own maps, so a host field rename never reaches the session domain.
+ */
+import type { ControlFrame, ProjectionSnapshot, ProjectionValue, QueuedInput } from '../transport/events.ts';
 
-/** One host-owned pending input, removable only while its occurrence remains queued. */
-export interface QueuedInput { id: string; placement: 'queued' | 'steering' | 'context'; text: string }
+export type { QueuedInput } from '../transport/events.ts';
 
-function queuedInputs(value: Json | undefined): QueuedInput[] {
-  return array(value).map(value => {
-    const item = object(value);
-    if (!['queued', 'steering', 'context'].includes(string(item.placement))) throw new Error('Invalid queue placement');
-    return { id: string(item.id), placement: item.placement as QueuedInput['placement'],
-      text: array(object(item.message).content).map(object).map(block => block.type === 'text' ? string(block.text) : `[${string(block.type)}]`).join(' ') };
-  });
-}
-
-interface Entry { baseline: number; values: ObjectValue; revisions: Map<string, number> }
+interface Entry { baseline: number; values: Record<string, ProjectionValue>; revisions: Map<string, number> }
 
 /** Generation-local projection, inbox and background-job data for every session. */
 export class Telemetry {
@@ -26,61 +20,51 @@ export class Telemetry {
   constructor(private readonly retainedKeys?: ReadonlySet<string>) {}
 
   /** Replace all control state on a new stream baseline, then accept replacement frames.
-   * @param value - One decoded session/control frame.
+   * @param frame - One normalized session/control frame.
    */
-  accept(value: unknown): void {
-    const frame = object(value);
-    if (frame.type === 'baseline') {
-      const baseline = object(frame.value);
+  accept(frame: ControlFrame): void {
+    if (frame.kind === 'baseline') {
       this.entries.clear(); this.queues.clear(); this.jobs.clear();
-      for (const [id, projection] of Object.entries(object(baseline.projections))) this.snapshot(id, projection);
-      for (const [id, items] of Object.entries(object(baseline.queues))) this.queues.set(id, queuedInputs(items));
-      for (const [id, items] of Object.entries(object(baseline.jobs))) this.jobs.set(id, activeJobs(items));
+      for (const [id, snapshot] of frame.projections) this.snapshot(id, snapshot);
+      for (const [id, items] of frame.queues) this.queues.set(id, [...items]);
+      for (const [id, count] of frame.jobs) this.jobs.set(id, count);
       this.ready = true;
       return;
     }
     if (!this.ready) throw new Error('Session control update before baseline');
-    const id = string(frame.sessionId);
-    if (frame.type === 'projection') {
-      const entry = this.entry(id);
-      const key = string(frame.key);
-      const seq = sequence(frame.seq);
-      if (seq < (entry.revisions.get(key) ?? entry.baseline)) return;
-      if (frame.value === undefined) throw new Error('Missing projection value');
-      if (this.retainedKeys && !this.retainedKeys.has(key)) return;
-      entry.values[key] = frame.value;
-      entry.revisions.set(key, seq);
-    } else if (frame.type === 'queue') this.queues.set(id, queuedInputs(frame.items));
-    else if (frame.type === 'jobs') this.jobs.set(id, activeJobs(frame.items));
-    else throw new Error('Unknown session control frame');
+    if (frame.kind === 'projection') {
+      const entry = this.entry(frame.sessionId);
+      if (frame.seq < (entry.revisions.get(frame.key) ?? entry.baseline)) return;
+      if (this.retainedKeys && !this.retainedKeys.has(frame.key)) return;
+      entry.values[frame.key] = frame.value;
+      entry.revisions.set(frame.key, frame.seq);
+    } else if (frame.kind === 'queue') this.queues.set(frame.sessionId, [...frame.items]);
+    else this.jobs.set(frame.sessionId, frame.count);
   }
 
   /** Merge a complete follow snapshot without restoring absent or older projection values.
    * @param id - Session identity.
-   * @param value - Projection baseline, when supplied by the host.
+   * @param baseline - Projection baseline, when supplied by the host.
    */
-  snapshot(id: string, value: unknown): void {
-    if (value === undefined) return;
-    const baseline = object(value);
-    const seq = sequence(baseline.asOfSeq);
-    const values = object(baseline.values);
+  snapshot(id: string, baseline: ProjectionSnapshot | undefined): void {
+    if (baseline === undefined) return;
     const entry = this.entry(id);
-    if (seq < entry.baseline) return;
-    for (const key of new Set([...Object.keys(entry.values), ...Object.keys(values)])) {
+    if (baseline.asOfSeq < entry.baseline) return;
+    for (const key of new Set([...Object.keys(entry.values), ...Object.keys(baseline.values)])) {
       if (this.retainedKeys && !this.retainedKeys.has(key)) continue;
-      if ((entry.revisions.get(key) ?? -1) > seq) continue;
-      if (Object.hasOwn(values, key)) entry.values[key] = values[key]!;
+      if ((entry.revisions.get(key) ?? -1) > baseline.asOfSeq) continue;
+      if (Object.hasOwn(baseline.values, key)) entry.values[key] = baseline.values[key]!;
       else delete entry.values[key];
       entry.revisions.delete(key);
     }
-    entry.baseline = seq;
+    entry.baseline = baseline.asOfSeq;
   }
 
   /** Read current values for one session; missing capabilities remain absent.
    * @param id - Selected session identity, if any.
    * @returns Projection values and known queue/job counts.
    */
-  view(id?: string): { values: ObjectValue; queued?: number; jobs?: number } {
+  view(id?: string): { values: Readonly<Record<string, ProjectionValue>>; queued?: number; jobs?: number } {
     return { values: id ? this.entries.get(id)?.values ?? {} : {},
       queued: id ? this.queues.get(id)?.length : undefined, jobs: id ? this.jobs.get(id) : undefined };
   }
@@ -93,16 +77,7 @@ export class Telemetry {
 
   private entry(id: string): Entry {
     let entry = this.entries.get(id);
-    if (!entry) { entry = { baseline: -1, values: Object.create(null) as ObjectValue, revisions: new Map() }; this.entries.set(id, entry); }
+    if (!entry) { entry = { baseline: -1, values: Object.create(null) as Record<string, ProjectionValue>, revisions: new Map() }; this.entries.set(id, entry); }
     return entry;
   }
-}
-
-function sequence(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < -1) throw new Error('Invalid projection watermark');
-  return value;
-}
-
-function activeJobs(value: Json | undefined): number {
-  return array(value).filter(item => ['running', 'stopping'].includes(string(object(item).status))).length;
 }
