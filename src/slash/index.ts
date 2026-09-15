@@ -4,5 +4,5 @@
  */
 export { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH, COMMANDS, COMMAND_POLICY, commandMatches, commonPrefix, completeCommand, resolveCommand, suggestedCommands } from './registry.ts';
 export type { CommandHint, CommandPolicy } from './registry.ts';
-export { parseCommand, DESIGN_REVIEW_USAGE } from './parse.ts';
-export type { Command, DesignReviewOptions } from './parse.ts';
+export { parseCommand, parseLoopOptions, DESIGN_REVIEW_USAGE } from './parse.ts';
+export type { Command, LoopOptions } from './parse.ts';

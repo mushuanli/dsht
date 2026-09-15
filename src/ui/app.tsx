@@ -172,8 +172,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     return () => clearTimeout(timer);
   }, [historyQuery, contentSearch, panelLifetimeMs, copyMode]);
   const pending = state.pending[0];
-  // The review loop lives in the application; the UI only renders its progress snapshot.
-  const review = controller.queries.review;
+  // The loop lives in the application; the UI only renders its progress snapshot.
+  const loop = controller.queries.loop;
   const queued = controller.queries.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
   useEffect(() => {
     setPanels({ thoughts: false, queue: false }); setReferenceIndex(0); setDismissedReference(undefined);
@@ -759,8 +759,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     <Box flexDirection="column" flexShrink={0}>
       {notice && <Text dimColor>{safeText(notice)}</Text>}
       {composerIntent && <Text color={theme.colors.context}>{composerIntent.hint}</Text>}
-      {review && <Text color={review.phase === 'reviewing' ? theme.colors.context : theme.colors.muted}>
-        Design review · round {review.round}/{review.to} · attempt {review.attempt}/{review.tries} · best {review.best}/{review.score}{review.phase === 'reviewing' ? '' : ` · ${review.phase}`}
+      {loop && <Text color={loop.phase === 'running' ? theme.colors.context : theme.colors.muted}>
+        {loop.title} · step {loop.step}/{loop.to} · attempt {loop.attempt}/{loop.tries} · best {loop.best}/{loop.score}{loop.phase === 'running' ? '' : ` · ${loop.phase}`}
       </Text>}
       <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">

@@ -30,7 +30,7 @@ export type Command =
   /** Clear the client's own HANDOFF.md, then ask the agent to write a fresh session handoff. */
   | { kind: 'handoff' }
   /** Start the client-driven scored design review; see `DesignReviewOptions`. */
-  | { kind: 'designReview'; options: DesignReviewOptions }
+  | { kind: 'designReview'; options: LoopOptions }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -42,24 +42,24 @@ export type Command =
   | { kind: 'error'; message: string }
   | { kind: 'prompt'; text: string };
 
-/** Options carried by `/design-review`; absent fields take their default in the application.
+/** Options carried by the scored-loop commands (`/design-review` and its siblings).
  *
- * Only the fields the user actually typed are present, so the syntax layer validates each value it
- * sees and the application owns the defaults and the cross-field rules (`to >= from`).
+ * Only the fields the operator actually typed are present, so the syntax layer validates each value
+ * it sees and the application owns the defaults and the cross-field rules (`to >= from`).
  */
-export interface DesignReviewOptions {
-  /** First round to run; default 1. */
+export interface LoopOptions {
+  /** First step to run; default 1. */
   from?: number;
-  /** Last round to run; default the protocol's last round. */
+  /** Last step to run; default the protocol's last step. */
   to?: number;
-  /** Per-round passing score, 0-10 and possibly fractional; default 8. */
+  /** Passing score per step, 0-10 and possibly fractional; default 8. */
   score?: number;
-  /** Attempts allowed per round; default 10. */
+  /** Attempts allowed per step; default 10. */
   tries?: number;
 }
 
-/** How each `/design-review` flag names an option and validates its value. */
-const DESIGN_REVIEW_FLAGS: Readonly<Record<string, { key: keyof DesignReviewOptions; valid: (value: number) => boolean }>> = {
+/** How each loop flag names an option and validates its value. */
+const LOOP_FLAGS: Readonly<Record<string, { key: keyof LoopOptions; valid: (value: number) => boolean }>> = {
   '--from': { key: 'from', valid: value => Number.isSafeInteger(value) && value >= 1 },
   '--to': { key: 'to', valid: value => Number.isSafeInteger(value) && value >= 1 },
   '--score': { key: 'score', valid: value => Number.isFinite(value) && value >= 0 && value <= 10 },
@@ -69,23 +69,32 @@ const DESIGN_REVIEW_FLAGS: Readonly<Record<string, { key: keyof DesignReviewOpti
 /** The one message every malformed `/design-review` line receives. */
 export const DESIGN_REVIEW_USAGE = 'Use /design-review [--from N] [--to N] [--score X] [--tries N]';
 
+/** Parse the shared `--from/--to/--score/--tries` flags, shared by every scored-loop command.
+ * @param rest - Text after the command name.
+ * @returns The options, or undefined when any flag or value is malformed.
+ */
+export function parseLoopOptions(rest: string): LoopOptions | undefined {
+  const options: LoopOptions = {};
+  const words = rest.trim().split(/\s+/).filter(Boolean);
+  for (let index = 0; index < words.length; index += 2) {
+    const flag = words[index]!;
+    const raw = words[index + 1];
+    const spec = LOOP_FLAGS[flag];
+    if (spec === undefined || raw === undefined) return undefined;
+    const number = Number(raw);
+    if (!spec.valid(number)) return undefined;
+    options[spec.key] = number;
+  }
+  return options;
+}
+
 /** Parse `/design-review` and its flags, rejecting anything malformed.
  * @param value - Trimmed line that starts with `/design-review`.
  * @returns The command, or the usage error.
  */
 function designReviewCommand(value: string): Command {
-  const options: DesignReviewOptions = {};
-  const words = value.slice('/design-review'.length).trim().split(/\s+/).filter(Boolean);
-  for (let index = 0; index < words.length; index += 2) {
-    const flag = words[index]!;
-    const raw = words[index + 1];
-    const spec = DESIGN_REVIEW_FLAGS[flag];
-    if (spec === undefined || raw === undefined) return { kind: 'error', message: DESIGN_REVIEW_USAGE };
-    const number = Number(raw);
-    if (!spec.valid(number)) return { kind: 'error', message: DESIGN_REVIEW_USAGE };
-    options[spec.key] = number;
-  }
-  return { kind: 'designReview', options };
+  const options = parseLoopOptions(value.slice('/design-review'.length));
+  return options === undefined ? { kind: 'error', message: DESIGN_REVIEW_USAGE } : { kind: 'designReview', options };
 }
 
 /** Parse workspace and resume navigation, including their long aliases. */

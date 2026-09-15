@@ -1,23 +1,14 @@
-/** The `/design-review` protocol: parameters, the per-round brief, and the machine-readable score.
+/** The design-review protocol: the ten rounds a `/design-review` run walks through.
  *
- * The loop itself lives in `ReviewRun`; this module owns the text the agent receives and the one
- * thing the client must parse, so the contract stays in a single place.
+ * Everything mechanical lives in `loop.ts`; this module is only the text the agent receives and the
+ * step count, so a second review command adds a sibling file rather than another loop.
  */
-import type { DesignReviewOptions } from '../slash/index.ts';
-import type { Message } from '../session/transcript.ts';
+import type { LoopLimits, LoopProtocol } from './loop.ts';
 
 /** Rounds the review protocol defines; `--to` defaults to the last one. */
 export const DESIGN_REVIEW_ROUNDS = 10;
 
-/** One run's fully resolved parameters. */
-export interface ResolvedDesignReview {
-  from: number;
-  to: number;
-  score: number;
-  tries: number;
-}
-
-/** Round titles, indexed from 1 so `roster[round]` is the round's name. */
+/** Round titles, indexed from 1 so `ROUND_TITLES[step]` is the round's name. */
 const ROUND_TITLES = [
   '',
   '职责与归属',
@@ -47,26 +38,13 @@ const ROUND_CHECKS: readonly string[] = [
   '完成前面所有检查后重新整体审查一次，禁止再引入新的架构模式。只判断：当前设计是否已经足够简单？哪些是 P0 必须修改？哪些是 P1 值得修改？哪些只是理论洁癖应保持现状？哪些抽象应该删除？哪些状态应该移动？哪些接口应该缩小？哪些依赖应该禁止？最终推荐的依赖关系是什么？是否已到"停止设计、开始实施"的阶段？',
 ];
 
-/** Apply the defaults and reject a range that cannot run.
- * @param options - Flags exactly as parsed, absent when the user omitted them.
- * @returns The resolved parameters, or undefined when `to < from`.
- */
-export function resolveDesignReview(options: DesignReviewOptions): ResolvedDesignReview | undefined {
-  const from = options.from ?? 1;
-  const to = options.to ?? DESIGN_REVIEW_ROUNDS;
-  const score = options.score ?? 8;
-  const tries = options.tries ?? 10;
-  if (to < from) return undefined;
-  return { from, to, score, tries };
-}
-
-/** The opening prompt: the full protocol, scoped to the round it must do now. */
-export function designReviewBrief(run: ResolvedDesignReview, round: number, attempt: number): string {
+/** The shared header of every round's brief. */
+function briefHeader(limits: LoopLimits, step: number, attempt: number): string[] {
   return [
     '你是一名资深软件架构师。请对下面的软件架构、模块设计、代码组织或重构方案进行系统审查。',
     '',
-    `审查范围：第 ${run.from} 轮到第 ${run.to} 轮；每轮及格线 ${run.score} 分（0–10，允许小数）；每轮最多 ${run.tries} 次尝试。`,
-    `本次只执行第 ${round} 轮的第 ${attempt} 次尝试。完成这一轮后立即停止，不要自行进入后续轮次或重复尝试。`,
+    `审查范围：第 ${limits.from} 轮到第 ${limits.to} 轮；每轮及格线 ${limits.score} 分（0–10，允许小数）；每轮最多 ${limits.tries} 次尝试。`,
+    `本次只执行第 ${step} 轮的第 ${attempt} 次尝试。完成这一轮后立即停止，不要自行进入后续轮次或重复尝试。`,
     '',
     '你的目标不是套用 MVC、DDD、Clean Architecture、Hexagonal、CQRS、DI 等架构模式，而是寻找最简单、最稳定、最容易长期维护的边界。',
     '',
@@ -76,9 +54,9 @@ export function designReviewBrief(run: ResolvedDesignReview, round: number, atte
     '9 可维护性 > 理论纯洁；10 简单直接 > 架构炫技。',
     '不要因为模式名词本身而引入复杂度；只有某个模式确实解决已存在的问题时才使用。',
     '',
-    `本轮主题：第 ${round} 轮 · ${ROUND_TITLES[round] ?? '收敛审查'}`,
+    `本轮主题：第 ${step} 轮 · ${ROUND_TITLES[step] ?? '收敛审查'}`,
     '本轮检查要点：',
-    ROUND_CHECKS[round] ?? ROUND_CHECKS[DESIGN_REVIEW_ROUNDS]!,
+    ROUND_CHECKS[step] ?? ROUND_CHECKS[DESIGN_REVIEW_ROUNDS]!,
     '',
     '输出要求：不要输出冗长的内部思维过程，只输出——',
     '- 发现的问题',
@@ -87,53 +65,29 @@ export function designReviewBrief(run: ResolvedDesignReview, round: number, atte
     '- 修改后减少了什么耦合或复杂度',
     '- 本轮收敛结论',
     '',
-    `评分：用 0–10 表示本轮结论的成熟度（允许小数）。分数应由独立 verifier 子代理（subagent，全新上下文，以上面的优先目标与输出格式作为 rubric）给出；若当前环境没有 subagent 能力，则由你自己评分并在 verdict 中标注 self-scored。`,
+    '评分：用 0–10 表示本轮结论的成熟度（允许小数）。分数应由独立 verifier 子代理（subagent，全新上下文，以上面的优先目标与输出格式作为 rubric）给出；若当前环境没有 subagent 能力，则由你自己评分并在 verdict 中标注 self-scored。',
     '',
-    '结尾必须输出唯一一个 ```dsht-review 代码块，并且它必须是回复正文的最后内容：',
-    `{"round":${round},"attempt":${attempt},"score":X,"verdict":"pass|retry","top_findings":["..."],"next_focus":"..."}`,
-    `score 小于 ${run.score} 时 verdict 必须是 retry，并列出仍未解决的 blocking 问题。`,
-  ].join('\n');
+    '结尾必须输出唯一一个 ```' + DESIGN_REVIEW_PROTOCOL_MARKER + ' 代码块，并且它必须是回复正文的最后内容：',
+    `{"kind":"design-review","step":${step},"attempt":${attempt},"score":X,"verdict":"pass|retry","top_findings":["..."],"next_focus":"..."}`,
+    `score 小于 ${limits.score} 时 verdict 必须是 retry，并列出仍未解决的 blocking 问题。`,
+  ];
 }
 
-/** A later attempt: the protocol is already in context, so only the delta is restated. */
-export function designReviewFollowUp(run: ResolvedDesignReview, round: number, attempt: number): string {
-  return [
-    `现在是第 ${round} 轮、第 ${attempt}/${run.tries} 次尝试（及格线 ${run.score}）。`,
-    `阅读上面的结果、意见与建议，按第 ${round} 轮（${ROUND_TITLES[round] ?? '收敛审查'}）的要求继续改进；`,
+/** Marker shared by every loop protocol's result block. */
+export const DESIGN_REVIEW_PROTOCOL_MARKER = 'dsht-loop';
+
+/** The protocol the `/design-review` command runs. */
+export const DESIGN_REVIEW_PROTOCOL: LoopProtocol = {
+  marker: DESIGN_REVIEW_PROTOCOL_MARKER,
+  kind: 'design-review',
+  title: 'Design review',
+  steps: DESIGN_REVIEW_ROUNDS,
+  brief: (limits, step, attempt) => briefHeader(limits, step, attempt).join('\n'),
+  followUp: (limits, step, attempt) => [
+    `现在是第 ${step} 轮、第 ${attempt}/${limits.tries} 次尝试（及格线 ${limits.score}）。`,
+    `阅读上面的结果、意见与建议，按第 ${step} 轮（${ROUND_TITLES[step] ?? '收敛审查'}）的要求继续改进；`,
     '上一版未解决、未回应的 blocking 问题必须逐条处理。',
-    '结尾仍然只输出一个 ```dsht-review JSON 块，' + `round=${round}、attempt=${attempt}、score 为本次评分。`,
-  ].join('\n');
-}
-
-/** Read the score out of the last `dsht-review` block in one reply.
- *
- * The block must be in the assistant's text, not reasoning, and this takes the last one so a reply
- * that quotes an earlier block still reports its own result.
- * @param text - One turn's assistant text.
- * @returns The score in 0–10, or undefined when the reply carries no valid block.
- */
-export function parseReviewScore(text: string): number | undefined {
-  const pattern = /```dsht-review\s*\n?([\s\S]*?)```/g;
-  let body: string | undefined;
-  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) body = match[1];
-  if (body === undefined) return undefined;
-  try {
-    const parsed = JSON.parse(body.trim()) as { score?: unknown };
-    const score = typeof parsed.score === 'number' ? parsed.score : Number(parsed.score);
-    return Number.isFinite(score) && score >= 0 && score <= 10 ? score : undefined;
-  } catch { return undefined; }
-}
-
-/** Assistant text of the turn that just finished: from the last user/context row to the end.
- * @param messages - Projected conversation messages.
- * @returns The assistant text, empty when the turn produced none.
- */
-export function latestAssistantText(messages: readonly Message[]): string {
-  const parts: string[] = [];
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]!;
-    if (message.role === 'You' || message.role === 'Context') break;
-    if (message.role === 'Assistant') parts.unshift(message.text);
-  }
-  return parts.join('\n');
-}
+    '结尾仍然只输出一个 ```' + DESIGN_REVIEW_PROTOCOL_MARKER + ' JSON 块，'
+      + `kind=design-review、step=${step}、attempt=${attempt}、score 为本次评分。`,
+  ].join('\n'),
+};

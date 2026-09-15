@@ -7,7 +7,8 @@
 import type { CommandIntent } from '../contracts.ts';
 import { DESIGN_REVIEW_USAGE, type Command } from '../slash/index.ts';
 import type { Controller } from './controller.ts';
-import { resolveDesignReview } from './design-review.ts';
+import { DESIGN_REVIEW_PROTOCOL } from './design-review.ts';
+import { resolveLoop } from './loop.ts';
 
 /** A routed line that still needs an effect: a parsed command, a free-text answer, or a host path. */
 export type RunnableCommand =
@@ -157,12 +158,12 @@ export async function runCommand(controller: Controller, command: RunnableComman
       return { closePanels: true, live: true, scroll: 0, notice: 'Handoff requested · local HANDOFF.md cleared' };
     }
     case 'designReview': {
-      const run = resolveDesignReview(command.options);
-      if (run === undefined) return { closePanels: true, error: DESIGN_REVIEW_USAGE };
-      if (!await controller.actions.startReview(command.options)) return undefined;
+      const limits = resolveLoop(DESIGN_REVIEW_PROTOCOL, command.options);
+      if (limits === undefined) return { closePanels: true, error: DESIGN_REVIEW_USAGE };
+      if (!await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, limits)) return undefined;
       controller.actions.setViewWindow(undefined);
       return { closePanels: true, live: true, scroll: 0,
-        notice: `Design review started · rounds ${run.from}–${run.to} · pass ${run.score} · ≤${run.tries} tries` };
+        notice: `Design review started · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` };
     }
     default: return undefined;
   }

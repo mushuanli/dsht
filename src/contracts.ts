@@ -24,24 +24,27 @@ export interface SavedPrompt { id: string; text: string }
 export type PanelName = 'help' | 'cost' | 'status' | 'queue' | 'prompts'
   | 'thoughts' | 'history' | 'search' | 'model' | 'removal';
 
-/** Progress of the client-driven `/design-review` run, as the UI reads it.
+/** Progress of a client-driven agent loop, as the UI reads it.
  *
- * The application owns the loop; the UI only renders this snapshot.
+ * One snapshot serves every protocol (`/design-review` today, other reviews later): the application
+ * owns the loop, the UI only renders this line.
  */
-export interface DesignReviewProgress {
-  /** First and last round of the run. */
+export interface LoopProgress {
+  /** Protocol label, such as `Design review`. */
+  title: string;
+  /** First and last step of the run. */
   from: number;
   to: number;
-  /** Per-round passing score and the attempt budget per round. */
+  /** Passing score per step and the attempt budget per step. */
   score: number;
   tries: number;
-  /** Round and attempt in flight, both 1-based. */
-  round: number;
+  /** Step and attempt in flight, both 1-based. */
+  step: number;
   attempt: number;
-  /** Best score seen in the current round. */
+  /** Best score seen in the current step. */
   best: number;
-  /** `reviewing` while the loop runs; the other values are terminal. */
-  phase: 'reviewing' | 'passed' | 'exhausted' | 'cancelled';
+  /** `running` while the loop runs; the other values are terminal. */
+  phase: 'running' | 'passed' | 'exhausted' | 'cancelled';
 }
 
 /** The presentational outcome of one submitted line.
