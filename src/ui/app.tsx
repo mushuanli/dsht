@@ -5,7 +5,7 @@ import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement
 import { useMouseWheel } from './input/mouse.ts';
 import { TextInput } from './input/input.tsx';
 import { ReferenceMenu } from './input/references.tsx';
-import type { PanelState, Reasoning } from '../contracts.ts';
+import type { CommandIntent, PanelName, PanelState, Reasoning } from '../contracts.ts';
 import type { CostTotal } from '../contracts.ts';
 import { costText } from './status/model.ts';
 import { toolLine } from '../text.ts';
@@ -23,6 +23,7 @@ import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, PromptsDialog, Que
 import { COMMAND_HINTS, completeCommand as completeDraft, suggestedCommands } from '../slash/registry.ts';
 import { routeEnter } from './routing.ts';
 import { Controller, type HistorySearch, type RemovalTarget } from '../controller/controller.ts';
+import { removalIntent, runCommand, type CommandPort } from '../controller/commands.ts';
 import { sessionLabel } from '../session-title.ts';
 import { ROLLUP_LEGEND, sessionStatus, workspaceCounts, workspaceDetail, workspaceSegments, workspaceStatus, type RollupState, type RollupStyle } from './chat/navigation-model.ts';
 import { array, object, string, type ObjectValue } from '../json.ts';
@@ -52,10 +53,12 @@ interface ComposerIntent {
 
 /** One panel-like surface, described once so no gate has to enumerate the others.
  *
- * `open` decides the gates; `close`/`keepFor` implement "each surface belongs to the command that
- * opened it". Adding a surface is one row here plus its own render and dispatch.
+ * `open` decides the gates; `name` lets a command's intent close it. Adding a surface is one row
+ * here plus its own render.
  */
 interface Surface {
+  /** Panel identity a `CommandIntent` may name. */
+  name: PanelName;
   /** Whether the surface currently owns part of the screen. */
   open: boolean;
   /** Whether it takes ↑/↓ from composer recall while open. */
@@ -64,10 +67,8 @@ interface Surface {
   blocksKeys?: boolean;
   /** Keys the composer must not insert while this surface's list owns them. */
   reserved?: readonly string[];
-  /** Closes the surface; absent when only its own handler closes it. */
+  /** Closes the surface. */
   close?(): void;
-  /** Command line that keeps this surface open; absent means every command closes it. */
-  keepFor?: RegExp;
 }
 
 /** The caller owns starting and stopping the controller around the Ink render lifetime.
@@ -186,16 +187,16 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const referenceOpen = token !== undefined;
   // The queue dialog is not rendered while an answer is waiting, so it is not "open" then either.
   const surfaces: readonly Surface[] = [
-    { open: queueOpen && !pending, reserved: ['d'], close: () => openQueue(false), keepFor: /^\/queue$/ },
-    { open: !!promptsOpen, arrows: true, blocksKeys: true, reserved: ['d', 'e'], close: () => openPrompts(false), keepFor: /^\/prompt(?:\s|$)/ },
-    { open: !!removal, arrows: true, blocksKeys: true, close: () => setRemoval(undefined) },
-    { open: !!models, arrows: true, blocksKeys: true, close: () => setModelPanel(undefined), keepFor: /^\/model(?: |$)/ },
-    { open: thoughtList, arrows: true, blocksKeys: true, close: () => openThoughts(false), keepFor: /^\/think(?: |$)/ },
-    { open: historyQuery !== undefined, arrows: true, blocksKeys: true },
-    { open: !!searchResults, arrows: true, blocksKeys: true },
-    { open: help, blocksKeys: true, close: () => setHelp(false), keepFor: /^\/help$/ },
-    { open: costExpanded, blocksKeys: true, close: () => setCostExpanded(false), keepFor: /^\/cost$/ },
-    { open: statusExpanded, blocksKeys: true, close: () => setStatusExpanded(false), keepFor: /^\/status$/ },
+    { name: 'queue', open: queueOpen && !pending, reserved: ['d'], close: () => openQueue(false) },
+    { name: 'prompts', open: !!promptsOpen, arrows: true, blocksKeys: true, reserved: ['d', 'e'], close: () => openPrompts(false) },
+    { name: 'removal', open: !!removal, arrows: true, blocksKeys: true, close: () => setRemoval(undefined) },
+    { name: 'model', open: !!models, arrows: true, blocksKeys: true, close: () => setModelPanel(undefined) },
+    { name: 'thoughts', open: thoughtList, arrows: true, blocksKeys: true, close: () => openThoughts(false) },
+    { name: 'history', open: historyQuery !== undefined, arrows: true, blocksKeys: true, close: () => setHistoryPanel(undefined) },
+    { name: 'search', open: !!searchResults, arrows: true, blocksKeys: true, close: () => setSearchPanel(undefined) },
+    { name: 'help', open: help, blocksKeys: true, close: () => setHelp(false) },
+    { name: 'cost', open: costExpanded, blocksKeys: true, close: () => setCostExpanded(false) },
+    { name: 'status', open: statusExpanded, blocksKeys: true, close: () => setStatusExpanded(false) },
   ];
   const openSurfaces = surfaces.filter(surface => surface.open);
   const surfaceReservedKeys = [...new Set(openSurfaces.flatMap(surface => surface.reserved ?? []))];
@@ -285,13 +286,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
 
   // Actions own their busy/error envelope; this only surfaces a UI-local orchestration failure.
   const operate = (fn: () => Promise<unknown>) => { void fn().catch(error => setNotice(errorText(error))); };
-  const requestRemoval = async (kind: 'workspace' | 'session', query: string): Promise<boolean> => {
-    const target = await controller.actions.removalTarget(kind, query);
-    if (target === undefined) return false;
-    if (target.kind === 'session' && target.empty) return await controller.actions.removeTarget(target);
-    setRemoval(target);
-    return true;
-  };
+  /** Resolve and apply a removal; shared by the pickers' `d` key and the delete commands. */
+  async function requestRemoval(kind: 'workspace' | 'session', query: string): Promise<boolean> {
+    const intent = await removalIntent(controller, kind, query);
+    return intent === undefined ? false : await applyIntent(intent);
+  }
   useInput((_value, key) => {
     if (key.eventType === 'release') return;
     if (copyMode) {
@@ -442,153 +441,61 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (submission.kind === 'reference') { pickReference(); return; }
     const value = raw.trim();
     if (!pending && !/^\/feedback(?:\s|$)/.test(value)) controller.actions.recordRecall(value);
-    if (submission.kind === 'copy') { setInput(''); setCopyMode(true); return; }
-    // Each surface belongs to the command that opened it, so any other command closes it.
-    for (const surface of surfaces) {
-      if (surface.close && !(surface.keepFor?.test(value) ?? false)) surface.close();
-    }
-    if (submission.kind === 'quit') { exit(); return; }
-    if (submission.kind === 'panel') {
-      if (submission.panel === 'cost') {
-        setCostExpanded(value => !value); setInput('');
-        if (!costExpanded) void historyOperation(signal => controller.actions.refreshCosts(signal));
-      } else if (submission.panel === 'status') { setStatusExpanded(value => !value); setStatusScroll(0); setInput(''); }
-      else { setHelp(value => !value); setHelpPage(0); setInput(''); }
-      return;
-    }
-    // Each action owns its busy/error envelope and reports completion, so the composer clears only
-    // when the line actually ran; a UI-local failure surfaces as the transient notice.
-    const accepted = await (async (): Promise<boolean> => {
-      try {
-        switch (submission.kind) {
-          case 'remove': return await requestRemoval(submission.target, submission.query);
-          case 'navigate': {
-            setHistoryPanel(undefined);
-            setSearchPanel(undefined);
-            const ok = submission.target === 'workspace'
-              ? await controller.actions.switchWorkspace(submission.query)
-              : await controller.actions.switchSession(submission.query);
-            setScroll(0);
-            return ok;
-          }
-          case 'path': return await controller.actions.createWorkspace(submission.value);
-          case 'latest':
-            controller.actions.setViewWindow(undefined); setHistoryPanel(undefined); setSearchPanel(undefined);
-            setReasoningOverrides(new Set()); setScroll(0); controller.actions.pinHistory(false);
-            return true;
-          case 'models': {
-            if (!submission.args.length) {
-              setHistoryPanel(undefined); setSearchPanel(undefined);
-              const catalog = await controller.actions.modelCatalog();
-              if (catalog === undefined) return false;
-              setModelPanel({ catalog });
-              return true;
-            }
-            const ok = await controller.actions.selectModel(submission.args[0]!, submission.args[1]!, submission.args[2]);
-            if (ok) setModelPanel(undefined);
-            return ok;
-          }
-          case 'queue': openQueue(true); return true;
-          case 'prompts': openPrompts(true); return true;
-          case 'savePrompt': {
-            const ok = await controller.actions.savePrompt(submission.text);
-            if (ok) setNotice('Saved prompt');
-            return ok;
-          }
-          case 'shell': controller.shell.start(submission.command); setScroll(0); return true;
-          case 'newSession': return await controller.actions.createSession();
-          case 'history': setSearchPanel(undefined); setHistoryPanel({ query: submission.query, contentSearch: false }); return true;
-          case 'sessionSearch':
-            return await historyOperation(async signal => {
-              const result = await controller.actions.searchSessions(submission.query, submission.command === '/ssearch', signal);
-              if (result === undefined) return false;
-              setHistoryPanel(undefined); setSearchPanel({ query: submission.query, ...result });
-              return true;
-            }, 'Searching sessions…') ?? false;
-          case 'historySearch':
-            return await historyOperation(async signal => {
-              const matches = await controller.actions.searchHistory(submission.query, signal);
-              if (matches === undefined) return false;
-              setHistoryPanel({ query: submission.query, contentSearch: true, matches });
-              setSearchPanel(undefined);
-              return true;
-            }, 'Searching history…') ?? false;
-          case 'think': {
-            if (submission.target === 'live') {
-              setLiveReasoning(liveReasoning === 'row' ? 'full' : 'row'); openThoughts(false); setScroll(0);
-            } else if (submission.target) {
-              const seq = Number(submission.target);
-              if (!Number.isSafeInteger(seq) || !displayTranscript.thoughts.some(entry => entry.seq === seq)) throw new Error('Use /think <message sequence> for a loaded reasoning block');
-              const next = new Set(reasoningOverrides);
-              if (next.delete(seq)) { setReasoningOverrides(next); return true; }
-              next.add(seq); setReasoningOverrides(next);
-              await jumpHistory(seq, next);
-            } else {
-              setHistoryPanel(undefined); setSearchPanel(undefined); openThoughts(true);
-            }
-            return true;
-          }
-          case 'older': {
-            const ok = await controller.actions.older(undefined, displayTranscript);
-            setScroll(scroll + 10);
-            return ok;
-          }
-          case 'compact':
-            setNotice(undefined);
-            return await historyOperation(async signal => {
-              const text = await controller.actions.command('/compact', signal);
-              if (text === undefined) return false;
-              setNotice(text); return true;
-            }, 'Compacting history…') ?? false;
-          case 'cancel': return await controller.actions.cancelTurn();
-          case 'approval': return await controller.actions.approve(submission.allowed);
-          case 'hostCommand':
-            setNotice(undefined);
-            return await historyOperation(async signal => {
-              const text = await controller.actions.command(submission.line, signal);
-              if (text === undefined) return false;
-              setNotice(text); return true;
-            }, 'Running command…') ?? false;
-          case 'export':
-            return await historyOperation(async signal => {
-              const saved = await controller.actions.exportLog(submission.destination, signal);
-              if (saved === undefined) return false;
-              setNotice(`Saved session log: ${saved}`);
-              return true;
-            }, 'Exporting session log…') ?? false;
-          case 'exportHtml':
-            return await historyOperation(async signal => {
-              const saved = await controller.actions.exportHtml(submission.destination, signal);
-              if (saved === undefined) return false;
-              setNotice(`Saved loaded conversation: ${saved}`);
-              return true;
-            }, 'Exporting loaded conversation…') ?? false;
-          case 'coredump':
-            // V8 serializes the heap synchronously, so the client stalls until the file is written;
-            // the path is reported afterwards so the snapshot can be opened in DevTools.
-            await historyOperation(async () => {
-              setNotice(`Heap snapshot saved: ${controller.actions.heapSnapshot(submission.tag)}`);
-            }, 'Writing heap snapshot…');
-            return true;
-          case 'answer':
-            return await answerQuestion(question!.multiSelect === true ? choiceState.selected : [], submission.text);
-          case 'error': throw new Error(submission.message);
-          case 'prompt': {
-            const ok = await controller.actions.prompt(submission.text);
-            controller.actions.setViewWindow(undefined); setScroll(0);
-            return ok;
-          }
-          case 'handoff': {
-            const ok = await controller.actions.handoff();
-            if (ok) { controller.actions.setViewWindow(undefined); setScroll(0); setNotice('Handoff requested · local HANDOFF.md cleared'); }
-            return ok;
-          }
-        }
-        return true;
-      } catch (error) { setNotice(errorText(error)); return false; }
-    })();
+    // The application decides what the line does and returns a view intent; the UI only applies it.
+    const port: CommandPort = { run: (label, operation) => historyOperation(operation, label) };
+    let accepted = false;
+    try {
+      const intent = await runCommand(controller, submission, port);
+      if (intent !== undefined) accepted = await applyIntent(intent);
+    } catch (error) { setNotice(errorText(error)); }
     if (accepted) setInput('');
   };
+
+  /** Apply one application-produced view intent; the UI names no command here. */
+  async function applyIntent(intent: CommandIntent): Promise<boolean> {
+    if (intent.quit) { exit(); return true; }
+    if (intent.copy) setCopyMode(true);
+    if (intent.closePanels) closePanelsExcept(intent.open ?? intent.toggle);
+    if (intent.close !== undefined) closePanel(intent.close);
+    if (intent.live) controller.actions.setViewWindow(undefined);
+    if (intent.pinLive) controller.actions.pinHistory(false);
+    if (intent.resetFolds) setReasoningOverrides(new Set());
+    if (intent.toggle === 'help') { setHelp(value => !value); setHelpPage(0); }
+    else if (intent.toggle === 'cost') {
+      const next = !costExpanded; setCostExpanded(next);
+      if (next) void historyOperation(signal => controller.actions.refreshCosts(signal));
+    } else if (intent.toggle === 'status') { setStatusExpanded(value => !value); setStatusScroll(0); }
+    if (intent.open === 'queue') openQueue(true);
+    else if (intent.open === 'prompts') openPrompts(true);
+    else if (intent.open === 'thoughts') openThoughts(true);
+    if (intent.history !== undefined) setHistoryPanel(intent.history);
+    if (intent.search !== undefined) setSearchPanel(intent.search);
+    if (intent.model !== undefined) setModelPanel(intent.model);
+    if (intent.removal !== undefined) setRemoval(intent.removal);
+    if (intent.toggleLiveReasoning) setLiveReasoning(liveReasoning === 'row' ? 'full' : 'row');
+    if (intent.toggleFold !== undefined) {
+      const next = new Set(reasoningOverrides);
+      if (next.delete(intent.toggleFold)) setReasoningOverrides(next);
+      else { next.add(intent.toggleFold); setReasoningOverrides(next); await jumpHistory(intent.toggleFold, next); }
+    }
+    if (intent.scroll !== undefined) setScroll(intent.scroll);
+    const { scrollBy } = intent;
+    if (scrollBy !== undefined) setScroll(current => current + scrollBy);
+    if (intent.answer !== undefined) return await answerQuestion(question!.multiSelect === true ? choiceState.selected : [], intent.answer);
+    if (intent.error !== undefined) { setNotice(intent.error); return false; }
+    if (intent.notice !== undefined) setNotice(intent.notice);
+    return true;
+  }
+
+  /** Close every panel except the one an intent keeps open. */
+  function closePanelsExcept(keep?: PanelName): void {
+    for (const surface of surfaces) if (surface.name !== keep) surface.close?.();
+  }
+
+  /** Close one named panel. */
+  function closePanel(name: PanelName): void {
+    surfaces.find(surface => surface.name === name)?.close?.();
+  }
 
   const width = Math.max(10, (stdout.columns ?? 80) - 2);
   // The composer never trades the conversation away for input. Its window grows with the body and

@@ -179,8 +179,8 @@ C4Component
   Component(session, "session/", "16 文件 2929 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 852 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "6 文件 1287 行", "Controller 门面、ConnectionController、内存日志与快捷提示词")
-  Component(ui, "ui/", "20 文件 2662 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
+  Component(controller, "controller/", "7 文件 1449 行", "Controller 门面、命令策略、ConnectionController、内存日志与快捷提示词")
+  Component(ui, "ui/", "20 文件 2569 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
   Component(cli, "cli/", "2 文件 137 行", "参数、目录准备与进程生命周期")
   Component(shell, "shell/", "3 文件 276 行", "本地 ! 命令的执行、有界输出与进程组终止")
 
@@ -210,7 +210,7 @@ C4Component
 | `catalog/` | `transport`、`catalog`、`state.ts`、`json.ts` | 独立的模型元数据域 |
 | `shell/` | `shell`、`storage`、`text.ts`、`json.ts` | 唯一允许导入 `node:child_process` 的域 |
 | `slash/` | `slash` | 纯叶子：命令目录、`parseCommand(line)` 与 `COMMAND_POLICY`，不含 UI 事实与副作用 |
-| `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`shell`、`state.ts`、`storage`、`text.ts`、`json.ts`、`contracts.ts`、`slash` | 应用门面：事件路由、生命周期、Actions/Queries、内存日志与快捷提示词存储 |
+| `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`shell`、`state.ts`、`storage`、`text.ts`、`json.ts`、`contracts.ts`、`slash` | 应用门面：事件路由、生命周期、Actions/Queries、命令策略、内存日志与快捷提示词存储 |
 | `contracts.ts` | `json.ts`、`transport`、`session`、`cost`、`catalog`、`shell` | **只含类型**：门禁拒绝 `const`/`function`/`class` |
 | `ui/` | `ui`、`controller`（仅 `app.tsx`/`mount.tsx`）、`contracts.ts`、`json.ts`、`text.ts`、`slash`、`session-title.ts`、`references.ts` | 唯一允许 React 与 Ink 的域；不得导入 `transport/` 或任何 feature |
 | `cli/` | 全部 | 组装入口，只通过 `ui/mount.tsx` 渲染 |
@@ -232,7 +232,7 @@ C4Component
 
 `Controller` 是唯一的状态发布者：`State` 通过 `update(patch)` 整体替换并递增 `version`，React 的 `useSyncExternalStore(controller.subscribe, controller.snapshot)` 读取它。`State` 契约位于 `src/state.ts`：它**只组合**，装 `operation`（应用自己的 busy/error 信封）、各 feature 的快照与 `session`；每个 feature 自己持有可变状态并出 `snapshot()`，写入前先由 `transport/events.ts` 把 wire 帧归一化。`pending`（待答问题/审批）由 `SessionController` 的 `interactions` 映射在每次 `update` 时按当前会话推导并返回 `PendingInteraction` 判别联合，因此**可见对话框与帧到达顺序无关**。选择器世代同样由 store 持有，会话与 catalog 域据此丢弃跨越切换的在途响应。
 
-**事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；输入框、`@` 菜单高亮、面板可见性与阅读视图（滚动、折叠、实时折叠模式）都是 `ui/app.tsx` 的组件状态，切换会话由一处 effect 清理；`pinned` 是 `SessionController` 的私有标志。**UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。**扩展是数据而非新分支**：`ui/app.tsx` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、保留键与 `keepFor` 关闭规则，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／"提交前关闭其它面板"全部由它派生，加一个面板只写一行加自己的渲染与分发；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃），组合根不知道是哪个命令；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
+**事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；输入框、`@` 菜单高亮、面板可见性与阅读视图（滚动、折叠、实时折叠模式）都是 `ui/app.tsx` 的组件状态，切换会话由一处 effect 清理；`pinned` 是 `SessionController` 的私有标志。**UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。**扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回纯表现的 `CommandIntent`（打开哪个面板、显示什么提示、回到实时、折叠哪条、是否进入 copy mode…），`ui/app.tsx` 只用一个 reducer 解释这些动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (submission.kind)`。UI 侧的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、保留键与关闭方式，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
 阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话；状态另用 `statusPaused = copyMode || (screen === 'chat' && dialogOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 对话框与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
@@ -749,7 +749,7 @@ dsht [options] [list workspaces|list sessions]
 
 补全规则：仅当草稿以 `/` 开头且不含空格时生效；唯一匹配补全为 `命令 + 空格`，多匹配则扩展到公共前缀。
 
-路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `chatOnly` 与 `blockedByPending`，`ui/routing.ts` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。
+路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `chatOnly` 与 `blockedByPending`，`ui/routing.ts` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。命令的执行策略集中在 `controller/commands.ts`：`runCommand(controller, command, port)` 调用应用动作并返回 `CommandIntent`，其中 `port.run` 借出 UI 的"可取消操作 + 加载标签"机制；UI 只解释意图，因此新增命令不需要改动 `ui/`，除非它引入新的表现层动词或新面板。
 
 面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由 `surfaces` 的 `keepFor` 决定）。
 
@@ -1705,7 +1705,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | --- | --- | --- |
 | `controller/connection.ts` | 159 | `ConnectionOptions`、`ConnectionListener`、`ConnectionController` |
 | `controller/controller.ts` | 804 | `Actions`、`Queries`、`Controller` |
-| `controller/index.ts` | 6 | `Controller`、`ConnectionController` |
+| `controller/commands.ts` | 160 | `RunnableCommand`、`CommandPort`、`runCommand`、`removalIntent` |
+| `controller/index.ts` | 8 | `Controller`、`ConnectionController`、`runCommand`、`removalIntent` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
 | `controller/prompts.ts` | 154 | `SavedPrompt`、`MAX_PROMPT_CHARS`、`MAX_SAVED_PROMPTS`、`PromptStore` |
@@ -1714,7 +1715,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
-| `ui/app.tsx` | 944 | `App` |
+| `ui/app.tsx` | 851 | `App` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/history-view.tsx` | 23 | `HistoryViewport` |
 | `ui/chat/navigation-model.ts` | 133 | `SessionState`、`sessionState`、`SESSION_MARKERS`、`STATE_LABELS`、`activityAge`、`sessionStatus`、`ROLLUP_STATES`、`RollupState`、`RollupCount`、`RollupStyle`、`workspaceCounts`、`workspaceSegments` |
@@ -1746,14 +1747,14 @@ CI 工作流 `.github/workflows/publish.yml`：
 C4Component
   title 源码索引（按业务域）
 
-  Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "7 文件 191 行")
+  Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "7 文件 244 行")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "4 文件 177 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "6 文件 524 行")
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2924 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 852 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, prompts, index", "6 文件 1287 行")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2662 行")
+  Component(controller, "controller/", "controller, commands, connection, memory-log, perf-measures, prompts, index", "7 文件 1449 行")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2569 行")
   Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 137 行")
   Component(shell, "shell/", "controller, runner, index", "3 文件 276 行")
   Component(slash, "slash/", "registry, parse, index", "3 文件 257 行")

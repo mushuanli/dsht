@@ -167,3 +167,12 @@ test('the dependency check rejects each forbidden direction', () => {
   assert.deepEqual(violations([{ path: 'storage/files.ts', source: "import { readFile } from 'node:fs/promises';\nimport { join } from 'node:path';" }]), []);
   assert.deepEqual(violations([{ path: 'shell/runner.ts', source: "import { spawn } from 'node:child_process';" }]), []);
 });
+
+test('the composition root applies view intents instead of dispatching commands', () => {
+  const source = readFileSync(join(SRC, 'ui/app.tsx'), 'utf8');
+  // Only the two UI modes are decided in the root; every parsed command goes to the application.
+  const kinds = [...source.matchAll(/submission\.kind === '([^']+)'/g)].map(match => match[1]);
+  assert.deepEqual([...new Set(kinds)].sort(), ['ignore', 'reference'], 'the root must decide only UI modes');
+  assert.ok(source.includes('runCommand(controller, submission'), 'the root must delegate command effects to runCommand');
+  assert.ok(!/switch \(submission\.kind\)/.test(source), 'the root must not dispatch command kinds itself');
+});

@@ -14,5 +14,58 @@ export type { ModelState, PanelState } from './session/info.ts';
 export type { CostTotal, Coverage } from './cost/index.ts';
 export type { ShellBlock } from './shell/index.ts';
 
+import type { ModelState, PanelState } from './session/info.ts';
+import type { RemovalTarget } from './session/types.ts';
+
 /** One user-saved shortcut prompt; the client owns the list, no session or host does. */
 export interface SavedPrompt { id: string; text: string }
+
+/** One panel-like surface the reader can see; the application names it, the UI renders it. */
+export type PanelName = 'help' | 'cost' | 'status' | 'queue' | 'prompts'
+  | 'thoughts' | 'history' | 'search' | 'model' | 'removal';
+
+/** The presentational outcome of one submitted line.
+ *
+ * The application decides which intent a command produces; the UI only interprets these
+ * presentational verbs, so it never learns which command ran or what it means. Adding a command
+ * therefore needs no UI change unless it needs a genuinely new verb here.
+ */
+export interface CommandIntent {
+  /** Transient line shown above the composer. */
+  notice?: string;
+  /** Failure line; the composer keeps its draft. */
+  error?: string;
+  /** Close every panel except the one this intent opens or toggles. */
+  closePanels?: boolean;
+  /** Open one panel with no payload; its rows come from the record or queries. */
+  open?: PanelName;
+  /** Toggle one of the read-only panels (`help`, `cost`, `status`). */
+  toggle?: PanelName;
+  /** Close one panel. */
+  close?: PanelName;
+  /** Payload that opens its own panel. */
+  history?: PanelState['history'];
+  search?: PanelState['search'];
+  model?: ModelState;
+  removal?: RemovalTarget;
+  /** Release a detached history window and return to the live end. */
+  live?: boolean;
+  /** Drop the reading protection that keeps history pinned. */
+  pinLive?: boolean;
+  /** Drop every reasoning fold. */
+  resetFolds?: boolean;
+  /** Toggle one folded reasoning block, jumping to it when it opens. */
+  toggleFold?: number;
+  /** Toggle the live reasoning fold between one row and full. */
+  toggleLiveReasoning?: boolean;
+  /** Absolute scroll position applied after the effect. */
+  scroll?: number;
+  /** Scroll relative to the current position, applied after the effect. */
+  scrollBy?: number;
+  /** Enter copy mode. */
+  copy?: boolean;
+  /** Exit the client. */
+  quit?: boolean;
+  /** Free text that answers the pending question. */
+  answer?: string;
+}
