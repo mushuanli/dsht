@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCommand } from '../../src/slash/parse.ts';
-import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, suggestedCommands } from '../../src/slash/registry.ts';
+import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, commandMatches, resolveCommand, suggestedCommands } from '../../src/slash/registry.ts';
 import { routeEnter, type RouteFacts } from '../../src/ui/routing.ts';
 
 const CHAT: RouteFacts = { line: '', referenceOpen: false, copyMode: false, pending: false, question: false, screen: 'chat' };
@@ -85,4 +85,40 @@ test('/handoff takes no arguments and waits for a pending answer', () => {
   const hint = COMMAND_HINTS.find(item => item.command === '/handoff');
   assert.ok(hint && hint.description.length > 0);
   assert.deepEqual(suggestedCommands('/han'), ['/handoff']);
+});
+
+test('a unique command prefix runs without being typed in full', () => {
+  // The token resolves to the one command it names, and the arguments are kept.
+  assert.deepEqual(parseCommand('/pro Add tests'), { kind: 'savePrompt', text: 'Add tests' });
+  assert.deepEqual(parseCommand('/pro'), { kind: 'prompts' });
+  assert.deepEqual(parseCommand('/hi needle'), { kind: 'history', query: 'needle' });
+  assert.deepEqual(parseCommand('/th'), { kind: 'think', target: '' });
+  assert.deepEqual(parseCommand('/mod x y'), { kind: 'models', args: ['x', 'y'] });
+  // An exact command is untouched, and an unknown token still fails.
+  assert.deepEqual(parseCommand('/history'), { kind: 'history', query: '' });
+  assert.deepEqual(parseCommand('/promptx'), { kind: 'error', message: 'Unknown command. Use /help.' });
+});
+
+test('an ambiguous prefix names its candidates instead of running one', () => {
+  assert.deepEqual(parseCommand('/co'), { kind: 'error', message: 'Ambiguous command. Matches: /copy /compact /coredump /cost' });
+  assert.deepEqual(parseCommand('/q'), { kind: 'error', message: 'Ambiguous command. Matches: /queue /quit' });
+  // A token that matches every command is not worth listing.
+  assert.deepEqual(parseCommand('/'), { kind: 'error', message: 'Unknown command. Use /help.' });
+});
+
+test('commands that must be typed in full refuse a prefix', () => {
+  assert.deepEqual(parseCommand('/quit'), { kind: 'quit' });
+  assert.deepEqual(parseCommand('/qui'), { kind: 'error', message: 'Type the full command: /quit' });
+  assert.deepEqual(parseCommand('/a'), { kind: 'error', message: 'Type the full command: /allow' });
+  assert.deepEqual(parseCommand('/de'), { kind: 'error', message: 'Type the full command: /deny' });
+});
+
+test('the resolver reports one match, none, or the exact-only refusal', () => {
+  assert.equal(resolveCommand('/prompt'), '/prompt');
+  assert.equal(resolveCommand('/pro'), '/prompt');
+  assert.equal(resolveCommand('/co'), undefined);
+  assert.equal(resolveCommand('/qui'), undefined);
+  assert.equal(resolveCommand('/nope'), undefined);
+  assert.deepEqual(commandMatches('/ex'), ['/export', '/export-html']);
+  assert.deepEqual(commandMatches('/nope'), []);
 });

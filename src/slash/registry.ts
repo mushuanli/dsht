@@ -9,6 +9,8 @@ export interface CommandHint {
   usage?: string;
   /** One-line action description shown by `/help`. */
   description: string;
+  /** Must be typed in full: a unique prefix of it is completed, never executed on Enter. */
+  exactOnly?: boolean;
 }
 
 /** Command discovery catalog shared by Tab completion and the `/help` panel. */
@@ -36,13 +38,13 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/export', usage: '[local.zip]', description: 'Save the session log ZIP to a new local file' },
   { command: '/export-html', usage: '[local.html]', description: 'Save loaded conversation with diagrams and math as offline HTML' },
   { command: '/coredump', usage: '[tag]', description: 'Write a V8 heap snapshot for memory diagnosis' },
-  { command: '/allow', description: 'Approve the pending request once' },
-  { command: '/deny', description: 'Reject the pending request' },
+  { command: '/allow', description: 'Approve the pending request once', exactOnly: true },
+  { command: '/deny', description: 'Reject the pending request', exactOnly: true },
   { command: '/status', description: 'Show full session status details' },
   { command: '/cost', description: 'Show cost estimates and refresh usage' },
   { command: '/think', usage: '[seq or live]', description: 'Inspect reasoning with user prompt summaries' },
   { command: '/help', description: 'Show this command list' },
-  { command: '/quit', description: 'Exit dsht' },
+  { command: '/quit', description: 'Exit dsht', exactOnly: true },
 ];
 
 /** Command names only, in catalog order. */
@@ -53,6 +55,32 @@ export const COMMAND_LABELS = COMMAND_HINTS.map(hint => hint.usage === undefined
 
 /** Widest command column, so descriptions start on one column. */
 export const COMMAND_LABEL_WIDTH = Math.max(...COMMAND_LABELS.map(label => label.length)) + 2;
+
+/** Commands that may only run when typed in full; a prefix of one is never executed on Enter. */
+const EXACT_ONLY = new Set(COMMAND_HINTS.filter(hint => hint.exactOnly).map(hint => hint.command));
+
+/** Commands whose name starts with one token, in catalog order.
+ * @param token - First word of a draft, such as `/pro`.
+ * @returns Matching command names, empty when the token names nothing.
+ */
+export function commandMatches(token: string): string[] {
+  return COMMANDS.filter(command => command.startsWith(token));
+}
+
+/** Resolve one typed command token to the command it names.
+ *
+ * An exact command resolves to itself. A prefix that matches exactly one command resolves to that
+ * command too, so Enter can run it without typing the whole name; an unknown or ambiguous token,
+ * and any prefix of an `exactOnly` command, resolves to undefined so the draft stays as typed.
+ * @param token - First word of a draft, without its arguments.
+ * @returns The command name, or undefined when the token does not name one command.
+ */
+export function resolveCommand(token: string): string | undefined {
+  if (COMMANDS.includes(token)) return token;
+  const matches = commandMatches(token);
+  const only = matches.length === 1 ? matches[0] : undefined;
+  return only !== undefined && !EXACT_ONLY.has(only) ? only : undefined;
+}
 
 /** Where one parsed command may run, and what it must wait for. */
 export interface CommandPolicy {

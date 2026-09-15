@@ -747,7 +747,7 @@ dsht [options] [list workspaces|list sessions]
 | `/help` | — | 列出全部命令 |
 | `/quit` | — | 退出 dsht |
 
-补全规则：仅当草稿以 `/` 开头且不含空格时生效；唯一匹配补全为 `命令 + 空格`，多匹配则扩展到公共前缀。
+补全规则：仅当草稿以 `/` 开头且不含空格时生效；唯一匹配补全为 `命令 + 空格`，多匹配则扩展到公共前缀。执行规则：`parseCommand` 先用 `resolveCommand` 解析首词——完整命令名保持原样；唯一前缀解析为该命令（参数保留），因此 `/pro Add tests` 就是 `/prompt Add tests`；无匹配或匹配多条时保留原草稿，并由 `unresolved` 返回错误：恰好一条匹配说明它是 `exactOnly` 命令（`/quit`、`/allow`、`/deny`），提示"Type the full command"；2–6 条匹配列出候选（`Ambiguous command. Matches: …`）；其余（含裸 `/`）维持 `Unknown command. Use /help.`。
 
 路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `chatOnly` 与 `blockedByPending`，`ui/routing.ts` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。命令的执行策略集中在 `controller/commands.ts`：`runCommand(controller, command, port)` 调用应用动作并返回 `CommandIntent`，其中 `port.run` 借出 UI 的"可取消操作 + 加载标签"机制；UI 只解释意图，因此新增命令不需要改动 `ui/`，除非它引入新的表现层动词或新面板。
 
@@ -1695,9 +1695,9 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
-| `slash/index.ts` | 8 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`COMMANDS`、`COMMAND_POLICY`、`commonPrefix`、`completeCommand`、`suggestedCommands`、`parseCommand` |
-| `slash/parse.ts` | 131 | `Command`、`parseCommand` |
-| `slash/registry.ts` | 118 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
+| `slash/index.ts` | 8 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`COMMANDS`、`COMMAND_POLICY`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands`、`parseCommand` |
+| `slash/parse.ts` | 166 | `Command`、`parseCommand` |
+| `slash/registry.ts` | 146 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commandMatches`、`commonPrefix`、`completeCommand`、`resolveCommand`、`suggestedCommands` |
 
 **controller**
 
@@ -1757,7 +1757,7 @@ C4Component
   Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2569 行")
   Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 137 行")
   Component(shell, "shell/", "controller, runner, index", "3 文件 276 行")
-  Component(slash, "slash/", "registry, parse, index", "3 文件 257 行")
+  Component(slash, "slash/", "registry, parse, index", "3 文件 320 行")
 
   Rel(root, transport, "公开门面")
   Rel(ui, slash, "命令语法")

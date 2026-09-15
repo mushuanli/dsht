@@ -4,6 +4,7 @@
  * application, so "what the line means" stays separate from "what Enter currently does" (which is
  * `ui/routing.ts`) and from "may this run now" (which is the application's dispatch).
  */
+import { commandMatches, resolveCommand } from './registry.ts';
 
 /** One parsed command; every side effect stays with the caller. */
 export type Command =
@@ -54,12 +55,16 @@ function unquote(value: string): string { return value.replace(/^(["'])(.*)\1$/,
  * The order of the checks is the command precedence: the in-place panels, navigation and removal,
  * then the session and host commands, then a plain prompt. Facts about the current screen or a
  * pending interaction are deliberately absent: they decide whether a command may run, not what it is.
+ *
+ * A leading token that names exactly one command is resolved first, so `/pro Add tests` runs
+ * `/prompt Add tests`; an ambiguous token is left alone and reported with its candidates.
  * @param line - Draft exactly as submitted.
  * @returns The parsed command.
  */
 export function parseCommand(line: string): Command {
-  const value = line.trim();
-  if (!value) return { kind: 'ignore' };
+  const raw = line.trim();
+  if (!raw) return { kind: 'ignore' };
+  const value = resolveToken(raw);
   // `!` runs on the machine this client is on; it never reaches the host or the model.
   if (value.startsWith('!')) {
     const command = value.slice(1).trim();
@@ -126,6 +131,36 @@ export function parseCommand(line: string): Command {
     const tag = unquote(value.slice(9).trim());
     return { kind: 'coredump', ...(tag ? { tag } : {}) };
   }
-  if (value.startsWith('/')) return { kind: 'error', message: 'Unknown command. Use /help.' };
+  if (value.startsWith('/')) return unresolved(value);
   return { kind: 'prompt', text: value };
+}
+
+/** First word of a trimmed draft, so arguments are never part of a command name. */
+function commandToken(value: string): string {
+  const space = value.search(/\s/);
+  return space === -1 ? value : value.slice(0, space);
+}
+
+/** Resolve a uniquely-named command prefix to the command itself, keeping the arguments.
+ * @param value - Trimmed draft.
+ * @returns The draft with its command token resolved when it names exactly one command.
+ */
+function resolveToken(value: string): string {
+  if (!value.startsWith('/')) return value;
+  const token = commandToken(value);
+  const resolved = resolveCommand(token);
+  return resolved === undefined || resolved === token ? value : resolved + value.slice(token.length);
+}
+
+/** Report a leading token that names no single command, naming what it could mean.
+ * @param value - Trimmed draft that starts with `/`.
+ * @returns The error command.
+ */
+function unresolved(value: string): Command {
+  const matches = commandMatches(commandToken(value));
+  // Exactly one match here is an `exactOnly` command that refused prefix resolution.
+  if (matches.length === 1) return { kind: 'error', message: `Type the full command: ${matches[0]}` };
+  // A short candidate list helps more than a generic message; a bare `/` matches every command.
+  if (matches.length > 1 && matches.length <= 6) return { kind: 'error', message: `Ambiguous command. Matches: ${matches.join(' ')}` };
+  return { kind: 'error', message: 'Unknown command. Use /help.' };
 }
