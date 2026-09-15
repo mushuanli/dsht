@@ -31,7 +31,7 @@ function assertInsideComposer(frame: string, label: string) {
 
 test('startup status refreshes after connection and reconnect while copy mode retains its frame', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   assert.match(ui.lastFrame()!, /Connecting…/);
@@ -69,7 +69,7 @@ test('startup status refreshes after connection and reconnect while copy mode re
 test('the workspace picker offers this client directory, and Esc leaves the typed-path screen', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const here = '/local/checkout';
-  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined, undefined, undefined, undefined, here);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', localDirectory: here });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -102,8 +102,7 @@ test('the workspace picker offers this client directory, and Esc leaves the type
 test('starting inside a registered workspace directory skips the workspace picker', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   // The ninth argument is the directory this client runs in; the fixture registers /host/project.
-  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined,
-    undefined, undefined, undefined, '/host/project');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', localDirectory: '/host/project' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -116,8 +115,7 @@ test('starting inside a registered workspace directory skips the workspace picke
 
 test('an unrelated directory leaves the workspace picker in place and matching is by segment', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined,
-    undefined, undefined, undefined, '/srv/elsewhere');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', localDirectory: '/srv/elsewhere' });
   t.after(() => controller.stop()); controller.start();
   await until(() => controller.state.online && controller.state.workspaces.length > 0);
   assert.equal(controller.state.screen, 'workspaces');
@@ -128,7 +126,7 @@ test('an unrelated directory leaves the workspace picker in place and matching i
 
 test('startup requires workspace and session selection before showing the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token' });
   const ui = render(<App controller={controller} />);
   const press = (value: string) => pressKey(ui, value);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
@@ -219,7 +217,7 @@ async function pressKey(ui: ReturnType<typeof render>, value: string) {
 
 test('obsolete reference results cannot replace a newer draft and lookup errors stay in the menu', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const original = controller.queries.references.bind(controller.queries);
   let oldSignal: AbortSignal | undefined;
   let release: (() => void) | undefined;
@@ -253,7 +251,7 @@ test('obsolete reference results cannot replace a newer draft and lookup errors 
 
 test('Ctrl+C clears a draft before stopping the current agent, then exits when idle', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   let exited = false;
   function MountedApp() {
     useEffect(() => () => { exited = true; }, []);
@@ -291,7 +289,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
     contextPressure: { projectedTokens: 25, contextWindow: 100 },
     tokenUsage: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 300, cacheWriteTokens: 400 },
   } } }, queues: { s1: [1, 2].map(id => ({ id: String(id), placement: 'steering', message: { id: String(id), content: [{ type: 'text', text: `Pending ${id}` }] } })) }, jobs: { s1: [{ status: 'running' }] } };
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -343,7 +341,7 @@ test('status bar follows host metrics, elapsed working time, cancellation and ge
 test('hosts without a control stream show unknown metrics and refresh catalog defaults on settings changes', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.controlAvailable = false;
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -365,7 +363,7 @@ test('hosts without a control stream show unknown metrics and refresh catalog de
 
 test('terminal control keys edit the submitted prompt and keep reference completion at the draft end', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -399,7 +397,7 @@ test('terminal control keys edit the submitted prompt and keep reference complet
 
 test('DEL and BS erase backward while CSI Delete erases forward', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -424,7 +422,7 @@ test('DEL and BS erase backward while CSI Delete erases forward', async t => {
 
 test('typing reuses the transcript projection but a new host event invalidates it', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -451,7 +449,7 @@ test('mouse scrolling loads history and slash search selects a matching record',
   }));
   fixture.followSnapshot = { type: 'snapshot', cursor: 39, hasMore: true, header: { id: 's1' }, records: records(20, 40) };
   fixture.onPage = async () => ({ records: records(0, 20), hasMore: false });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -495,7 +493,7 @@ test('a new message draft returns the view to the live end, but a slash command 
       data: { content: [{ type: 'text', text: `history-record-${index}` }] } },
   }));
   fixture.followSnapshot = { type: 'snapshot', cursor: 39, hasMore: false, header: { id: 's1' }, records };
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -522,7 +520,7 @@ test('a new message draft returns the view to the live end, but a slash command 
 
 test('a status panel that fits leaves the history arrows with the composer', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -539,7 +537,7 @@ test('a status panel that fits leaves the history arrows with the composer', asy
 
 test('a pasted multi-line snippet keeps its line breaks and sends its source text', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -560,7 +558,7 @@ test('a pasted multi-line snippet keeps its line breaks and sends its source tex
 
 test('a tall pasted block folds to a summary row while the full text is still sent', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -588,7 +586,7 @@ test('search loads old messages, opens cross-session matches and cancels local p
   fixture.onPage = async () => ({ records: [
     { type: 'event', event: { seq: 0, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'needle in old history' }] } } },
   ], hasMore: false });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   let release: (() => void) | undefined;
   t.after(async () => { release?.(); ui.unmount(); ui.cleanup(); await controller.stop(); });
@@ -628,7 +626,7 @@ test('/cost displays cached session and daily estimates without submitting a pro
   const recording = (await readFile(new URL('../fixtures/workspace-edit.session.jsonl', import.meta.url), 'utf8')).trim().split('\n').map(line => object(JSON.parse(line)));
   await ledger.replace('s1', recording.length - 2, costRecords(recording.slice(1).map((event, seq) => ({ type: 'event', event: { ...event, seq } }))));
   // Retain the recorded usage while this test exercises the terminal command.
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   controller.actions.refreshCosts = async () => false;
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
@@ -644,7 +642,7 @@ test('/cost displays cached session and daily estimates without submitting a pro
 
 test('header follows session titles and Esc cancels despite a stale idle flag, retaining the acknowledgement', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   let release: (() => void) | undefined;
   fixture.onCancel = () => new Promise<void>(resolve => { release = resolve; });
   const ui = render(<App controller={controller} />);
@@ -679,7 +677,7 @@ test('header follows session titles and Esc cancels despite a stale idle flag, r
 
 test('quitting cancels the selected running turn before the client closes', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   let exited = false;
   function MountedApp() {
     useEffect(() => () => { exited = true; }, []);
@@ -701,7 +699,7 @@ test('quitting cancels the selected running turn before the client closes', asyn
 
 test('closing an idle client sends no cancellation', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   controller.start();
   await until(() => controller.queries.record.ready);
   await controller.shutdown();
@@ -710,7 +708,7 @@ test('closing an idle client sends no cancellation', async t => {
 
 test('/think lists prompt summaries, expands the selected thought, and supports folding it again', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -734,7 +732,7 @@ test('/think lists prompt summaries, expands the selected thought, and supports 
 
 test('a slash-command panel stays open for reading and closes on another command', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} panelLifetimeMs={150} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   Object.defineProperty(ui.stdout, 'rows', { value: 60, configurable: true });
@@ -761,7 +759,7 @@ test('a slash-command panel stays open for reading and closes on another command
 
 test('Esc closes an open command panel and keeps the draft beside it', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -778,7 +776,7 @@ test('Esc closes an open command panel and keeps the draft beside it', async t =
 
 test('/history expires on its own and closes immediately on Esc', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} panelLifetimeMs={150} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -798,7 +796,7 @@ test('cost coverage marks the subtotals it cannot confirm instead of rewriting t
   const { CostLedger, costRecords } = await import('../../src/cost/index.ts');
   const fixture = await host(); t.after(() => fixture.close());
   const ledger = new CostLedger();
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   controller.state = { ...controller.state, sessionId: 's1', online: true };
   const bar = (expanded = false) => {
     const ui = render(<StatusBar source={statusSource(controller)} expanded={expanded} />);
@@ -829,7 +827,7 @@ test('cost coverage marks the subtotals it cannot confirm instead of rewriting t
 });
 
 test('the bar names the tool that is running, including while the clock is paused', async t => {
-  const controller = new Controller('http://x1:4096', undefined);
+  const controller = new Controller({ base: 'http://x1:4096' });
   const now = Date.now();
   controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
     sessions: [{ sessionId: 's1', running: true }] };
@@ -874,7 +872,7 @@ test('an idle bar re-reads the clock so the day subtotal rolls over at midnight'
   await ledger.replace('s1', 1, costRecords([{ type: 'event', event: { seq: 0, time: Date.parse('2026-09-10T23:00:00+08:00'),
     type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
       message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } } }]), Date.parse('2026-09-10T23:59:30+08:00'));
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   controller.state = { ...controller.state, sessionId: 's1', online: true };
   // A model makes the row wide enough to carry the day total beside the session slice.
   controller.queries.telemetry.accept(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
@@ -892,7 +890,7 @@ test('an idle bar re-reads the clock so the day subtotal rolls over at midnight'
 });
 
 test('the pickers show each session state and a workspace rollup from the list summary', async t => {
-  const controller = new Controller('http://x1:4096', undefined);
+  const controller = new Controller({ base: 'http://x1:4096' });
   const now = Date.now();
   controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
     workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2', 's3'] }],
@@ -920,7 +918,7 @@ test('the pickers show each session state and a workspace rollup from the list s
 });
 
 test('the bar names an answer the user still owes ahead of the running clock', () => {
-  const controller = new Controller('http://x1:4096', undefined);
+  const controller = new Controller({ base: 'http://x1:4096' });
   controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
     sessions: [{ sessionId: 's1', running: true }],
     pending: [{ kind: 'approval', eventId: 'a1', sessionId: 's1', description: 'Confirm' }] };
@@ -933,7 +931,7 @@ test('the bar names an answer the user still owes ahead of the running clock', (
 });
 
 test('a narrow workspace picker keeps the markers and spells them out once', async t => {
-  const controller = new Controller('http://x1:4096', undefined);
+  const controller = new Controller({ base: 'http://x1:4096' });
   controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
     workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2'] }],
     sessions: [{ sessionId: 's1', running: true }, { sessionId: 's2', blank: true }] };
@@ -951,7 +949,7 @@ test('Tab completes a slash command and stops at an ambiguous shared prefix', as
   assert.equal(commonPrefix(['/ws', '/wsearch']), '/ws');
   assert.equal(commonPrefix(['/help']), '/help');
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -970,7 +968,7 @@ test('title and status fit terminal widths and keep model alignment when working
     if (previous) Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', previous);
     else Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   });
-  const controller = new Controller('http://x1:4096', undefined);
+  const controller = new Controller({ base: 'http://x1:4096' });
   controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
     sessions: [{ sessionId: 's1', running: true }], workspaceId: 'w1',
     workspaces: [{ workspaceId: 'w1', title: 'Workspace 示例', path: '/workspace' }] };
@@ -1015,7 +1013,7 @@ test('/think loads older summaries on demand and can open reasoning from the act
     { type: 'event', event: { seq: 0, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Older prompt' }] } } },
     { type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'reasoning', text: 'Older thought detail' }] } } } },
   ] });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1044,7 +1042,7 @@ test('/think loads older summaries on demand and can open reasoning from the act
 
 test('long conversations keep the header visible and show keyboard help only when requested', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1070,7 +1068,7 @@ test('search opens an isolated old page and /latest returns to new live messages
   fixture.onPage = async (): Promise<ObjectValue> => ({ records: [
     { type: 'event', event: { seq: 0, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'needle from an older page' }] } } },
   ], hasMore: false });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1095,7 +1093,7 @@ test('/model uses the host catalog and exact model/effort selection API', async 
   fixture.modelCatalog = { routableProviders: ['route'], failures: [{ id: 'broken', name: 'Broken provider', message: 'offline' }], groups: [
     { id: 'route', name: 'Provider', models: [{ id: 'model-x', name: 'Model X', reasoning: { defaultEffort: 'high', efforts: [{ id: 'high', name: 'High' }] } }] },
   ] };
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -1145,7 +1143,7 @@ test('/model uses the host catalog and exact model/effort selection API', async 
 
 test('workspace removal and session archival require confirmation and preserve host history', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1199,7 +1197,7 @@ test('empty sessions archive without confirmation after a fresh blank-state chec
   const fixture = await host(); t.after(() => fixture.close());
   fixture.blank = true;
   fixture.followSnapshot = { type: 'snapshot', cursor: 0, hasMore: false, header: { id: 's1' }, records: [], assistantStream: { revision: 0 } };
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1221,7 +1219,7 @@ test('empty sessions archive without confirmation after a fresh blank-state chec
 
 test('copy mode freezes streaming and clocks; dialogs freeze their background until closed', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1255,7 +1253,7 @@ test('question options support numbers, arrows, multi-selection and numeric cust
     { id: 'many', question: 'Choose features', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] },
     { id: 'custom', question: 'Choose a count', options: [{ label: 'Default' }] },
   ] } }];
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => ui.lastFrame()?.includes('Choose a target') === true);
@@ -1297,7 +1295,7 @@ test('Escape dismisses the whole question set as a rejection, discarding partial
     { id: 'one', header: 'Destination', question: 'Choose a target', options: [{ label: 'First' }, { label: 'Second' }] },
     { id: 'two', question: 'And then?', options: [{ label: 'Third' }] },
   ] } }];
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => ui.lastFrame()?.includes('Choose a target') === true);
@@ -1324,7 +1322,7 @@ test('Escape steps out of the free-text row before it dismisses the question', a
   fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'two-step', agentId: 's1', request: { questions: [
     { id: 'only', question: 'Pick one', options: [{ label: 'Default' }] },
   ] } }];
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => ui.lastFrame()?.includes('Pick one') === true);
@@ -1347,7 +1345,7 @@ test('Escape steps out of the free-text row before it dismisses the question', a
 test('approval Escape still keeps the request pending', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.replayInteractions = [{ type: 'waterfall', event: 'approval/request', eventId: 'keep-me', agentId: 's1', request: { reason: 'Needs a decision' } }];
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => ui.lastFrame()?.includes('Needs a decision') === true);
@@ -1371,7 +1369,7 @@ test('advancing questions preserves every option label beside descriptions in a 
       { label: 'Keep local', description: 'Keep the commit local until you confirm.' },
     ] },
   ] } }];
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   Object.defineProperty(ui.stdout, 'columns', { value: 180, configurable: true });
@@ -1398,7 +1396,7 @@ test('advancing questions preserves every option label beside descriptions in a 
 
 test('composer recalls submitted prompts and commands while preserving its unsent draft', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1430,7 +1428,7 @@ test('recall reaches prompts from before the seeded window with no extra request
   }));
   fixture.followSnapshot = { type: 'snapshot', cursor: 3, hasMore: true, header: { id: 's1' }, records: prompts(2, 4) };
   fixture.onPage = async () => ({ records: prompts(0, 2), hasMore: false });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1460,28 +1458,31 @@ test('recall recovers prompts a scroll already loaded without paging again', asy
   }));
   fixture.followSnapshot = { type: 'snapshot', cursor: 3, hasMore: true, header: { id: 's1' }, records: prompts(2, 4) };
   fixture.onPage = async () => ({ records: prompts(0, 2), hasMore: false });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
   // Scrolling to the top loads the page before the window; those prompts are now in memory.
   for (let step = 0; step < 20; step++) await pressKey(ui, '\x1b[<64;3;4M');
   await until(() => !controller.queries.record.hasMore && !controller.state.operation.busy);
-  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, 1);
+  // Opening the session also starts a background prompt backfill, which may consume this same page,
+  // so the total is one or two rather than exactly one; twenty wheel events must not fetch twenty.
+  const pagesAfterScroll = fixture.calls.filter(call => call.method === 'session/page').length;
+  assert.ok(pagesAfterScroll <= 2, `expected at most the one older page, got ${pagesAfterScroll}`);
   await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-3/);
   await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-2/);
   // prompt-2 is the recall index's oldest entry, but prompt-1 is already loaded: refill, do not page.
   await pressKey(ui, '\u001b[A');
   await until(() => ui.lastFrame()?.includes('❯ prompt-1') === true);
-  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, 1);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, pagesAfterScroll);
   await pressKey(ui, '\u001b[A'); assert.match(ui.lastFrame()!, /❯ prompt-0/);
-  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, 1);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, pagesAfterScroll);
 });
 
 
 test('a draft belongs to its session and does not follow into the next one', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1502,7 +1503,7 @@ test('switching sessions releases the reading view, including a detached history
   }));
   fixture.followSnapshot = { type: 'snapshot', cursor: 39, hasMore: true, header: { id: 's1' }, records: records(20, 40) };
   fixture.onPage = async () => ({ records: records(0, 20), hasMore: false });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -1526,7 +1527,7 @@ test('switching sessions releases the reading view, including a detached history
 
 test('answers and menu highlights belong to their session', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1549,7 +1550,7 @@ test('answers and menu highlights belong to their session', async t => {
 
 test('the record belongs to its session and the previous one is disposed', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1564,7 +1565,7 @@ test('the record belongs to its session and the previous one is disposed', async
 
 test('open panels belong to their session and clear on a switch', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1591,7 +1592,7 @@ test('opening a session folds every user prompt from the whole history', async t
   const pages = [{ records: records(4, 6), hasMore: true }, { records: records(2, 4), hasMore: true }, { records: records(0, 2), hasMore: false }];
   let page = 0;
   fixture.onPage = async () => pages[Math.min(page++, pages.length - 1)]!;
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -1612,7 +1613,7 @@ test('opening a session folds every user prompt from the whole history', async t
 
 test('a local ! command runs on this machine and prints inline', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1627,7 +1628,7 @@ test('a local ! command runs on this machine and prints inline', async t => {
 
 test('a local ! block stays where it happened instead of pinning to the bottom', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1645,7 +1646,7 @@ test('a local ! block stays where it happened instead of pinning to the bottom',
 
 test('Esc stops a running local command without interrupting the agent', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1660,8 +1661,7 @@ test('Esc stops a running local command without interrupting the agent', async t
 
 test('shell commands can be turned off for this client', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined,
-    undefined, undefined, undefined, false);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', shellEnabled: false });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1681,7 +1681,7 @@ test('a cost scan warms the prompt cache, so opening that session does not re-wa
   let page = 0;
   fixture.onPage = async () => pages[Math.min(page++, pages.length - 1)]!;
   // No initial session: the billing scan reads history first, then the session is opened by hand.
-  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined, new CostLedger());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', costs: new CostLedger() });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
@@ -1705,7 +1705,7 @@ test('restored session prompts are available before any new submission', async t
     { type: 'event', event: { seq: 2, type: 'user/message', surfaceOp: 'append', data: {
       source: { kind: 'system' }, content: [{ type: 'text', text: 'injected context' }] } } },
   ] };
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1720,7 +1720,7 @@ test('restored session prompts are available before any new submission', async t
 
 test('left click freezes the display for native selection until explicit resume', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1747,7 +1747,7 @@ test('left click freezes the display for native selection until explicit resume'
 
 test('/compact displays host progress and outcomes without sending a prompt', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1770,7 +1770,7 @@ test('/compact displays host progress and outcomes without sending a prompt', as
 
 test('Esc cancels the compact request and retains the command draft', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   let complete!: (value: ObjectValue) => void;
   fixture.onCommand = () => new Promise(resolve => { complete = resolve; });
@@ -1787,7 +1787,7 @@ test('Esc cancels the compact request and retains the command draft', async t =>
 
 test('narrow terminals fold streaming reasoning until /think live opens it', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   Object.defineProperty(ui.stdout, 'columns', { value: 40, configurable: true });
@@ -1806,7 +1806,7 @@ test('narrow terminals fold streaming reasoning until /think live opens it', asy
 test('host slash commands execute directly and preserve error drafts', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.onCommand = async line => ({ commandId: 'command-1', result: { kind: 'success', text: `Completed ${line}` } });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1827,7 +1827,7 @@ test('host slash commands execute directly and preserve error drafts', async t =
 
 test('working input automatically steers, stays inside the composer, and can be removed', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1862,7 +1862,7 @@ test('working input automatically steers, stays inside the composer, and can be 
 
 test('approval numbers and arrows require explicit selection and preserve command drafts', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1901,7 +1901,7 @@ test('approval numbers and arrows require explicit selection and preserve comman
 
 test('approval selection starts unselected, clears on Escape and resets when the request returns', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1947,7 +1947,7 @@ test('approval selection starts unselected, clears on Escape and resets when the
 
 test('questions and approvals take precedence over the pending-input picker', async t => {
   const fixture = await host(); t.after(() => fixture.close()); fixture.queuePrompts = true;
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -1981,7 +1981,7 @@ test('questions and approvals take precedence over the pending-input picker', as
 
 test('help pages keep later slash commands accessible in a short terminal', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   Object.defineProperty(ui.stdout, 'rows', { value: 20, configurable: true });
@@ -2002,7 +2002,7 @@ test('/export saves the session ZIP to the requested local path', async t => {
   const root = await mkdtemp(join(tmpdir(), 'dsht-export-ui-')); t.after(() => rm(root, { recursive: true, force: true }));
   const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 42]); fixture.exportBody = bytes;
   const path = join(root, 'session log.zip');
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -2016,7 +2016,7 @@ test('/export-html saves the loaded conversation locally without submitting a pr
   const fixture = await host(); t.after(() => fixture.close());
   const root = await mkdtemp(join(tmpdir(), 'dsht-export-html-ui-')); t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, 'conversation view.html');
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => controller.queries.record.ready);
@@ -2033,7 +2033,7 @@ test('questions, approvals and model dialogs retain recent context above the com
     ...Array.from({ length: 12 }, (_, seq) => ({ type: 'event', event: { type: 'user/message', seq, surfaceOp: 'append', data: { content: [{ type: 'text', text: `Earlier context ${seq}` }] } } })),
     { type: 'event', event: { type: 'assistant/message', seq: 12, surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: 'Recent decision context' }] } } } },
   ] };
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   Object.defineProperty(ui.stdout, 'columns', { value: 40, configurable: true });

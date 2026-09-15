@@ -1,4 +1,5 @@
 /** Slash-command catalog shared by completion, `/help` and the submission router. */
+import type { Command } from './parse.ts';
 
 /** One slash command advertised by completion and `/help`. */
 export interface CommandHint {
@@ -20,6 +21,7 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/latest', description: 'Return to the live conversation' },
   { command: '/older', description: 'Load earlier history' },
   { command: '/history', usage: '[text]', description: 'List your prompts, optionally filtered' },
+  { command: '/prompt', usage: '[text]', description: 'Use a saved shortcut prompt, or save the text as one' },
   { command: '/search', usage: 'text', description: 'Search history page by page and open a match' },
   { command: '/ssearch', usage: 'text', description: 'Search sessions in the current workspace' },
   { command: '/wsearch', usage: 'text', description: 'Search sessions across all workspaces' },
@@ -50,6 +52,33 @@ export const COMMAND_LABELS = COMMAND_HINTS.map(hint => hint.usage === undefined
 
 /** Widest command column, so descriptions start on one column. */
 export const COMMAND_LABEL_WIDTH = Math.max(...COMMAND_LABELS.map(label => label.length)) + 2;
+
+/** Where one parsed command may run, and what it must wait for. */
+export interface CommandPolicy {
+  /** Needs a selected conversation, so a picker screen refuses it. */
+  chatOnly?: boolean;
+  /** Refused while an approval or a question is waiting. */
+  blockedByPending?: boolean;
+}
+
+/** Routing policy per parsed command kind.
+ *
+ * The router reads this table instead of enumerating kinds itself, so a new command declares its
+ * constraints next to its syntax and no other module learns about it. A kind absent here has no
+ * constraint and may run from any screen, even while an answer is pending.
+ */
+export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPolicy>>> = {
+  shell: { chatOnly: true },
+  models: { chatOnly: true },
+  queue: { chatOnly: true, blockedByPending: true },
+  history: { chatOnly: true },
+  prompts: { chatOnly: true },
+  think: { chatOnly: true },
+  compact: { chatOnly: true },
+  hostCommand: { chatOnly: true, blockedByPending: true },
+  export: { chatOnly: true },
+  exportHtml: { chatOnly: true },
+};
 
 /** Longest common prefix of the candidate commands, so Tab can extend an ambiguous draft.
  * @param values - Command candidates.

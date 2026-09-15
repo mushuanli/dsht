@@ -8,7 +8,7 @@ import { mount } from '../../src/ui/mount.tsx';
 import { Controller } from '../../src/controller/controller.ts';
 
 const renders = Number(process.env.PERF_PROBE_RENDERS ?? '200');
-const controller = new Controller('http://127.0.0.1:1', undefined, undefined);
+const controller = new Controller({ base: 'http://127.0.0.1:1' });
 for (let i = 0; i < renders; i++) {
   const app = mount(controller);
   app.unmount();

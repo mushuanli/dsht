@@ -34,7 +34,7 @@ async function mount(t: Parameters<typeof test>[0] extends never ? never : { aft
   const fixture = await host();
   t.after(() => fixture.close());
   // A ledger keeps the cost panel available, so its key handling is part of the matrix too.
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, new CostLedger());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: new CostLedger() });
   const ui = renderAt(<App controller={controller} />, columns, rows);
   t.after(async () => { ui.close(); await controller.stop(); });
   controller.start();

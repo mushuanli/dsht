@@ -13,3 +13,6 @@ export type { QueuedInput } from './session/telemetry.ts';
 export type { ModelState, PanelState } from './session/info.ts';
 export type { CostTotal, Coverage } from './cost/index.ts';
 export type { ShellBlock } from './shell/index.ts';
+
+/** One user-saved shortcut prompt; the client owns the list, no session or host does. */
+export interface SavedPrompt { id: string; text: string }

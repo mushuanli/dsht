@@ -12,7 +12,7 @@ const median = (samples: number[]) => samples.slice().sort((a, b) => a - b)[Math
 
 for (const count of [20, 500, 2000]) {
   const fixture = await host();
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   let reads = 0;

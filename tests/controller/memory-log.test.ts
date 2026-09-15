@@ -12,7 +12,7 @@ import { host, until } from '../support/host.ts';
 async function harness(t: Parameters<typeof test>[0] extends never ? never : { after(fn: () => void | Promise<void>): void }, path: string) {
   const fixture = await host();
   t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined, undefined, path);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', memoryLogPath: path });
   t.after(async () => { await controller.stop(); });
   controller.start();
   await until(() => controller.queries.record.ready);
@@ -73,7 +73,7 @@ test('the log rewrites itself so a long run keeps only the newest samples', asyn
 
 test('the log is absent without a path, and a write failure stops it without stopping the client', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const bare = new Controller(fixture.url, 'fixture-token');
+  const bare = new Controller({ base: fixture.url, token: 'fixture-token' });
   t.after(async () => { await bare.stop(); });
   assert.equal(bare.memoryLog, undefined);
   bare.start();

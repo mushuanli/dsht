@@ -176,12 +176,12 @@ C4Component
   Component(root, "共享契约", "src/state.ts", "State 与 ControllerStore")
   Component(storage, "storage/", "4 文件 177 行", "全部文件系统操作：私有读写、原子替换、独占创建、流式写入与堆快照")
   Component(transport, "transport/", "6 文件 524 行", "宿主 wire 协议、认证、URL 与 HostAccess 契约")
-  Component(session, "session/", "16 文件 2924 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
+  Component(session, "session/", "16 文件 2929 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 852 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "5 文件 1006 行", "Controller 门面、ConnectionController 与内存日志")
-  Component(ui, "ui/", "20 文件 2543 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
-  Component(cli, "cli/", "2 文件 131 行", "参数、目录准备与进程生命周期")
+  Component(controller, "controller/", "6 文件 1252 行", "Controller 门面、ConnectionController、内存日志与快捷提示词")
+  Component(ui, "ui/", "20 文件 2657 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
+  Component(cli, "cli/", "2 文件 137 行", "参数、目录准备与进程生命周期")
   Component(shell, "shell/", "3 文件 276 行", "本地 ! 命令的执行、有界输出与进程组终止")
 
   Rel(root, transport, "被依赖")
@@ -209,8 +209,8 @@ C4Component
 | `cost/` | `transport`、`cost`、`storage`、`text.ts`、`json.ts` | 不依赖 session 投影，也不依赖 ui；React 与 Ink 不进入该域 |
 | `catalog/` | `transport`、`catalog`、`state.ts`、`json.ts` | 独立的模型元数据域 |
 | `shell/` | `shell`、`storage`、`text.ts`、`json.ts` | 唯一允许导入 `node:child_process` 的域 |
-| `slash/` | `slash` | 纯叶子：命令目录与 `parseCommand(line)`，不含 UI 事实 |
-| `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`shell`、`state.ts`、`storage`、`text.ts`、`json.ts`、`contracts.ts`、`slash` | 应用门面：事件路由、生命周期、Actions/Queries 与内存日志 |
+| `slash/` | `slash` | 纯叶子：命令目录、`parseCommand(line)` 与 `COMMAND_POLICY`，不含 UI 事实与副作用 |
+| `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`shell`、`state.ts`、`storage`、`text.ts`、`json.ts`、`contracts.ts`、`slash` | 应用门面：事件路由、生命周期、Actions/Queries、内存日志与快捷提示词存储 |
 | `contracts.ts` | `json.ts`、`transport`、`session`、`cost`、`catalog`、`shell` | **只含类型**：门禁拒绝 `const`/`function`/`class` |
 | `ui/` | `ui`、`controller`（仅 `app.tsx`/`mount.tsx`）、`contracts.ts`、`json.ts`、`text.ts`、`slash`、`session-title.ts`、`references.ts` | 唯一允许 React 与 Ink 的域；不得导入 `transport/` 或任何 feature |
 | `cli/` | 全部 | 组装入口，只通过 `ui/mount.tsx` 渲染 |
@@ -232,7 +232,7 @@ C4Component
 
 `Controller` 是唯一的状态发布者：`State` 通过 `update(patch)` 整体替换并递增 `version`，React 的 `useSyncExternalStore(controller.subscribe, controller.snapshot)` 读取它。`State` 契约位于 `src/state.ts`：它**只组合**，装 `operation`（应用自己的 busy/error 信封）、各 feature 的快照与 `session`；每个 feature 自己持有可变状态并出 `snapshot()`，写入前先由 `transport/events.ts` 把 wire 帧归一化。`pending`（待答问题/审批）由 `SessionController` 的 `interactions` 映射在每次 `update` 时按当前会话推导并返回 `PendingInteraction` 判别联合，因此**可见对话框与帧到达顺序无关**。选择器世代同样由 store 持有，会话与 catalog 域据此丢弃跨越切换的在途响应。
 
-**事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；输入框、`@` 菜单高亮、面板可见性与阅读视图（滚动、折叠、实时折叠模式）都是 `ui/app.tsx` 的组件状态，切换会话由一处 effect 清理；`pinned` 是 `SessionController` 的私有标志。**UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。
+**事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；输入框、`@` 菜单高亮、面板可见性与阅读视图（滚动、折叠、实时折叠模式）都是 `ui/app.tsx` 的组件状态，切换会话由一处 effect 清理；`pinned` 是 `SessionController` 的私有标志。**UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。**扩展是数据而非新分支**：`ui/app.tsx` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、保留键与 `keepFor` 关闭规则，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／"提交前关闭其它面板"全部由它派生，加一个面板只写一行加自己的渲染与分发；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃），组合根不知道是哪个命令；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
 阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话；状态另用 `statusPaused = copyMode || (screen === 'chat' && dialogOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 对话框与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
@@ -443,6 +443,11 @@ interface ControllerStore {
 }
 interface Actions { /* 改可观察状态；自持 busy/error 信封，返回完成布尔或值 */ }
 interface Queries { /* 只读；不改变可观察状态 */ }
+interface ControllerOptions {
+  base: string                    // 唯一必填项；本地/离线客户端也有地址可显示
+  token?; initialSession?; makeClient?; authenticate?
+  costs?; historyLimits?; memoryLogPath?; localDirectory?; shellEnabled?; promptsPath?
+}
 
 class Controller implements ControllerStore, ConnectionListener {
   readonly state: State
@@ -455,7 +460,11 @@ class Controller implements ControllerStore, ConnectionListener {
   readonly shell: ShellController
   readonly base: string
   readonly costs?: CostLedger
-  constructor(base, token, initialSession?, makeClient?, authenticate?, costs?, historyLimits?, localDirectory?, shellEnabled?)
+  readonly historyLimits: HistoryLimits
+  readonly memoryLogPath?: string
+  readonly localDirectory: string
+  readonly promptStore: PromptStore
+  constructor(options: ControllerOptions)   // 具名选项；新增能力不再移位已有参数
   subscribe / snapshot / selection / bumpSelection / update
   start() / stop() / shutdown()
   begin() / ready() / ended() / event(event)    // ConnectionListener：事件路由
@@ -703,7 +712,7 @@ dsht [options] [list workspaces|list sessions]
 
 ### 3.4 Slash 命令接口
 
-`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 28 条：
+`COMMAND_HINTS` 是补全（Tab）与 `/help` 的唯一来源，共 29 条：
 
 | 命令 | 参数 | 行为 |
 | --- | --- | --- |
@@ -715,6 +724,7 @@ dsht [options] [list workspaces|list sessions]
 | `/latest` | — | 返回实时对话并释放历史窗口 |
 | `/older` | — | 加载更早历史 |
 | `/history` | `[text]` | 列出自己的提示词，可按文本过滤 |
+| `/prompt` | `[text]` | 打开客户端保存的快捷提示词列表（Enter 放入输入框、`e` 编辑、`d`/Delete 删除）；带 `text` 时把该文本保存为一条快捷提示词 |
 | `/search` | `text` | 逐页搜索会话历史并跳转到匹配项 |
 | `/ssearch` | `text` | 在当前工作区搜索会话 |
 | `/wsearch` | `text` | 在所有工作区搜索会话 |
@@ -738,7 +748,9 @@ dsht [options] [list workspaces|list sessions]
 
 补全规则：仅当草稿以 `/` 开头且不含空格时生效；唯一匹配补全为 `命令 + 空格`，多匹配则扩展到公共前缀。
 
-面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。
+路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `chatOnly` 与 `blockedByPending`，`ui/routing.ts` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。
+
+面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由 `surfaces` 的 `keepFor` 决定）。
 
 ### 3.5 配置与状态路径
 
@@ -748,8 +760,9 @@ dsht [options] [list workspaces|list sessions]
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sessionHash>-<cut>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，原子重命名 |
 | 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG`、`DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，追加 + 每 1,000 行原子重写 |
+| 快捷 Prompt | `<state>/prompts.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600，原子重命名 |
 
-Cookie 文件为 `{ version: 1, origin, cookie, expiresAt }`；POSIX 下读写都会校验属主与权限（目录不得有 group/other 位、文件为 0600），并拒绝符号链接。成本文件同样在加载时校验版本、字段类型与价格合法性，并保留每个会话最大的 `cut`。
+Cookie 文件为 `{ version: 1, origin, cookie, expiresAt }`；POSIX 下读写都会校验属主与权限（目录不得有 group/other 位、文件为 0600），并拒绝符号链接。成本文件同样在加载时校验版本、字段类型与价格合法性，并保留每个会话最大的 `cut`。`prompts.json` 为 `{ version: 1, prompts: [{ id, text }] }`，逐条校验 `id`/`text` 并跳过不可用的行；写入用 0600 临时文件加原子重命名，写失败时内存列表回滚到写入前的状态；所有增删改都在一条串行队列里"计算＋落盘"，因此连续命令不会交错写盘、文件始终与内存一致。单条上限 8 KiB、最多 500 条、按保存顺序排列、相同文本不重复保存。该列表由客户端拥有，**跨工作区与跨 host 共用**（与按 origin 分目录的成本缓存不同），保存与列出都不需要连接宿主；文件损坏只记录错误并在 `/prompt` 面板中显示，不阻止客户端启动。
 
 ## 4. 事件流
 
@@ -1016,7 +1029,7 @@ C4Dynamic
 
 ## 5. 数据存储
 
-`dsht` 的持久化只有一条边界：**会话的权威真相全部在宿主**，客户端只保存可重载的副本，并额外维护三处本地文件（origin Cookie、价格配置、成本缓存）、一份按需生成的导出归档以及终端鼠标标志。本节说明每类数据存放在哪一层、由谁读写、如何校验与回收，以及它对应的用户功能与访问事件流。
+`dsht` 的持久化只有一条边界：**会话的权威真相全部在宿主**，客户端只保存可重载的副本，并额外维护四处本地文件（origin Cookie、价格配置、成本缓存、快捷提示词）、一份按需生成的导出归档以及终端鼠标标志。本节说明每类数据存放在哪一层、由谁读写、如何校验与回收，以及它对应的用户功能与访问事件流。
 
 ### 5.1 存储分层与访问路径
 
@@ -1031,6 +1044,7 @@ C4Component
     Component(tel, "Telemetry", "内存", "投影值、排队输入与任务计数")
     Component(led, "CostLedger", "内存镜像", "会话汇总与合计缓存")
     Component(ih, "PromptIndex", "内存", "会话提示词索引与回填游标")
+    Component(ps, "PromptStore", "内存镜像", "客户端快捷提示词列表与写回")
     Component(cl, "Client", "内存", "Cookie 副本、archivedSessionIds 与在册订阅")
     Component(exp, "export.saveSessionLog", "TypeScript", "独占创建并流式写入归档")
   }
@@ -1038,12 +1052,14 @@ C4Component
   ContainerDb(cfg, "prices.json", "配置", "用户维护的价格版本表")
   ContainerDb(authfile, "auth/<sha256(origin)>.json", "状态", "origin 作用域 Cookie")
   ContainerDb(cutfile, "cost/<sha256(origin)>/<sha256(sid)>.json", "状态", "折叠后的会话汇总")
+  ContainerDb(pfile, "prompts.json", "状态", "客户端快捷提示词（跨工作区与 host）")
   ContainerDb(zipfile, "session-<id>-<time>.zip", "导出", "会话日志归档")
   System_Ext(host, "dsh web 宿主", "会话日志、工作区、设置与凭据的唯一持久层")
 
   Rel(cl, authfile, "login 读取、认证后原子写入")
   Rel(led, cfg, "启动时加载并校验")
   Rel(led, cutfile, "load 读取、replace 原子写入")
+  Rel(ps, pfile, "启动时加载、每次增删改原子写回")
   Rel(cl, host, "认证、一元 RPC 与多路复用流")
   Rel(tx, host, "session/follow 与 session/page")
   Rel(tel, host, "session/control 与 follow 快照投影")
@@ -1057,8 +1073,8 @@ C4Component
 | 层 | 内容 | 是否持久 | 数据的权威方 |
 | --- | --- | --- | --- |
 | 宿主持久层 | 会话事件日志、工作区注册表、设置、凭据、投影 | 是 | 宿主；`dsht` 只经协议访问 |
-| 客户端磁盘 | 认证 Cookie、`prices.json`、成本 cut 文件、导出 ZIP | 是 | `dsht`（ZIP 为用户文件） |
-| 客户端内存 | `State`、`Transcript`、`LayoutIndex`、`Telemetry`、`CostLedger` 镜像、`PromptIndex`、`PromptCache` | 否，可重载 | 宿主基线 + 本地视图状态 |
+| 客户端磁盘 | 认证 Cookie、`prices.json`、成本 cut 文件、`prompts.json`、导出 ZIP | 是 | `dsht`（ZIP 与 `prompts.json` 为用户文件） |
+| 客户端内存 | `State`、`Transcript`、`LayoutIndex`、`Telemetry`、`CostLedger` 镜像、`PromptIndex`、`PromptCache`、`PromptStore` 镜像 | 否，可重载 | 宿主基线 + 本地视图状态 |
 | 终端状态 | SGR 鼠标上报开关、Ink 渲染生命周期 | 否 | 终端；挂载启用、退出恢复 |
 
 ### 5.2 本地磁盘文件
@@ -1071,6 +1087,7 @@ C4Component
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 | 仅首次交互启动创建；之后由用户维护 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sha256(sessionId)>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600 | 每个会话一个文件，写入较新 cut 时替换 |
 | 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本（含布局与渲染缓存计数、React 渲染 measure 计数与本次清理数、扫描工作量；带 `--expose-gc` 时另有回收后堆），满 1,000 行重写 |
+| 快捷提示词 | `<state>/prompts.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600，临时文件加原子重命名 | 启动时读取一次；`/prompt TEXT` 新增、`e` 编辑、`d` 删除时整表写回（串行队列，写失败回滚） |
 | 导出归档 | 用户指定，或 `<cwd>/session-<sanitized-id>-<Date.now()>.zip` | — | 0600，`wx` 独占 | `/export` 成功时 |
 
 #### 5.2.1 认证 Cookie
@@ -1156,7 +1173,7 @@ C4Component
 | 会话草稿、光标与寄存草稿 | `SessionInfo.composer`（`session/info.ts`） | composer、`recall()` | `setComposer`／`setComposerCursor`／`parkComposer`／`restoreComposer` | `releaseTranscript()` 随会话重置；`setComposer` 只在真正变化时发布 |
 | 阅读视图（窗口、滚动、折叠、阅读保护） | `SessionInfo.view`（`session/info.ts`） | `historyLayout`、视口、`/think` | `setViewWindow`／`setScroll`／`setFolds`／`setLiveReasoning`／`pinHistory` | `closeWindow()` 与 `releaseTranscript()` 释放独立窗口；行缓存仍是 `WeakMap` |
 | 待答作答与 `@` 菜单选择 | `SessionInfo.interaction`／`SessionInfo.reference`（`session/info.ts`） | 提问／审批对话框、`ReferenceMenu` | `setAnswers`／`setOption`／`setApproval`／`setReferenceIndex`／`setReferenceDismissed` | `releaseTranscript()` 随会话重置；`lookup` 不进状态，按 draft 现算 |
-| 会话面板可见性与查询 | `SessionInfo.panels`（`session/info.ts`） | `/think`、`/queue`、`/model`、`/history`、`/search` 面板 | `openThoughts`／`openQueue`／`setModelPanel`／`setHistoryPanel`／`setSearchPanel` | `releaseTranscript()` 随会话重置；面板行光标仍在 `Picker` 内 |
+| 会话面板可见性与查询 | `PanelState`（`session/info.ts`，由 `App` 以组件状态持有） | `/think`、`/queue`、`/model`、`/history`、`/search`、`/prompt` 面板 | `openThoughts`／`openQueue`／`setModelPanel`／`setHistoryPanel`／`setSearchPanel`／`openPrompts` | 切换会话时整体重置；面板行光标仍在 `Picker` 内（`/prompt` 是唯一的客户端级面板，不读会话记录） |
 | Cookie 与在册订阅 | `Client.cookie/expiresAt/listeners` | `call`、`subscribe` | `restoreCookie`、`authenticate`、`subscribe` | `close()` 结束全部订阅 |
 | 成本汇总镜像与合计 | `CostLedger.sessions/totals` | `total`、`today`、`hasSession`、`missing` | `load`、`replace` | `replace` 清空合计缓存 |
 
@@ -1200,7 +1217,7 @@ C4Component
 | 会话草稿与光标 | 内存 `SessionInfo.composer`（`session/info.ts`） | composer、回填与提交 | `setComposer`、`parkComposer`、`restoreComposer` | 输入、回填、切会话清空 | 无（纯本地） |
 | 阅读视图 | 内存 `SessionInfo.view`（`session/info.ts`） | `historyLayout`、视口、`/think`、`/older` | `setScroll`、`setViewWindow`、`setFolds`、`pinHistory` | 滚动、跳转历史、展开推理 | 无（纯本地；独立窗口由宿主分页填充） |
 | 待答作答与选择 | 内存 `SessionInfo.interaction`／`reference`（`session/info.ts`） | 提问／审批对话框、`ReferenceMenu` | `setAnswers`、`setOption`、`setApproval`、`setReferenceIndex` | 作答、选项与 `@` 菜单导航 | `$events/result`（提交作答） |
-| 会话面板 | 内存 `SessionInfo.panels`（`session/info.ts`） | `/think`、`/queue`、`/model`、`/history`、`/search` | `openThoughts`、`openQueue`、`setModelPanel`、`setHistoryPanel` | 打开／关闭各面板 | 打开即触发对应读取（`session/page`、`session/modelCatalog` 等） |
+| 会话面板 | 内存 `PanelState`（`session/info.ts`，`App` 组件状态） | `/think`、`/queue`、`/model`、`/history`、`/search`、`/prompt` | `openThoughts`、`openQueue`、`setModelPanel`、`setHistoryPanel`、`openPrompts` | 打开／关闭各面板 | 打开即触发对应读取（`session/page`、`session/modelCatalog` 等）；`/prompt` 只读客户端 `prompts.json` |
 | 导出归档 | 磁盘 ZIP | — | `saveSessionLog` | `/export` | `GET /api/session.export` |
 | 终端鼠标标志 | 终端 | — | `useMouseWheel` | 滚轮滚动、左键复制、原生选区 | 无 |
 
@@ -1633,7 +1650,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/export.ts` | 30 | `saveSessionLog` |
 | `session/history.ts` | 332 | `Reasoning`、`RowKind`、`HistoryRow`、`releaseHistoryLayout`、`layoutStats`、`SessionRender`、`historyLayout` |
 | `session/index.ts` | 22 | `SessionController`、`contentText`、`Transcript`、`toolLine`、`historyLayout`、`layoutStats`、`releaseHistoryLayout`、`markdownCacheStats`、`Telemetry`、`DEFAULT_HISTORY_LIMITS`、`historyLimits`、`DEFAULT_PROMPT_LIMITS` |
-| `session/info.ts` | 338 | `PromptRecord`、`PromptEntry`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText`、`ModelState`、`PanelState`、`OptionState`、`InteractionState`、`SessionInfo`、`PromptIndex`、`DEFAULT_PROMPT_CACHE_BYTES` |
+| `session/info.ts` | 343 | `PromptRecord`、`PromptEntry`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText`、`ModelState`、`PanelState`、`OptionState`、`InteractionState`、`SessionInfo`、`PromptIndex`、`DEFAULT_PROMPT_CACHE_BYTES` |
 | `session/markdown.ts` | 245 | `MarkdownSpan`、`MarkdownRow`、`markdownCacheStats`、`hasMarkdown`、`markdownRows`、`markdownHtml` |
 | `session/math.ts` | 67 | `renderMath` |
 | `session/memory.ts` | 23 | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
@@ -1677,25 +1694,26 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
-| `slash/index.ts` | 7 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`COMMANDS`、`commonPrefix`、`completeCommand`、`suggestedCommands`、`parseCommand` |
-| `slash/parse.ts` | 116 | `Command`、`parseCommand` |
-| `slash/registry.ts` | 87 | `CommandHint`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
+| `slash/index.ts` | 8 | `COMMAND_HINTS`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`COMMANDS`、`COMMAND_POLICY`、`commonPrefix`、`completeCommand`、`suggestedCommands`、`parseCommand` |
+| `slash/parse.ts` | 125 | `Command`、`parseCommand` |
+| `slash/registry.ts` | 116 | `CommandHint`、`CommandPolicy`、`COMMAND_HINTS`、`COMMANDS`、`COMMAND_POLICY`、`COMMAND_LABELS`、`COMMAND_LABEL_WIDTH`、`commonPrefix`、`completeCommand`、`suggestedCommands` |
 
 **controller**
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
 | `controller/connection.ts` | 159 | `ConnectionOptions`、`ConnectionListener`、`ConnectionController` |
-| `controller/controller.ts` | 678 | `Actions`、`Queries`、`Controller` |
-| `controller/index.ts` | 5 | `Controller`、`ConnectionController` |
+| `controller/controller.ts` | 769 | `Actions`、`Queries`、`Controller` |
+| `controller/index.ts` | 6 | `Controller`、`ConnectionController` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
+| `controller/prompts.ts` | 154 | `SavedPrompt`、`MAX_PROMPT_CHARS`、`MAX_SAVED_PROMPTS`、`PromptStore` |
 
 **ui**
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
-| `ui/app.tsx` | 850 | `App` |
+| `ui/app.tsx` | 939 | `App` |
 | `ui/chat/header.tsx` | 22 | `ChatHeader` |
 | `ui/chat/history-view.tsx` | 23 | `HistoryViewport` |
 | `ui/chat/navigation-model.ts` | 133 | `SessionState`、`sessionState`、`SESSION_MARKERS`、`STATE_LABELS`、`activityAge`、`sessionStatus`、`ROLLUP_STATES`、`RollupState`、`RollupCount`、`RollupStyle`、`workspaceCounts`、`workspaceSegments` |
@@ -1704,15 +1722,15 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/chat/viewport.tsx` | 22 | `ChatViewport` |
 | `ui/copy-mode.ts` | 8 | `CopyMode`、`useCopyMode` |
 | `ui/dialogs/cost.tsx` | 44 | `CostLine`、`CostSource`、`CostPanel` |
-| `ui/dialogs/index.tsx` | 198 | `QueueDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
-| `ui/dialogs/picker.tsx` | 106 | `ChoiceCell`、`Choice`、`Picker` |
+| `ui/dialogs/index.tsx` | 223 | `QueueDialog`、`PromptsDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
+| `ui/dialogs/picker.tsx` | 109 | `ChoiceCell`、`Choice`、`Picker` |
 | `ui/frozen.tsx` | 7 | `Frozen` |
 | `ui/input/input.tsx` | 135 | `EditState`、`editInput`、`TextInput` |
 | `ui/input/mouse.ts` | 49 | `isMouseReport`、`wheelDirection`、`useMouseWheel` |
 | `ui/input/references.tsx` | 24 | `ReferenceMenu` |
 | `ui/input/viewport.ts` | 201 | `TAB_WIDTH`、`FoldRegion`、`DraftRow`、`CursorPlace`、`DraftPlan`、`tabStop`、`byteLength`、`formatBytes`、`wrapDraft`、`cursorPlace`、`windowRows`、`planDraft` |
 | `ui/mount.tsx` | 12 | `mount` |
-| `ui/routing.ts` | 59 | `Routed`、`RouteFacts`、`routeEnter` |
+| `ui/routing.ts` | 56 | `Routed`、`RouteFacts`、`routeEnter` |
 | `ui/status/model.ts` | 8 | `costText` |
 | `ui/theme/index.ts` | 30 | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
 
@@ -1720,24 +1738,24 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 | 文件 | 行数 | 关键导出 |
 | --- | --- | --- |
-| `cli/dsht.tsx` | 114 |  |
+| `cli/dsht.tsx` | 120 |  |
 | `cli/index.ts` | 17 |  |
 
 ```mermaid
 C4Component
   title 源码索引（按业务域）
 
-  Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "7 文件 188 行")
+  Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "7 文件 191 行")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "4 文件 177 行")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "6 文件 524 行")
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2924 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 852 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, index", "5 文件 1006 行")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2543 行")
-  Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 131 行")
+  Component(controller, "controller/", "controller, connection, memory-log, perf-measures, prompts, index", "6 文件 1252 行")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "20 文件 2657 行")
+  Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 137 行")
   Component(shell, "shell/", "controller, runner, index", "3 文件 276 行")
-  Component(slash, "slash/", "registry, parse, index", "3 文件 210 行")
+  Component(slash, "slash/", "registry, parse, index", "3 文件 249 行")
 
   Rel(root, transport, "公开门面")
   Rel(ui, slash, "命令语法")

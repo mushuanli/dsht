@@ -24,6 +24,8 @@ export interface Choice {
   /** Trailing column, right-aligned and truncated from its start so a path keeps its tail. */
   detail?: string;
   action(): void;
+  /** `e` edits the row's own content, on surfaces that keep editable entries. */
+  edit?(): void;
   remove?(): void;
 }
 
@@ -57,6 +59,7 @@ export function Picker({ choices, enabled, canSelect, pageSize = 12, hint, width
     if (!canSelect() || key.eventType === 'release') return;
     if (key.upArrow) setSelected(Math.max(0, current - 1));
     else if (key.downArrow) setSelected(Math.min(choices.length - 1, current + 1));
+    else if (_input === 'e' && !key.ctrl && !key.meta) choices[current]?.edit?.();
     else if (_input === 'd' && !key.ctrl && !key.meta || key.delete && /^\x1b\[3(?:;\d+)?~$/.test(rawKey.current)) choices[current]?.remove?.();
     else if (key.return) choices[current]?.action();
   }, { isActive: enabled && !copyMode });
@@ -101,6 +104,6 @@ export function Picker({ choices, enabled, canSelect, pageSize = 12, hint, width
         </Box>}
       </Box>;
     })}
-    <Text dimColor>{hint ?? `↑ ↓ select · Enter open${choices.some(choice => choice.remove) ? ' · d/Delete remove / archive' : ''} · Ctrl+C stop / exit`}</Text>
+    <Text dimColor>{hint ?? `↑ ↓ select · Enter open${choices.some(choice => choice.edit) ? ' · e edit' : ''}${choices.some(choice => choice.remove) ? ' · d/Delete remove / archive' : ''} · Ctrl+C stop / exit`}</Text>
   </Box>;
 }

@@ -36,6 +36,7 @@ The default host is http://127.0.0.1:3080.
 First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 /cost shows the session and today CNY estimates.
+/prompt lists saved shortcut prompts; /prompt TEXT saves one in <state>/prompts.json.
 !command runs on this machine, not on the host, and prints its output in the transcript.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
@@ -87,8 +88,13 @@ async function main(): Promise<void> {
   await costs.load();
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
   const shellEnabled = !values['no-shell'] && process.env.DSHT_NO_SHELL !== '1';
-  const controller = new Controller(url, token, values.session, undefined, client => login(client, token, store), costs, limits,
-    memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']), undefined, shellEnabled);
+  const controller = new Controller({
+    base: url, token, initialSession: values.session,
+    authenticate: client => login(client, token, store),
+    costs, historyLimits: limits, shellEnabled,
+    memoryLogPath: memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']),
+    promptsPath: join(stateRoot, 'prompts.json'),
+  });
   const app = mount(controller);
   const terminate = () => app.unmount();
   process.once('SIGTERM', terminate);

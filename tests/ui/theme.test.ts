@@ -65,7 +65,7 @@ import { StatusBar } from './src/ui/chat/status.tsx';
 import { Controller } from './src/controller/controller.ts';
 import { controlFrame } from './src/transport/events.ts';
 import { statusSource } from './tests/support/status-source.ts';
-const controller = new Controller('http://fixture', undefined);
+const controller = new Controller({ base: 'http://fixture' });
 controller.state = {...controller.state, online:true, sessionId:'s1', sessions:[{sessionId:'s1',running:false}]};
 const frames = [];
 for (const percent of [25,80,95]) {

@@ -37,11 +37,16 @@ export interface ModelState { catalog: ObjectValue; provider?: string; model?: O
 
 /** Panels the reader opened; visibility and query text only, so the UI owns them.
  *
- * Every panel's rows come from the record, and the row cursor is focus held by `Picker`.
+ * One container rather than one flag per call site, so the composition root has a single panel set
+ * to gate keys, reset on a session switch and close from a command. Every session panel's rows come
+ * from the selected record and its cursor is focus held by `Picker`; the one exception is `prompts`,
+ * which lists a client-global file and is therefore not derived from the record.
  */
 export interface PanelState {
   thoughts: boolean;
   queue: boolean;
+  /** Saved shortcut prompts opened by `/prompt`; a client-global list, kept here for one registry. */
+  prompts?: boolean;
   model?: ModelState;
   history?: { query: string; contentSearch: boolean; matches?: HistorySearch };
   search?: { query: string; items: ObjectValue[]; hasMore: boolean };

@@ -18,7 +18,7 @@ const LONG_PATH = '/home/li/share/prj/deepseek-harness/packages/experimental/ver
 /** A controller with every optional detail row filled in, without contacting a host. */
 function panelController(): Controller {
   const ledger = new CostLedger();
-  const controller = new Controller('http://127.0.0.1:1234', 'test-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: 'http://127.0.0.1:1234', token: 'test-token', initialSession: 's1', costs: ledger });
   controller.state = {
     ...controller.state, sessionId: 's1', workspaceId: 'w1', online: true,
     status: 'connected to a host whose status string is quite long indeed',
@@ -83,7 +83,7 @@ test('every detail line survives scrolling, and the footer names the visible ran
 test('arrows and PgUp/PgDn scroll the open panel through the running application', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.baseline = [{ workspaceId: 'w1', title: 'Project α', path: LONG_PATH, sessionIds: ['s1'] }];
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   // Twelve rows leave one content row per page, so the footer alone proves the key reached the panel.
   const ui = renderAt(<App controller={controller} />, 40, 12);
   t.after(async () => { ui.close(); await controller.stop(); });

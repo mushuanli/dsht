@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCommand } from '../../src/slash/parse.ts';
-import { COMMAND_HINTS, COMMANDS, suggestedCommands } from '../../src/slash/registry.ts';
+import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, suggestedCommands } from '../../src/slash/registry.ts';
 import { routeEnter, type RouteFacts } from '../../src/ui/routing.ts';
 
 const CHAT: RouteFacts = { line: '', referenceOpen: false, copyMode: false, pending: false, question: false, screen: 'chat' };
@@ -42,4 +42,34 @@ test('/coredump is advertised with its optional tag', () => {
   assert.ok(hint && hint.description.length > 0);
   assert.ok(COMMANDS.includes('/coredump'));
   assert.deepEqual(suggestedCommands('/core'), ['/coredump']);
+});
+
+test('/prompt opens the saved list or saves the trailing text verbatim', () => {
+  assert.deepEqual(parseCommand('/prompt'), { kind: 'prompts' });
+  assert.deepEqual(parseCommand('/prompt   '), { kind: 'prompts' });
+  assert.deepEqual(parseCommand('/prompt Fix this bug and add tests'), { kind: 'savePrompt', text: 'Fix this bug and add tests' });
+  // The saved text is what will be sent, so quoting is content rather than syntax.
+  assert.deepEqual(parseCommand('/prompt "Review this code"'), { kind: 'savePrompt', text: '"Review this code"' });
+  assert.deepEqual(parseCommand('/promptx'), { kind: 'error', message: 'Unknown command. Use /help.' });
+  // Listing needs a conversation the composer belongs to; saving works from any screen and offline.
+  assert.deepEqual(route('/prompt', { screen: 'workspaces' }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(route('/prompt Review for bugs', { screen: 'workspaces' }), { kind: 'savePrompt', text: 'Review for bugs' });
+  assert.deepEqual(route('/prompt Review for bugs', { pending: true }), { kind: 'savePrompt', text: 'Review for bugs' });
+});
+
+test('/prompt is advertised in the command catalog', () => {
+  const hint = COMMAND_HINTS.find(item => item.command === '/prompt');
+  assert.equal(hint?.usage, '[text]');
+  assert.ok(hint && hint.description.length > 0);
+  assert.deepEqual(suggestedCommands('/pro'), ['/prompt']);
+});
+
+test('routing constraints live on the command, so the router enumerates no kinds', () => {
+  // A command declares its own constraints; the router only reads this table.
+  assert.deepEqual(COMMAND_POLICY.prompts, { chatOnly: true });
+  assert.deepEqual(COMMAND_POLICY.queue, { chatOnly: true, blockedByPending: true });
+  assert.deepEqual(COMMAND_POLICY.hostCommand, { chatOnly: true, blockedByPending: true });
+  // A kind with no policy runs anywhere, even while an answer is pending.
+  assert.equal(COMMAND_POLICY.savePrompt, undefined);
+  assert.equal(COMMAND_POLICY.coredump, undefined);
 });

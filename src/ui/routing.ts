@@ -4,7 +4,7 @@
  * screen — while `slash/parse.ts` owns the syntax. A screen guard only decides whether a parsed
  * command may run here, never what the command is.
  */
-import { parseCommand, type Command } from '../slash/index.ts';
+import { COMMAND_POLICY, parseCommand, type Command } from '../slash/index.ts';
 
 /** What the composer should do with one submitted line. */
 export type Routed =
@@ -13,12 +13,6 @@ export type Routed =
   | { kind: 'answer'; text: string }
   | { kind: 'path'; value: string }
   | Command;
-
-/** Commands that only make sense with a selected conversation. */
-const CHAT_ONLY = new Set(['shell', 'models', 'queue', 'history', 'think', 'compact', 'hostCommand', 'export', 'exportHtml']);
-
-/** Commands that must wait until the pending approval or question is settled. */
-const BLOCKED_BY_PENDING = new Set(['queue', 'hostCommand']);
 
 /** Current UI facts routing reads; nothing else is needed. */
 export interface RouteFacts {
@@ -46,8 +40,11 @@ export function routeEnter(facts: RouteFacts): Routed {
   if (value.startsWith('/') || value.startsWith('!')) {
     const command = parseCommand(value);
     if (command.kind === 'error' || command.kind === 'ignore') return command;
-    if (facts.screen !== 'chat' && CHAT_ONLY.has(command.kind)) return { kind: 'error', message: 'Select a session first' };
-    if (facts.pending && BLOCKED_BY_PENDING.has(command.kind)) return { kind: 'error', message: 'Answer the pending question or approval first' };
+    // The constraints are data on the command, not a list the router maintains: adding a command
+    // never edits this function.
+    const policy = COMMAND_POLICY[command.kind];
+    if (facts.screen !== 'chat' && policy?.chatOnly) return { kind: 'error', message: 'Select a session first' };
+    if (facts.pending && policy?.blockedByPending) return { kind: 'error', message: 'Answer the pending question or approval first' };
     return command;
   }
   // A question takes free text as its answer; an approval keeps every choice explicit.

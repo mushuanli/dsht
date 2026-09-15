@@ -34,7 +34,7 @@ test('rejects bad authentication, business failures, and mismatched response IDs
 
 test('selected-session interaction replies and reconnection replace the baseline', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token'); t.after(() => controller.stop());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token' }); t.after(() => controller.stop());
   controller.start();
   await until(() => controller.state.workspaces.length === 1);
   assert.equal(controller.state.screen, 'workspaces');
@@ -78,7 +78,7 @@ test('logical stream errors settle and disconnected lists fail promptly', async 
 test('workspace and session commands switch across workspaces without creating or cancelling agents', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.baseline = [workspace, { ...workspace, workspaceId: 'w2', title: 'Project β', path: '/host/second', sessionIds: ['s2'] }];
-  const controller = new Controller(fixture.url, 'fixture-token'); t.after(() => controller.stop());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token' }); t.after(() => controller.stop());
   controller.start();
   await until(() => controller.state.workspaces.length === 2);
   await controller.actions.switchSession();
@@ -121,7 +121,7 @@ test('cancelling one unary lookup leaves subsequent authenticated requests usabl
 
 test('interrupt cancels a running selected session, coalesces repeated keys, and exits only after idle', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   t.after(() => controller.stop());
   controller.start();
   await until(() => controller.queries.record.ready);
@@ -156,7 +156,7 @@ test('interrupt cancels a running selected session, coalesces repeated keys, and
 
 test('Ctrl+C during prompt admission waits for admission before sending cancellation', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   t.after(() => controller.stop());
   controller.start();
   await until(() => controller.queries.record.ready);
@@ -179,7 +179,7 @@ test('replayed questions survive startup, picker navigation and reconnect withou
   const frame = { type: 'waterfall', event: 'user-questions/request', eventId: 'question-1', agentId: 's1',
     request: { questions: [{ id: 'q1', question: 'Two decisions before I commit', options: [{ label: 'Review first' }] }] } };
   fixture.replayInteractions = [frame];
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   t.after(() => controller.stop());
   controller.start();
   await until(() => controller.queries.record.ready && controller.state.pending.length === 1);
@@ -220,7 +220,7 @@ test('long command calls can outlive the default timeout and remain cancellable'
 
 test('a claimed queue item cannot be removed or resubmitted by a stale action', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1'); t.after(() => controller.stop());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' }); t.after(() => controller.stop());
   controller.start(); await until(() => controller.queries.record.ready);
   assert.equal(await controller.actions.removeQueued('already-claimed'), false);
   assert.match(controller.state.operation.error, /session\/queue-item-not-found/);

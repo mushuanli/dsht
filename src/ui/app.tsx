@@ -19,7 +19,7 @@ import { mergeShellRuns } from './chat/shell-view.ts';
 import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
 import type { Choice } from './dialogs/picker.tsx';
-import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
+import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
 import { COMMAND_HINTS, completeCommand as completeDraft, suggestedCommands } from '../slash/registry.ts';
 import { routeEnter } from './routing.ts';
 import { Controller, type HistorySearch, type RemovalTarget } from '../controller/controller.ts';
@@ -34,6 +34,41 @@ const PANEL_LIFETIME_MS = 10_000;
 
 /** Pages one boundary recall press may walk before it reports that nothing older holds a prompt. */
 const RECALL_PAGE_SCAN = 20;
+
+/** A command that borrows the composer to edit something: Enter commits, Esc abandons.
+ *
+ * The composition root stays generic — it renders the hint, calls `commit`, and clears the draft on
+ * success — so it never learns which command asked or what is being edited. Any later surface that
+ * edits an entry (a queued message, a session title) reuses this instead of adding another flag.
+ */
+interface ComposerIntent {
+  /** Line shown above the composer while this intent owns it. */
+  hint: string;
+  /** Notice shown when Enter is pressed with an empty draft. */
+  emptyNotice: string;
+  /** Called with the trimmed draft; true when the draft may be cleared. */
+  commit(text: string): Promise<boolean>;
+}
+
+/** One panel-like surface, described once so no gate has to enumerate the others.
+ *
+ * `open` decides the gates; `close`/`keepFor` implement "each surface belongs to the command that
+ * opened it". Adding a surface is one row here plus its own render and dispatch.
+ */
+interface Surface {
+  /** Whether the surface currently owns part of the screen. */
+  open: boolean;
+  /** Whether it takes ↑/↓ from composer recall while open. */
+  arrows?: boolean;
+  /** Whether it blocks the approval/question digit keys while open. */
+  blocksKeys?: boolean;
+  /** Keys the composer must not insert while this surface's list owns them. */
+  reserved?: readonly string[];
+  /** Closes the surface; absent when only its own handler closes it. */
+  close?(): void;
+  /** Command line that keeps this surface open; absent means every command closes it. */
+  keepFor?: RegExp;
+}
 
 /** The caller owns starting and stopping the controller around the Ink render lifetime.
  * @param props - Controller, panel lifetime and semantic theme.
@@ -82,11 +117,15 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
   });
   const [removal, setRemoval] = useState<RemovalTarget>();
+  // A command may borrow the composer to edit one of its entries; Enter then commits instead of
+  // sending, and Esc clears the draft. The composition root stays generic about who asked.
+  const [composerIntent, setComposerIntent] = useState<ComposerIntent>();
   // Panels are component state: visibility and query text only, because every row comes from the record.
   const [panels, setPanels] = useState<PanelState>({ thoughts: false, queue: false });
-  const { thoughts: thoughtList, queue: queueOpen, model: models, history, search: searchResults } = panels;
+  const { thoughts: thoughtList, queue: queueOpen, model: models, history, search: searchResults, prompts: promptsOpen } = panels;
   const openThoughts = (open: boolean) => setPanels(current => ({ ...current, thoughts: open }));
   const openQueue = (open: boolean) => setPanels(current => ({ ...current, queue: open }));
+  const openPrompts = (open: boolean) => setPanels(current => ({ ...current, prompts: open }));
   const setModelPanel = (model?: PanelState['model']) => setPanels(current => ({ ...current, model }));
   const setHistoryPanel = (history?: PanelState['history']) => setPanels(current => ({ ...current, history }));
   const setSearchPanel = (search?: PanelState['search']) => setPanels(current => ({ ...current, search }));
@@ -135,7 +174,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const queued = controller.queries.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
   useEffect(() => {
     setPanels({ thoughts: false, queue: false }); setReferenceIndex(0); setDismissedReference(undefined);
-    setInputValue(''); setCursor(0); parkedDraft.current = '';
+    setInputValue(''); setCursor(0); parkedDraft.current = ''; setComposerIntent(undefined);
     setScroll(0); setReasoningOverrides(new Set()); setLiveReasoning('row');
   }, [state.sessionId]);
   useEffect(() => { openQueue(false); }, [state.sessionId, pending?.eventId]);
@@ -145,7 +184,22 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     && !input.startsWith('/') && dismissedReference !== input && cursor === input.length
     ? activeReference(input) : undefined;
   const referenceOpen = token !== undefined;
-  const dialogOpen = !!(queueOpen || removal || models || thoughtList || historyQuery !== undefined || searchResults || costExpanded || statusExpanded || help || pending || referenceOpen || state.screen !== 'chat');
+  // The queue dialog is not rendered while an answer is waiting, so it is not "open" then either.
+  const surfaces: readonly Surface[] = [
+    { open: queueOpen && !pending, reserved: ['d'], close: () => openQueue(false), keepFor: /^\/queue$/ },
+    { open: !!promptsOpen, arrows: true, blocksKeys: true, reserved: ['d', 'e'], close: () => openPrompts(false), keepFor: /^\/prompt(?:\s|$)/ },
+    { open: !!removal, arrows: true, blocksKeys: true, close: () => setRemoval(undefined) },
+    { open: !!models, arrows: true, blocksKeys: true, close: () => setModelPanel(undefined), keepFor: /^\/model(?: |$)/ },
+    { open: thoughtList, arrows: true, blocksKeys: true, close: () => openThoughts(false), keepFor: /^\/think(?: |$)/ },
+    { open: historyQuery !== undefined, arrows: true, blocksKeys: true },
+    { open: !!searchResults, arrows: true, blocksKeys: true },
+    { open: help, blocksKeys: true, close: () => setHelp(false), keepFor: /^\/help$/ },
+    { open: costExpanded, blocksKeys: true, close: () => setCostExpanded(false), keepFor: /^\/cost$/ },
+    { open: statusExpanded, blocksKeys: true, close: () => setStatusExpanded(false), keepFor: /^\/status$/ },
+  ];
+  const openSurfaces = surfaces.filter(surface => surface.open);
+  const surfaceReservedKeys = [...new Set(openSurfaces.flatMap(surface => surface.reserved ?? []))];
+  const dialogOpen = !!(openSurfaces.length || pending || referenceOpen || state.screen !== 'chat');
   const displayPaused = copyMode || dialogOpen;
   // Startup screens need live connection feedback even while their picker remains open.
   const statusPaused = copyMode || (state.screen === 'chat' && dialogOpen);
@@ -184,12 +238,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Reserve the header, composer and question instructions; each choice may have a description.
   const optionPageSize = Math.max(1, Math.min(6, Math.floor(((stdout.rows ?? 30) - 16) / 2)));
   const optionStart = Math.max(0, optionCursor - optionPageSize + 1);
-  // One open panel owns the arrow and digit keys; the picker screens and the composer are not keyboard owners.
-  const panelBlocksKeys = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || help || costExpanded || statusExpanded);
+  // One open surface owns the arrow and digit keys; the picker screens and the composer are not
+  // keyboard owners. The traits live in `surfaces`, so no panel is named here.
+  const panelBlocksKeys = openSurfaces.some(surface => surface.blocksKeys);
   // Composer recall yields only to a surface that uses the arrows itself: the pickers, and a status
   // panel with more lines than the view holds. The help and cost panels and a fitting status panel
   // leave the arrows with the history, and Ctrl+P/N reach it from every surface.
-  const recallBlocked = !!(removal || models || thoughtList || historyQuery !== undefined || searchResults || (statusExpanded && statusOverflow));
+  const recallBlocked = openSurfaces.some(surface => surface.arrows) || (statusExpanded && statusOverflow) || composerIntent !== undefined;
   const questionKeysActive = !!question && options.length > 0 && !choiceState.custom && !copyMode && !panelBlocksKeys;
   // A dialog that demands an answer owns the keyboard until it is settled: the draft being written is
   // parked rather than typed into, and comes back when the last one closes. A question switches to
@@ -200,6 +255,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     // keyboard and given back when it closes. Restoring writes the draft directly, so it neither
     // counts as a recall nor moves a reader's scroll position.
     if (answerPending) {
+      // A composer intent cannot survive an answer dialog taking the keyboard: the dialog's text is
+      // not what the intent edits, so the intent is dropped rather than committed.
+      if (composerIntent) setComposerIntent(undefined);
       if (input !== '') { parkedDraft.current = input; setInputValue(''); setCursor(0); }
       return;
     }
@@ -241,6 +299,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       return;
     }
     if (key.ctrl && _value === 's') { setCopyMode(true); return; }
+    // A borrowed composer owns Esc: it drops the edit and clears the draft it loaded.
+    if (composerIntent && key.escape) { setInput(''); setComposerIntent(undefined); return; }
     if ((key.escape || key.ctrl && _value === 'c') && historyAbort.current) {
       historyAbort.current.abort();
       // Esc also leaves a history list that was already on screen when the load was aborted.
@@ -314,6 +374,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
     if (key.pageUp || key.pageDown) { scrollHistory(key.pageUp ? 10 : -10); return; }
     if (key.escape && queueOpen) { openQueue(false); return; }
+    if (key.escape && promptsOpen) { openPrompts(false); return; }
     if (key.escape && removal) { setRemoval(undefined); return; }
     if (key.escape && models) { setModelPanel(undefined); return; }
     if (key.escape && thoughtList) { openThoughts(false); if (controller.queries.running) void controller.actions.interrupt(true); return; }
@@ -329,6 +390,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (key.ctrl && _value === 'c') {
       // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
       if (input !== '') { setInput(''); return; }
+      if (composerIntent) { setComposerIntent(undefined); return; }
       void controller.actions.interrupt().then(shouldExit => { if (shouldExit) exit(); });
       return;
     }
@@ -353,7 +415,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         && state.session.record.ready && controller.queries.recallHasOlder) { void recallOlderPrompts(); return; }
       setInput(controller.queries.recall(recallPrevious ? -1 : 1, input), true); return;
     }
-    if (key.tab) { completeCommand(); return; }
+    if (key.tab && !composerIntent) { completeCommand(); return; }
     if (key.escape && (help || costExpanded || statusExpanded || notice !== undefined)) {
       setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusScroll(0); setNotice(undefined);
       if (controller.queries.running) void controller.actions.interrupt(true);
@@ -367,6 +429,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   });
 
   const submit = async (raw: string) => {
+    // A borrowed composer commits on Enter instead of sending, so an edit is never delivered.
+    if (composerIntent) {
+      const text = raw.trim();
+      if (!text) { setNotice(composerIntent.emptyNotice); return; }
+      if (await composerIntent.commit(text)) { setComposerIntent(undefined); setInput(''); }
+      return;
+    }
     const submission = routeEnter({ line: raw,
       referenceOpen, copyMode, pending: pending !== undefined, question: question !== undefined, screen: state.screen });
     if (submission.kind === 'ignore') return;
@@ -374,14 +443,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const value = raw.trim();
     if (!pending && !/^\/feedback(?:\s|$)/.test(value)) controller.actions.recordRecall(value);
     if (submission.kind === 'copy') { setInput(''); setCopyMode(true); return; }
-    setRemoval(undefined);
-    // Each panel belongs to the command that opened it, so any other command closes it.
-    if (value !== '/queue') openQueue(false);
-    if (!/^\/model(?: |$)/.test(value)) setModelPanel(undefined);
-    if (value !== '/help') setHelp(false);
-    if (value !== '/cost') setCostExpanded(false);
-    if (value !== '/status') setStatusExpanded(false);
-    if (!/^\/think(?: |$)/.test(value)) openThoughts(false);
+    // Each surface belongs to the command that opened it, so any other command closes it.
+    for (const surface of surfaces) {
+      if (surface.close && !(surface.keepFor?.test(value) ?? false)) surface.close();
+    }
     if (submission.kind === 'quit') { exit(); return; }
     if (submission.kind === 'panel') {
       if (submission.panel === 'cost') {
@@ -424,6 +489,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
             return ok;
           }
           case 'queue': openQueue(true); return true;
+          case 'prompts': openPrompts(true); return true;
+          case 'savePrompt': {
+            const ok = await controller.actions.savePrompt(submission.text);
+            if (ok) setNotice('Saved prompt');
+            return ok;
+          }
           case 'shell': controller.shell.start(submission.command); setScroll(0); return true;
           case 'newSession': return await controller.actions.createSession();
           case 'history': setSearchPanel(undefined); setHistoryPanel({ query: submission.query, contentSearch: false }); return true;
@@ -773,6 +844,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     </Box>
     <Box flexDirection="column" flexShrink={0}>
       {notice && <Text dimColor>{safeText(notice)}</Text>}
+      {composerIntent && <Text color={theme.colors.context}>{composerIntent.hint}</Text>}
       <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
     {queueOpen && !pending ? <QueueDialog queued={queued} rows={stdout.rows ?? 30} width={width}
@@ -802,6 +874,23 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       canSelect={() => !input && controller.state.online && !controller.state.operation.busy} /> : <>
       {thoughtList && <ThoughtsDialog identity={`thoughts:${state.sessionId}`} options={thoughtOptions} empty={!thoughtEntries?.length && !liveThought}
         rows={stdout.rows ?? 30} enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy} />}
+      {promptsOpen && state.screen === 'chat' && <PromptsDialog identity="prompts"
+        prompts={controller.queries.prompts} error={controller.queries.promptsError} width={width}
+        enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy}
+        onChoose={text => { setInput(text); openPrompts(false); }}
+        onEdit={prompt => {
+          setComposerIntent({
+            hint: 'Editing saved prompt · Enter saves · Esc cancels',
+            emptyNotice: 'Type the prompt text; Enter then saves it',
+            commit: async text => {
+              const saved = await controller.actions.updatePrompt(prompt.id, text);
+              if (saved) setNotice('Saved prompt updated');
+              return saved;
+            },
+          });
+          setInput(prompt.text); openPrompts(false);
+        }}
+        onRemove={id => operate(async () => { if (await controller.actions.deletePrompt(id)) setNotice('Deleted saved prompt'); })} />}
       {state.screen === 'chat' && historyQuery !== undefined && <HistoryDialog identity={`history:${historyQuery}`}
         contentSearch={contentSearch} matches={historyMatches} query={historyQuery} messages={layout.messages} width={width}
         enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy}
@@ -836,7 +925,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         </Box>
         {!queueOpen && !pending && state.screen === 'chat' && queued.length > 0 && <QueuedPreview queued={queued} width={width} />}
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(input); }}
-          reservedKeys={approvalKeysActive ? ['1','2','3'] : queueOpen && !pending ? ['d'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : undefined}
+          reservedKeys={approvalKeysActive ? ['1','2','3'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : surfaceReservedKeys.length ? surfaceReservedKeys : undefined}
           width={draftWidth} maxRows={composerRows} promptColor={answerPending ? theme.colors.muted : theme.accent}
           focus={state.online && !state.operation.busy && !copyMode && !answerPending} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}

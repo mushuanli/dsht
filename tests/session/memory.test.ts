@@ -82,8 +82,7 @@ test('a page fetched for the reader does not pin reclaim for the rest of the ses
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { ...snapshot, cursor: 9, hasMore: true, records: [message(8), message(9)] };
   fixture.onPage = async () => ({ records: [message(6), message(7)], hasMore: false });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined,
-    { maxRecords: 4, maxBytes: 100_000 });
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', historyLimits: { maxRecords: 4, maxBytes: 100_000 } });
   t.after(() => controller.stop()); controller.start(); await until(() => controller.queries.record.ready);
   assert.equal(controller.session.pinned, false);
   await controller.actions.older();
@@ -102,7 +101,7 @@ test('history limit options reject unusable values', () => {
 
 test('swapping sessions releases old bodies and pinned reading delays reclaim until returning to live', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, undefined, { maxRecords: 4, maxBytes: 100_000 });
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', historyLimits: { maxRecords: 4, maxBytes: 100_000 } });
   t.after(() => controller.stop()); controller.start(); await until(() => controller.queries.record.ready);
   controller.actions.pinHistory(true);
   for (let seq = 1; seq <= 10; seq++) fixture.follow(message(seq));
@@ -126,7 +125,7 @@ test('paged search keeps live history unchanged, bounds matches, and loads only 
     const before = Number(request.beforeSeq);
     return { records: records.slice(Math.max(0, before - 80), before), hasMore: before > 80 };
   };
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   t.after(() => controller.stop()); controller.start(); await until(() => controller.queries.record.ready);
   const source = controller.queries.record;
   const bytes = source.retainedBytes;
@@ -148,7 +147,7 @@ test('paged search keeps live history unchanged, bounds matches, and loads only 
 });
 
 test('unused projection bodies are not retained by the controller', () => {
-  const controller = new Controller('http://x1:4096', undefined);
+  const controller = new Controller({ base: 'http://x1:4096' });
   controller.queries.telemetry.accept(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
     title: { title: 'Name' }, turnOutline: { turns: ['large body'] },
   } } }, queues: {}, jobs: {} } }));

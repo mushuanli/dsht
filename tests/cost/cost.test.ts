@@ -273,7 +273,7 @@ test('a reconnect re-reads every session, so a gap in this client cannot lose us
   // says the session moved on: only reading its log again can recover what it spent while away.
   fixture.sessionUpdatedAt = 1_000;
   const ledger = new CostLedger();
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   t.after(() => controller.stop()); controller.start();
   await until(() => ledger.total('s1').records === 1 && !ledger.scanning);
   // Within one connection the recorded time is what keeps the minute timer affordable: a pass over
@@ -294,7 +294,7 @@ test('billing scans all HTTP sessions without changing the selected session', as
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 0, hasMore: false, header: { id: 's1' }, records: [record(0, at('2026-09-10T10:00:00'))] };
   const ledger = new CostLedger();
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   t.after(() => controller.stop()); controller.start();
   await until(() => ledger.scannedAt !== undefined);
   assert.equal(controller.state.sessionId, 's1');
@@ -325,7 +325,7 @@ test('cancelling a shared billing refresh aborts paging without cancelling the a
   let requested = false; let release: (() => void) | undefined;
   fixture.onPage = async () => { requested = true; await new Promise<void>(resolve => { release = resolve; }); return { records: [], hasMore: false }; };
   const ledger = new CostLedger();
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   t.after(async () => { release?.(); await controller.stop(); }); controller.start();
   await until(() => requested);
   const abort = new AbortController(); const refresh = controller.actions.refreshCosts(abort.signal);
@@ -369,7 +369,7 @@ test('a subagent session is read under its parent address and its other delivery
   // The list omits the delivery mode, so the continuable form is rejected before the scan succeeds.
   fixture.subagentMode = 'one-shot';
   const ledger = new CostLedger();
-  const controller = new Controller(fixture.url, 'fixture-token', undefined, undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', costs: ledger });
   t.after(() => controller.stop()); controller.start();
   await until(() => ledger.scannedAt !== undefined);
   assert.equal(ledger.total('child').records, 1);
@@ -381,7 +381,7 @@ test('one failing session does not stop the others from being scanned', async t 
   fixture.followSnapshot = { type: 'snapshot', cursor: 1, hasMore: false, header: { id: 's1' }, records: [record(0, at('2026-09-10T10:00:00'))] };
   fixture.failFollow = new Set(['s2']);
   const ledger = new CostLedger();
-  const controller = new Controller(fixture.url, 'fixture-token', 's1', undefined, undefined, ledger);
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   t.after(() => controller.stop()); controller.start();
   await until(() => ledger.scannedAt !== undefined);
   assert.ok(ledger.total('s1').records > 0);

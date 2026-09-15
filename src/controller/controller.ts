@@ -14,10 +14,12 @@ import type { CostLedger } from '../cost/ledger.ts';
 import { CostController } from '../cost/controller.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
 import { MemoryLog } from './memory-log.ts';
+import { PromptStore } from './prompts.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import { ShellController } from '../shell/index.ts';
 import type { HistorySearch, AnswerValue, RemovalTarget } from '../session/types.ts';
+import type { SavedPrompt } from '../contracts.ts';
 import type { FileReference } from '../session/references.ts';
 import type { InteractionState, ModelState, OptionState, PanelState } from '../session/info.ts';
 import type { Reasoning } from '../session/history.ts';
@@ -58,6 +60,10 @@ export interface Actions {
   older(signal?: AbortSignal, transcript?: Transcript): Promise<boolean>;
   historyThrough(target: number | 'first', signal: AbortSignal): Promise<boolean>;
   removeQueued(itemId: string): Promise<boolean>;
+  /** Local shortcut prompts: no connection and no busy envelope, since they never reach the host. */
+  savePrompt(text: string): Promise<boolean>;
+  updatePrompt(id: string, text: string): Promise<boolean>;
+  deletePrompt(id: string): Promise<boolean>;
   command(line: string, signal: AbortSignal): Promise<string | undefined>;
   exportLog(path: string | undefined, signal: AbortSignal): Promise<string | undefined>;
   exportHtml(path: string | undefined, signal: AbortSignal): Promise<string | undefined>;
@@ -93,12 +99,47 @@ export interface Queries {
   readonly recallAtOldest: boolean;
   readonly recallLength: number;
   readonly recallHasOlder: boolean;
+  /** Shortcut prompts the operator saved, oldest first. */
+  readonly prompts: readonly SavedPrompt[];
+  /** Why the saved prompts could not be read, when the file was malformed. */
+  readonly promptsError: string | undefined;
   pendingCounts(): ReadonlyMap<string, number>;
   recall(direction: -1 | 1, current: string): string;
   references(query: string, signal: AbortSignal): Promise<FileReference[]>;
   historyAt(target: number, signal: AbortSignal): Promise<Transcript>;
   /** Plain rows and offsets for one laid-out record. */
   render(input: { transcript: Transcript; width: number; folds: ReadonlySet<number>; liveReasoning: Reasoning }): SessionRender;
+}
+
+/** Everything one `Controller` needs, named so a new capability never shifts an argument position.
+ *
+ * `base` is the only required field: a local or offline client still has an address to show, while
+ * every other capability — authentication, billing, budgets, local shell, shortcut prompts — is
+ * opted into by supplying its own field.
+ */
+export interface ControllerOptions {
+  /** Host base URL. */
+  base: string;
+  /** Token for the first authentication; absent when a saved cookie already authenticates. */
+  token?: string;
+  /** Session to open once connected, instead of starting on the picker. */
+  initialSession?: string;
+  /** Builds one connection client; defaults to a plain `Client` for `base`. */
+  makeClient?: () => Client;
+  /** Authenticates one connection client; defaults to the supplied token. */
+  authenticate?: (client: Client) => Promise<void>;
+  /** Billing ledger; absent disables every cost feature. */
+  costs?: CostLedger;
+  /** History retention budgets. */
+  historyLimits?: HistoryLimits;
+  /** Runtime memory log path; absent disables the log. */
+  memoryLogPath?: string;
+  /** Directory this client runs in, offered as a workspace the host has not registered. */
+  localDirectory?: string;
+  /** Whether `!` may run local commands; the CLI disables it with `--no-shell`. */
+  shellEnabled?: boolean;
+  /** File holding the operator's shortcut prompts; absent keeps them in memory for this run. */
+  promptsPath?: string;
 }
 
 /** Application facade over the domain controllers; the UI owns only this object.
@@ -118,24 +159,40 @@ export class Controller implements ControllerStore, ConnectionListener {
   readonly cost: CostController | undefined;
   /** Bounded runtime memory samples; present only when a log path was supplied. */
   readonly memoryLog: MemoryLog | undefined;
+  /** Shortcut prompts the operator saved; in memory for this run when no path was supplied. */
+  readonly promptStore: PromptStore;
   /** Local `!` commands, run on this machine and shown inline in the transcript. */
   readonly shell: ShellController;
   /** Mutating surface the UI drives. */
   readonly actions: Actions;
   /** Read-only surface the UI drives. */
   readonly queries: Queries;
+  /** Host base URL this client talks to. */
+  readonly base: string;
+  /** Billing ledger supplied at construction, when any. */
+  readonly costs: CostLedger | undefined;
+  /** History retention budgets in force. */
+  readonly historyLimits: HistoryLimits;
+  /** Runtime memory log path, when one was configured. */
+  readonly memoryLogPath: string | undefined;
+  /** Directory this client runs in. */
+  readonly localDirectory: string;
+  /** Session opened at startup, when one was named. */
+  private readonly initialSession: string | undefined;
   private readonly observers = new Set<() => void>();
   private selector = 0;
 
-  constructor(readonly base: string, token: string | undefined, private readonly initialSession?: string,
-    makeClient: () => Client = () => new Client(base),
-    authenticate: (client: Client) => Promise<void> = client => client.authenticate(token ?? ''), readonly costs?: CostLedger, readonly historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS, readonly memoryLogPath?: string,
-    /** Directory this client runs in, offered as a workspace when the host has not registered it. */
-    readonly localDirectory: string = process.cwd(),
-    /** Whether `!` may run local commands; the CLI disables it with `--no-shell`. */
-    shellEnabled = true) {
-    const options: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
-    this.connection = new ConnectionController(this, options, this);
+  constructor(options: ControllerOptions) {
+    const { base, token, initialSession, costs } = options;
+    const makeClient = options.makeClient ?? (() => new Client(base));
+    const authenticate = options.authenticate ?? (client => client.authenticate(token ?? ''));
+    const historyLimits = options.historyLimits ?? DEFAULT_HISTORY_LIMITS;
+    const shellEnabled = options.shellEnabled ?? true;
+    this.base = base; this.costs = costs; this.historyLimits = historyLimits;
+    this.memoryLogPath = options.memoryLogPath; this.localDirectory = options.localDirectory ?? process.cwd();
+    this.initialSession = initialSession;
+    const connectionOptions: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
+    this.connection = new ConnectionController(this, connectionOptions, this);
     this.session = new SessionController(this, this.connection, this.connection, historyLimits);
     this.shell = new ShellController({
       publish: () => this.update({}),
@@ -154,7 +211,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       scanPage: (sessionId, records) => this.session.rememberScanPage(sessionId, records),
       scanDone: sessionId => this.session.rememberScanDone(sessionId),
     });
-    if (memoryLogPath !== undefined) this.memoryLog = new MemoryLog(memoryLogPath, () => this.memorySample());
+    if (this.memoryLogPath !== undefined) this.memoryLog = new MemoryLog(this.memoryLogPath, () => this.memorySample());
+    this.promptStore = new PromptStore(options.promptsPath);
     this.actions = this.buildActions();
     this.queries = this.buildQueries();
   }
@@ -216,6 +274,17 @@ export class Controller implements ControllerStore, ConnectionListener {
       older: (signal, transcript) => this.runAction(() => this.older(signal, transcript)),
       historyThrough: (target, signal) => this.runAction(() => this.historyThrough(target, signal)),
       removeQueued: itemId => this.runAction(() => this.removeQueued(itemId)),
+      savePrompt: text => this.runLocalAction(async () => {
+        await this.promptStore.save(text); this.update({ operation: { ...this.state.operation, error: '' } });
+      }),
+      updatePrompt: (id, text) => this.runLocalAction(async () => {
+        if (!await this.promptStore.update(id, text)) throw new Error('That saved prompt no longer exists');
+        this.update({ operation: { ...this.state.operation, error: '' } });
+      }),
+      deletePrompt: id => this.runLocalAction(async () => {
+        if (!await this.promptStore.remove(id)) throw new Error('That saved prompt no longer exists');
+        this.update({ operation: { ...this.state.operation, error: '' } });
+      }),
       command: (line, signal) => this.runActionValue(() => this.command(line, signal)),
       exportLog: (path, signal) => this.runActionValue(() => this.exportLog(path, signal)),
       exportHtml: (path, signal) => this.runActionValue(() => this.exportHtml(path, signal)),
@@ -253,6 +322,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       get recallAtOldest() { return controller.recallAtOldest; },
       get recallLength() { return controller.recallLength; },
       get recallHasOlder() { return controller.recallHasOlder; },
+      get prompts() { return controller.promptStore.list; },
+      get promptsError() { return controller.promptStore.error; },
       pendingCounts: () => controller.pendingCounts(),
       recall: (direction, current) => controller.recall(direction, current),
       references: (query, signal) => controller.references(query, signal),
@@ -262,7 +333,14 @@ export class Controller implements ControllerStore, ConnectionListener {
   }
 
   /** Start one retry loop, with a fresh snapshot generation after every disconnect. */
-  start(): void { this.connection.start(); this.memoryLog?.start(); }
+  start(): void {
+    this.connection.start();
+    this.memoryLog?.start();
+    // Reading the shortcuts file is local and may finish after the first paint. Nothing is
+    // republished for an empty list: the picker reads the live list when it opens, so a load that
+    // found nothing must not add a render to an unrelated interaction.
+    void this.promptStore.load().then(changed => { if (changed) this.update({}); });
+  }
 
   /** Cancel retries and HTTP, close the socket, and release session and catalog work. */
   async stop(): Promise<void> {
@@ -305,6 +383,18 @@ export class Controller implements ControllerStore, ConnectionListener {
     try { return await operation(); }
     catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return undefined; }
     finally { this.update({ operation: { ...this.state.operation, busy: false } }); }
+  }
+
+  /** Run one local operation that needs no connection, reporting failure the way `runAction` does.
+   *
+   * Shortcut prompts are the operator's own file, so they must keep working while the host is
+   * disconnected; only the failure line is shared with the remote operations.
+   * @param operation - Operation to run against local storage.
+   * @returns Whether it ran to completion.
+   */
+  private async runLocalAction(operation: () => Promise<void>): Promise<boolean> {
+    try { await operation(); return true; }
+    catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return false; }
   }
 
   /** Read the counters one memory sample records; content never leaves as text.
@@ -675,4 +765,5 @@ export class Controller implements ControllerStore, ConnectionListener {
 }
 
 export type { HistorySearch, RemovalTarget, AnswerValue, PendingInteraction } from '../session/types.ts';
+export type { SavedPrompt } from '../contracts.ts';
 export type { State } from '../state.ts';

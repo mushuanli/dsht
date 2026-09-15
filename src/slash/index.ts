@@ -2,6 +2,7 @@
  *
  * A pure leaf: it imports nothing from the application, the features or the UI.
  */
-export { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH, COMMANDS, commonPrefix, completeCommand, suggestedCommands } from './registry.ts';
+export { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH, COMMANDS, COMMAND_POLICY, commonPrefix, completeCommand, suggestedCommands } from './registry.ts';
+export type { CommandPolicy } from './registry.ts';
 export { parseCommand } from './parse.ts';
 export type { Command } from './parse.ts';

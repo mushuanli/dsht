@@ -339,6 +339,7 @@ Tab completes the leading slash command, extending an ambiguous draft to the sha
 | `/coredump [tag]` | Write a V8 heap snapshot to the working directory for memory diagnosis |
 | `/older` | Load older history |
 | `/history [text]` | List your own prompts, optionally filtered; Enter jumps to the selected record |
+| `/prompt [text]` | List saved shortcut prompts — Enter uses, `e` edits, `d` deletes — or save TEXT as a new one |
 | `/search <text>` | Search history page by page; choose a match to open its location |
 | `/copy` | Freeze for terminal selection; Esc resumes |
 | `/latest` | Return to live output and release the separate historical window |
@@ -352,6 +353,8 @@ Tab completes the leading slash command, extending an ambiguous draft to the sha
 | `/help`, `/quit` | List every command with its description, or exit |
 
 Slash commands work in both pickers and the conversation composer. Typing `/` displays matching commands, and `/help` lists commands with their one-line descriptions; PgUp/PgDn changes pages. The `/help`, `/cost`, and `/status` panels remain open until the next command or Esc; `/history` also expires after ten seconds, so a forgotten lookup releases the composer. Esc leaves the draft in place. `/workspace` and `/workspaces` alias `/ws`; `/session` and `/sessions` alias `/resume`. Names may contain spaces; quotes around the complete target are optional. The unquoted target `all` is reserved for `/resume all`; use `/resume "all"` or an ID to open a session titled `all`. Ambiguous targets require a full ID. Switching a workspace opens its sessions and detaches the old transcript; switching sessions updates the workspace label. Neither operation cancels a remote agent.
+
+`/prompt` opens the shortcut prompts you saved, and `/prompt TEXT` saves TEXT as one; the list takes ↑/↓, Enter uses the selected prompt, `e` edits it, and `d` or the dedicated Delete key removes it. Choosing a prompt puts its text into the composer as an ordinary draft instead of sending it, so it can still be changed before Enter sends it. An edit started with `e` is the opposite: Enter writes the text back to the list and never sends it, and Esc abandons the edit and restores the draft it replaced. The prompts live in one private file (`<state>/prompts.json`, mode 0600) beside the memory log, and that one list is shared by every workspace and every host this client talks to, so a shortcut is written once and used everywhere; an identical text is not saved twice, a prompt is limited to 8 KiB, and the list holds at most 500 entries. A host is not needed to save or list them, and a file this build cannot read leaves the list empty and says so in the panel instead of stopping the client.
 
 Type `@` at the end of the draft to search files and directories in the selected session's working directory **on the host**. Use ↑/↓ to select and Tab or Enter to insert; selecting a directory continues completion inside it. Paths with spaces use `@"path with spaces"`. Escape closes the menu and requests cancellation when the agent is running; after closing it, Enter sends the literal draft, including an unmatched path. Lookup failures remain visible and do not submit the draft. Completion operates on the trailing reference, not the cursor position inside existing text.
 

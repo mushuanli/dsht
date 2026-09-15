@@ -28,7 +28,7 @@ test('mouse decoding ignores buttons, motion, releases and horizontal wheels', (
 
 test('workspace search preserves global truncation and validates host responses', async t => {
   const fixture = await host(); t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   t.after(() => controller.stop()); controller.start();
   await until(() => controller.queries.record.ready);
   fixture.searchResult = { items: [{ sessionId: 's1', snippet: 'one' }, { sessionId: 's2', snippet: 'two' }], hasMore: true };
@@ -47,7 +47,7 @@ test('paging stops on an unadvancing host page and respects cancellation', async
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { ...snapshot, hasMore: true };
   fixture.onPage = async () => ({ records: [], hasMore: true });
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   t.after(() => controller.stop()); controller.start();
   await until(() => controller.queries.record.ready);
   assert.equal(await controller.actions.historyThrough('first', new AbortController().signal), false);

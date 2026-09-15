@@ -25,7 +25,7 @@ function composerRows(frame: string): number {
 async function mount(t: { after(fn: () => void | Promise<void>): void }, columns: number, rows: number) {
   const fixture = await host();
   t.after(() => fixture.close());
-  const controller = new Controller(fixture.url, 'fixture-token', 's1');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = renderAt(<App controller={controller} />, columns, rows);
   t.after(async () => { ui.close(); await controller.stop(); });
   controller.start();

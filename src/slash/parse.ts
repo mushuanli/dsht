@@ -17,6 +17,9 @@ export type Command =
   | { kind: 'models'; args: string[] }
   | { kind: 'queue' }
   | { kind: 'newSession' }
+  /** Open the saved-prompt picker, or save the following text as a shortcut prompt. */
+  | { kind: 'prompts' }
+  | { kind: 'savePrompt'; text: string }
   | { kind: 'history'; query: string }
   | { kind: 'sessionSearch'; command: '/ssearch' | '/wsearch'; query: string }
   | { kind: 'historySearch'; query: string }
@@ -80,6 +83,12 @@ export function parseCommand(line: string): Command {
   }
   if (value === '/queue') return { kind: 'queue' };
   if (value === '/new') return { kind: 'newSession' };
+  // `/prompt` alone opens the list; any trailing text is the shortcut being saved. Quoting is
+  // deliberately not stripped here: the saved prompt is stored exactly as it will be sent.
+  if (/^\/prompt(?:\s|$)/.test(value)) {
+    const text = value.slice(7).trim();
+    return text ? { kind: 'savePrompt', text } : { kind: 'prompts' };
+  }
   if (value === '/history' || value.startsWith('/history ')) return { kind: 'history', query: value.slice(8).trim() };
   if (/^\/(?:search|ssearch|wsearch)(?: |$)/.test(value)) {
     const [command, ...words] = value.split(' ');

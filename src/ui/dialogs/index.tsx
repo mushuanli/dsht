@@ -2,7 +2,7 @@
 import { Box, Text } from 'ink';
 import { array, object, string, type ObjectValue } from '../../json.ts';
 import { safeText } from '../../text.ts';
-import { type Message } from '../../contracts.ts';
+import { type Message, type SavedPrompt } from '../../contracts.ts';
 import { toolLine } from '../../text.ts';
 import type { HistorySearch, RemovalTarget } from '../../contracts.ts';
 import type { QueuedInput } from '../../contracts.ts';
@@ -28,6 +28,31 @@ export function QueueDialog({ queued, rows, width, unavailable, enabled, canSele
     }))} pageSize={Math.max(1, Math.min(6, rows - 12))}
       hint="↑ ↓ select · Enter / d / Delete remove · Esc close"
       enabled={enabled} canSelect={canSelect} />
+  </Box>;
+}
+
+/** Operator-saved shortcut prompts with choose, edit and delete.
+ *
+ * Enter hands the text to the composer rather than sending it, so the reader can adjust it first.
+ * @param props - Saved entries, their load error, geometry and the three row actions.
+ * @returns The saved-prompt picker.
+ */
+export function PromptsDialog({ identity, prompts, error, width, enabled, canSelect, onChoose, onEdit, onRemove }: {
+  identity: string; prompts: readonly SavedPrompt[]; error?: string; width: number;
+  enabled: boolean; canSelect(): boolean;
+  onChoose(text: string): void; onEdit(prompt: SavedPrompt): void; onRemove(id: string): void;
+}) {
+  const theme = useTheme();
+  return <Box flexDirection="column" marginY={1}>
+    <Text bold>Saved prompts · Esc close</Text>
+    {error !== undefined && <Text color={theme.colors.error} wrap="truncate-end">{safeText(error)}</Text>}
+    {!prompts.length && <Text dimColor>No saved prompts · add one with /prompt TEXT</Text>}
+    <Picker key={identity} choices={prompts.map(prompt => ({
+      key: prompt.id, label: toolLine(prompt.text, width - 6),
+      action: () => onChoose(prompt.text),
+      edit: () => onEdit(prompt),
+      remove: () => onRemove(prompt.id),
+    }))} hint="↑ ↓ select · Enter use · e edit · d/Delete delete · Esc close" enabled={enabled} canSelect={canSelect} />
   </Box>;
 }
 
