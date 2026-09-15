@@ -2,6 +2,8 @@
 
 Status: implemented
 
+部分被 `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` 取代：`answers`/`option`/`approval` 仍属 `SessionInfo`；`@` 菜单高亮改为 `ui/app.tsx` 组件状态。
+
 ## Problem
 
 围绕宿主待答 waterfall 与 `@` 引用菜单的三块状态原先住在 `ui/app.tsx`：按事件 ID 键的部分提问作答、被高亮的选项或审批行、以及引用菜单的高亮行与抑制它的草稿。waterfall 本身早已由 `SessionController.pendingFor` 按会话派生，因此本地选择可能活得比它所属的请求更久：切换会话后，读者已经离开的那个会话仍留着高亮和半套作答。

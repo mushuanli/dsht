@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Superseded in part by `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract`: panel visibility is component state in `ui/app.tsx` again, cleared on a session switch, so the modal surfaces are no longer session data.
+
 ## Problem
 
 Six panel flags lived in `ui/app.tsx` as `useState`: the reasoning panel, the queue panel, the model dialog step, and the history/search query, mode and matches. They were reset by three different effects keyed on the record, the session id and the pending event, so which panel survived a session switch depended on which effect happened to run. The rows those panels show always came from the record, so these flags were the only session-scoped state left outside `SessionInfo`.

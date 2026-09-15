@@ -2,6 +2,8 @@
 
 Status: implemented
 
+部分被 `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` 取代：输入框重新成为 `ui/app.tsx` 的组件状态（切换会话由一处 effect 清理），因为光标与寄存草稿不是会话数据。
+
 ## Problem
 
 输入框原先住在 `ui/app.tsx` 里，一份 React state 加一个 `draft` ref 镜像。切换会话时没有任何东西重置它：`selectSession` 会新建 `Transcript`、重置回填索引，但草稿、光标以及被阻塞对话框寄存的草稿都留了下来，于是一个会话里写了一半的提示词会出现在下一个会话里。那个 ref 镜像的存在只是因为 Ink 的输入回调可能在受控监听器刷新之前就运行，这等于同一个值有两个来源。

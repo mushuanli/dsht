@@ -14,15 +14,15 @@ Status: implemented
 
 费用账本现在是不可重算的。每条 charge 记录首次求值时确定的 `priceId` 与 `amount`，之后扫描复用该决定，而不再按当前表重新计价。只有没有可用用量的样本保持开放，因为该请求尚未报告完 token；其余决定——已计价、估算或未计价——一律终局。落盘文件为第 2 代，不内嵌价格版本；其他世代的文件会被忽略，并由下一次扫描重建，而不做迁移。
 
-`app.tsx` 保留界面状态机与键盘路由，展示与命令知识外移：`ui/commands/registry.ts` 负责命令目录、补全与候选，`ui/commands/parse.ts` 把一次提交归类为动作，`ui/dialogs/` 负责选择器、各面板与费用面板，`ui/chat/` 负责标题、视口与状态栏，`ui/input/` 负责输入框、回填、鼠标与引用菜单，`ui/mount.tsx` 是唯一通过 Ink 渲染的模块。
+`app.tsx` 保留界面状态机与键盘路由，展示与命令知识外移：`ui/commands/registry.ts` 曾负责命令目录、补全与候选，`ui/commands/parse.ts` 曾把一次提交归类为动作（两者已于 2026-09-15 移入 `slash/`），`ui/dialogs/` 负责选择器、各面板与费用面板，`ui/chat/` 负责标题、视口与状态栏，`ui/input/` 负责输入框、回填、鼠标与引用菜单，`ui/mount.tsx` 是唯一通过 Ink 渲染的模块。
 
-`tests/architecture/dependencies.test.ts` 强制该边界：每个单元只能导入为其列出的单元，React 与 Ink 只能出现在 `ui/` 下，且 `ui/` 不得直接调用传输层 client。包对外接口通过 `src/index.ts` 与内部布局解耦：`@itookit/dsht` 指向 `dist/index.js`，`@itookit/dsht/auth` 指向 `dist/transport/auth.js`，`dsht` 可执行文件指向 `dist/cli/index.js`。
+`tests/architecture/dependencies.test.ts` 强制该边界：每个单元只能导入为其列出的单元，React 与 Ink 只能出现在 `ui/` 下，且 `ui/` 不得直接调用传输层 client。该规则集已于 2026-09-15 收紧为九条无豁免的禁止边（见 `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract`）。包对外接口通过 `src/index.ts` 与内部布局解耦：`@itookit/dsht` 指向 `dist/index.js`，`@itookit/dsht/auth` 指向 `dist/transport/auth.js`，`dsht` 可执行文件指向 `dist/cli/index.js`。
 
 ## Alternatives considered
 
 按操作把 `Controller` 拆成 `PromptService`、`QueueService` 等服务被否决：原问题是四个业务域，而不是许多小服务，按方法拆会把同一个状态机分散到总是一起改动的文件里。保留重新计价并增加失效键被否决，因为已展示的金额仍会在事后变化。迁移第 1 代缓存文件被否决，因为缓存可丢弃，下一次扫描会从服务端历史重建。
 
-把费用面板留在 `cost/` 下被否决，因为它渲染 React；把命令归类留在 `app.tsx` 被否决，因为补全、帮助与提交会继续保留三份命令清单。把提交分发器进一步拆到 `ui/commands/execute.ts` 被推迟：它需要约二十个 React setter 组成的上下文，只会搬移代码而不会降低耦合。
+把费用面板留在 `cost/` 下被否决，因为它渲染 React；把命令归类留在 `app.tsx` 被否决，因为补全、帮助与提交会继续保留三份命令清单。把提交分发器进一步拆到 `ui/commands/execute.ts` 被推迟：它需要约二十个 React setter 组成的上下文，只会搬移代码而不会降低耦合。（2026-09-15 已解决：语法拆入 `slash/`，UI 路由拆入 `ui/routing.ts`，可执行性由应用判定。）
 
 ## Consequences
 

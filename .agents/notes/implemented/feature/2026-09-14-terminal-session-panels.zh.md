@@ -2,6 +2,8 @@
 
 Status: implemented
 
+部分被 `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` 取代：面板可见性重新成为 `ui/app.tsx` 的组件状态，随切换会话清理，因此模态界面不再是会话数据。
+
 ## Problem
 
 六个面板标志原先作为 `useState` 住在 `ui/app.tsx`：思考面板、队列面板、模型对话框的步骤，以及历史／搜索的 query、模式与命中。它们由三个不同的 effect 重置（分别以记录、会话 ID 与待答事件为键），因此"切换会话后哪个面板还开着"取决于哪个 effect 恰好运行。这些面板显示的行本来就来自记录，所以这些标志是 `SessionInfo` 之外仅剩的会话级状态。

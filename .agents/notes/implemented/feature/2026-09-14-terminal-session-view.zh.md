@@ -2,6 +2,8 @@
 
 Status: implemented
 
+部分被 `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` 取代：`scroll`、`folds`、`liveReasoning` 改为组件状态；`window` 留在 `SessionInfo`（强引用由它持有），`pinned` 变成 `SessionController` 的私有标志。
+
 ## Problem
 
 阅读视图原先住在 `ui/app.tsx`：显示哪份记录（读者跳到旧历史时是一份独立的 `Transcript`）、读者往回滚了多远、哪些推理块被展开、以及回收是否被暂停。独立窗口只由一个以该组件状态为键的清理 effect 释放，而回收保护标志住在 `SessionController` 的私有字段里，其依据的视图却住在组件里，两者无法放在一起推理。

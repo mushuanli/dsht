@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Superseded in part by `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract`: the composer is component state in `ui/app.tsx` again (cleared on a session switch by one effect), because a caret and a parked draft are not session data.
+
 ## Problem
 
 The composer lived in `ui/app.tsx` as React state plus a `draft` ref mirror. Nothing reset it when another session opened: `selectSession` created a new `Transcript` and reset the recall index, but the draft, its caret and the draft parked by a blocking dialog survived, so a half-written prompt for one conversation appeared in the next one. The ref mirror existed only because an Ink input callback can run before the controlled listener is refreshed, which left two sources for the same value.

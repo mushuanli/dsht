@@ -2,6 +2,8 @@
 
 Status: implemented
 
+部分被 `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` 取代：记录仍只有一个所有者（`SessionInfo.record`）；`SessionInfo` 现在只持有 `sessionId`、`record`、`prompts`、`window`、`interaction`。
+
 ## Problem
 
 选中会话的 `Transcript` 原先作为独立字段住在 `State.transcript` 里，而会话的其余部分——提示词索引、输入框、阅读视图、交互状态——已经迁入 `State.session`。一个会话有两个入口，意味着"切换会话"要同时记得两处，`selectSession`、`pickWorkspace` 与释放路径也各自构造或销毁 transcript。

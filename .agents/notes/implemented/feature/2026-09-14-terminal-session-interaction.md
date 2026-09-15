@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Superseded in part by `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract`: `answers`/`option`/`approval` still belong to `SessionInfo`; the `@` menu highlight moved to `ui/app.tsx` component state.
+
 ## Problem
 
 Three pieces of state around pending host waterfalls and the `@` reference menu lived in `ui/app.tsx`: the partly collected question answers keyed by event id, the highlighted option or approval row, and the reference menu's row index plus the draft that dismissed it. The waterfall itself is already derived per session by `SessionController.pendingFor`, so the local selection could outlive the request it belonged to: switching sessions kept a highlight and a half-finished answer set for a session the reader had left.

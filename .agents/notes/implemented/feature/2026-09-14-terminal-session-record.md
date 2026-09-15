@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Superseded in part by `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract`: the record still has exactly one owner (`SessionInfo.record`); `SessionInfo` now holds only `sessionId`, `record`, `prompts`, `window` and `interaction`.
+
 ## Problem
 
 The selected session's `Transcript` lived in `State.transcript` as its own field while the rest of the session — prompt index, composer, reading view, interaction state — had moved into `State.session`. Two entry points for one session meant that "switch session" had to remember both, and `selectSession`, `pickWorkspace` and the release path each constructed or disposed a transcript themselves.

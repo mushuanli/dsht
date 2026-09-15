@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Superseded in part by `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract`: `scroll`, `folds` and `liveReasoning` are component state; `window` stays in `SessionInfo` because it owns the strong reference, and `pinned` became a private flag on `SessionController`.
+
 ## Problem
 
 The reading view lived in `ui/app.tsx`: which record was displayed (a detached `Transcript` when the reader jumped to old history), how far back the reader had scrolled, which reasoning blocks were expanded, and whether reclamation was paused. The detached window was released only by a cleanup effect keyed on that component state, and the reclamation flag lived in a private `SessionController` field while the view that justified it lived in the component, so the two could not be reasoned about together.
