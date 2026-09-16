@@ -16,7 +16,7 @@ import { CostController } from '../cost/controller.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
 import { MemoryLog } from './memory-log.ts';
 import { PromptStore } from './prompts.ts';
-import { latestAssistantText, parseLoopScore, ScoredLoop, type LoopLimits, type LoopProtocol } from './loop.ts';
+import { latestAssistantText, parseLoopResult, ScoredLoop, type LoopLimits, type LoopProtocol } from './loop.ts';
 import type { LoopProgress } from '../contracts.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
@@ -80,6 +80,8 @@ export interface Actions {
   startLoop(protocol: LoopProtocol, limits: LoopLimits): Promise<boolean>;
   /** Stop a running loop; the terminal progress stays visible for the reader. */
   stopLoop(): void;
+  /** Set or clear the session's verification standard read by the next loop. */
+  setVerification(criteria?: string): void;
   cancelTurn(): Promise<boolean>;
   answer(value: AnswerValue): Promise<boolean>;
   approve(allowed: boolean): Promise<boolean>;
@@ -132,6 +134,8 @@ export interface Queries {
   readonly prompts: readonly SavedPrompt[];
   /** Live progress of the selected session's design review, when one has run. */
   readonly loop: LoopProgress | undefined;
+  /** Standard the next loop must be verified against, when the operator set one. */
+  readonly verification: string | undefined;
   /** Why the saved prompts could not be read, when the file was malformed. */
   readonly promptsError: string | undefined;
   pendingCounts(): ReadonlyMap<string, number>;
@@ -196,6 +200,8 @@ export class Controller implements ControllerStore, ConnectionListener {
   private loop?: ScoredLoop;
   /** Prompt the loop still has to send, when it could not be sent immediately. */
   private loopPrompt?: string;
+  /** Verification standard for this session, read when a loop starts. */
+  private verification?: string;
   /** Local `!` commands, run on this machine and shown inline in the transcript. */
   readonly shell: ShellController;
   /** Mutating surface the UI drives. */
@@ -282,8 +288,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       ? this.session.pendingFor(next) : [];
     // The shell service owns its blocks; state carries only the plain snapshot the UI renders.
     if (this.shell) next.shell = this.shell.snapshot();
-    // A review belongs to the session it reviews; switching away ends it.
-    if (this.loop !== undefined && this.loop.sessionId !== next.sessionId) this.forgetLoop();
+    // A loop and its verification standard belong to the session; switching away ends them.
+    if (this.state.sessionId !== next.sessionId) { if (this.loop !== undefined) this.forgetLoop(); this.verification = undefined; }
     this.state = next;
     for (const observer of this.observers) observer();
     // A prompt the loop could not send yet (offline, busy or answering) goes out as soon as it can.
@@ -308,6 +314,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       handoff: () => this.runAction(() => this.handoff()),
       startLoop: (protocol, limits) => this.runAction(() => this.startLoop(protocol, limits)),
       stopLoop: () => this.stopLoop(),
+      setVerification: criteria => this.setVerification(criteria),
       cancelTurn: () => this.runAction(() => this.cancelTurn()),
       answer: value => this.runAction(() => this.answer(value)),
       approve: allowed => this.runAction(() => this.approve(allowed)),
@@ -367,6 +374,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       get prompts() { return controller.promptStore.list; },
       get promptsError() { return controller.promptStore.error; },
       get loop() { return controller.loop?.progress; },
+      get verification() { return controller.verification; },
       pendingCounts: () => controller.pendingCounts(),
       recall: (direction, current) => controller.recall(direction, current),
       references: (query, signal) => controller.references(query, signal),
@@ -806,7 +814,13 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.update({});
   }
 
-  /** Drop the review entirely, without publishing a cancelled phase. */
+  /** Replace this session's verification standard; the next loop reads it at start. */
+  private setVerification(criteria?: string): void {
+    this.verification = criteria;
+    this.update({});
+  }
+
+  /** Drop the loop entirely, without publishing a cancelled phase. */
   private forgetLoop(): void {
     this.loop = undefined;
     this.loopPrompt = undefined;
@@ -819,7 +833,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     const loop = this.loop;
     if (loop === undefined || !loop.active || !loop.settled || loop.sessionId !== sessionId) return;
     const text = latestAssistantText(this.state.session.record.messages);
-    const step = loop.settle(parseLoopScore(text, loop.protocol));
+    const step = loop.settle(parseLoopResult(text, loop.protocol));
     if (step.kind === 'continue') this.loopPrompt = step.prompt;
     this.update({});
     if (step.kind === 'continue') void this.flushLoop();

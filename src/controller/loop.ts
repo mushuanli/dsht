@@ -37,11 +37,20 @@ export interface LoopProtocol {
   followUp(limits: LoopLimits, step: number, attempt: number): string;
 }
 
+/** What one reply's result block reported. */
+export interface LoopResult {
+  /** Completion score in 0–10; absent when the block omitted or malformed it. */
+  score?: number;
+  /** Verdict; `blocked` stops the run immediately instead of spending its budget. */
+  status?: 'done' | 'retry' | 'blocked';
+}
+
 /** What one consumed attempt decided. */
 export type LoopStepResult =
   | { kind: 'continue'; prompt: string }
   | { kind: 'passed' }
-  | { kind: 'exhausted' };
+  | { kind: 'exhausted' }
+  | { kind: 'blocked' };
 
 /** Apply a protocol's defaults and reject a range that cannot run.
  * @param protocol - Protocol being started.
@@ -57,15 +66,16 @@ export function resolveLoop(protocol: LoopProtocol, options: LoopOptions): LoopL
   return { from, to, score, tries };
 }
 
-/** Read the score out of the last result block of one reply.
+/** Read the result out of the last block of one reply.
  *
  * The block must be in the assistant's text, not reasoning, and this takes the last one so a reply
- * that quotes an earlier block still reports its own result.
+ * that quotes its verifier still reports its own verdict. A missing, malformed or foreign block is
+ * undefined; a valid block with no usable field is an empty result, which counts as a failed attempt.
  * @param text - One turn's assistant text.
  * @param protocol - Protocol whose marker and kind identify the block.
- * @returns The score in 0–10, or undefined when the reply carries no valid block.
+ * @returns The reported score and verdict, or undefined when the reply carries no valid block.
  */
-export function parseLoopScore(text: string, protocol: Pick<LoopProtocol, 'marker' | 'kind'>): number | undefined {
+export function parseLoopResult(text: string, protocol: Pick<LoopProtocol, 'marker' | 'kind'>): LoopResult | undefined {
   let body: string | undefined;
   const segments = text.split('```');
   // Fenced blocks are the odd-indexed segments: prose, block, prose, block, …
@@ -77,10 +87,14 @@ export function parseLoopScore(text: string, protocol: Pick<LoopProtocol, 'marke
   }
   if (body === undefined) return undefined;
   try {
-    const parsed = JSON.parse(body.trim()) as { kind?: unknown; score?: unknown };
+    const parsed = JSON.parse(body.trim()) as { kind?: unknown; score?: unknown; status?: unknown };
     if (parsed.kind !== protocol.kind) return undefined;
     const score = typeof parsed.score === 'number' ? parsed.score : Number(parsed.score);
-    return Number.isFinite(score) && score >= 0 && score <= 10 ? score : undefined;
+    const status = parsed.status === 'done' || parsed.status === 'retry' || parsed.status === 'blocked' ? parsed.status : undefined;
+    return {
+      ...(Number.isFinite(score) && score >= 0 && score <= 10 ? { score } : {}),
+      ...(status === undefined ? {} : { status }),
+    };
   } catch { return undefined; }
 }
 
@@ -132,11 +146,14 @@ export class ScoredLoop {
   sent(): void { this.awaiting = true; }
 
   /** Consume one finished attempt.
-   * @param score - Parsed score, or undefined when the reply carried no usable block.
+   * @param result - Parsed result, or undefined when the reply carried no usable block.
    * @returns What the loop does next.
    */
-  settle(score: number | undefined): LoopStepResult {
+  settle(result: LoopResult | undefined): LoopStepResult {
     this.awaiting = false;
+    // A verifier that proved the task impossible ends the run instead of burning the budget.
+    if (result?.status === 'blocked') { this.phase = 'blocked'; return { kind: 'blocked' }; }
+    const score = result?.score;
     if (score !== undefined) this.best = Math.max(this.best, score);
     if (score !== undefined && score >= this.limits.score) {
       if (this.step >= this.limits.to) { this.phase = 'passed'; return { kind: 'passed' }; }

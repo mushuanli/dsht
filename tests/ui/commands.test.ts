@@ -145,6 +145,20 @@ test('/loop takes a positional score and tries plus a free-form prompt', () => {
   assert.deepEqual(suggestedCommands('/loo'), ['/loop']);
 });
 
+test('/verify stores, inspects and clears the standard the next loop uses', () => {
+  assert.deepEqual(parseCommand('/verify'), { kind: 'verify' });
+  assert.deepEqual(parseCommand('/verify off'), { kind: 'verify', clear: true });
+  assert.deepEqual(parseCommand('/verify 必须通过 npm test'), { kind: 'verify', criteria: '必须通过 npm test' });
+  // Line breaks matter: the standard is a checklist the verifier reads verbatim.
+  const multiline = parseCommand('/verify first\nsecond');
+  assert.ok(multiline.kind === 'verify');
+  assert.equal(multiline.criteria, 'first\nsecond');
+  assert.deepEqual(COMMAND_POLICY.verify, { chatOnly: true });
+  const hint = COMMAND_HINTS.find(item => item.command === '/verify');
+  assert.equal(hint?.usage, '<criteria|off>');
+  assert.deepEqual(suggestedCommands('/ver'), ['/verify']);
+});
+
 test('/design-review parses its four options and rejects a malformed line', () => {
   assert.deepEqual(parseCommand('/design-review'), { kind: 'designReview', options: {} });
   assert.deepEqual(parseCommand('/design-review --from 3 --to 5 --score 8.5 --tries 4'), {

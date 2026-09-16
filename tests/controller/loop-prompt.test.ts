@@ -18,9 +18,22 @@ test('the first send keeps the prompt verbatim and states the contract', () => {
   // The operator's text survives line breaks; the contract names the score and the result block.
   assert.ok(brief.startsWith(prompt + '\n'));
   assert.match(brief, /第 1 轮第 1 次尝试（共 1 轮，及格线 8.5，每轮最多 3 次）/);
-  assert.match(brief, /independent|独立 verifier 子代理/);
+  assert.match(brief, /verifier 子代理/);
   assert.match(brief, /"kind":"loop","step":1,"attempt":1/);
-  assert.match(brief, /score 小于 8.5 时 verdict 必须是 retry/);
+  assert.match(brief, /"status":"done\|retry\|blocked"/);
+  assert.match(brief, /score 小于 8.5 时 status 必须是 retry/);
+  assert.match(brief, /evidence 必须给出评分的依据/);
+});
+
+test('a verification standard is injected and marked on the label', () => {
+  const plain = promptLoopProtocol('do the thing');
+  const verified = promptLoopProtocol('do the thing', 'npm test 必须通过\n不得新增 any');
+  assert.equal(plain.title, 'Loop · do the thing');
+  assert.equal(verified.title, 'Loop · do the thing (verified)');
+  assert.match(plain.brief({ from: 1, to: 1, score: 8, tries: 1 }, 1, 1), /验证标准：未设置/);
+  const brief = verified.brief({ from: 1, to: 1, score: 8, tries: 1 }, 1, 1);
+  assert.match(brief, /验证标准（由 \/verify 提供，逐条对照）：/);
+  assert.match(brief, /npm test 必须通过\n不得新增 any/);
 });
 
 test('a later attempt only asks for the unfinished part', () => {

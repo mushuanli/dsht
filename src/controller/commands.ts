@@ -7,7 +7,7 @@
 import type { CommandIntent } from '../contracts.ts';
 import { DESIGN_REVIEW_USAGE, LOOP_USAGE, type Command } from '../slash/index.ts';
 import type { Controller } from './controller.ts';
-import { DESIGN_REVIEW_PROTOCOL } from './design-review.ts';
+import { designReviewProtocol } from './design-review.ts';
 import { resolveLoop } from './loop.ts';
 import { promptLoopProtocol } from './loop-prompt.ts';
 
@@ -159,15 +159,30 @@ export async function runCommand(controller: Controller, command: RunnableComman
       return { closePanels: true, live: true, scroll: 0, notice: 'Handoff requested · local HANDOFF.md cleared' };
     }
     case 'designReview': {
-      const limits = resolveLoop(DESIGN_REVIEW_PROTOCOL, command.options);
+      const protocol = designReviewProtocol(controller.queries.verification);
+      const limits = resolveLoop(protocol, command.options);
       if (limits === undefined) return { closePanels: true, error: DESIGN_REVIEW_USAGE };
-      if (!await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, limits)) return undefined;
+      if (!await controller.actions.startLoop(protocol, limits)) return undefined;
       controller.actions.setViewWindow(undefined);
       return { closePanels: true, live: true, scroll: 0,
         notice: `Design review started · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` };
     }
+    case 'verify': {
+      if (command.clear) {
+        controller.actions.setVerification(undefined);
+        return { closePanels: true, notice: 'Verification standard cleared' };
+      }
+      if (command.criteria === undefined) {
+        const current = controller.queries.verification;
+        return { closePanels: true, notice: current === undefined
+          ? 'No verification standard set · use /verify <criteria>'
+          : `Verification standard: ${current.replace(/\s+/g, ' ').slice(0, 80)}` };
+      }
+      controller.actions.setVerification(command.criteria);
+      return { closePanels: true, notice: 'Verification standard set · the next loop verifies against it' };
+    }
     case 'loop': {
-      const protocol = promptLoopProtocol(command.prompt);
+      const protocol = promptLoopProtocol(command.prompt, controller.queries.verification);
       const limits = resolveLoop(protocol, command.options);
       if (limits === undefined) return { closePanels: true, error: LOOP_USAGE };
       if (!await controller.actions.startLoop(protocol, limits)) return undefined;

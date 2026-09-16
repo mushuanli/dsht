@@ -1,7 +1,7 @@
 /** The generic scored loop: defaults, the reply contract, and the step machine every protocol reuses. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ScoredLoop, latestAssistantText, parseLoopScore, resolveLoop, type LoopProtocol } from '../../src/controller/loop.ts';
+import { ScoredLoop, latestAssistantText, parseLoopResult, resolveLoop, type LoopProtocol } from '../../src/controller/loop.ts';
 
 /** A minimal protocol: enough to exercise the mechanism without any real prompt text. */
 const PROTOCOL: LoopProtocol = {
@@ -18,22 +18,25 @@ test('the defaults come from the protocol and a reversed range is refused', () =
   assert.equal(resolveLoop(PROTOCOL, { from: 5, to: 1 }), undefined);
 });
 
-test('the score is read only from the last block of the declared marker and kind', () => {
+test('the result is read only from the last block of the declared marker and kind', () => {
   const block = (marker: string, body: string) => '```' + marker + '\n' + body + '\n```';
   const reply = [
     'finding: something',
-    block('dsht-loop', '{"kind":"demo","score":6}'),
+    block('dsht-loop', '{"kind":"demo","score":6,"status":"retry"}'),
     'more prose',
-    block('dsht-loop', '{"kind":"demo","score":8.5}'),
+    block('dsht-loop', '{"kind":"demo","score":8.5,"status":"done"}'),
   ].join('\n');
-  assert.equal(parseLoopScore(reply, PROTOCOL), 8.5);
-  // A numeric string is accepted; a wrong kind, wrong marker, bad JSON or out-of-range score is not.
-  assert.equal(parseLoopScore(block('dsht-loop', '{"kind":"demo","score":"9.5"}'), PROTOCOL), 9.5);
-  assert.equal(parseLoopScore(block('dsht-loop', '{"kind":"other","score":9}'), PROTOCOL), undefined);
-  assert.equal(parseLoopScore(block('other', '{"kind":"demo","score":9}'), PROTOCOL), undefined);
-  assert.equal(parseLoopScore(block('dsht-loop', '{not json}'), PROTOCOL), undefined);
-  assert.equal(parseLoopScore(block('dsht-loop', '{"kind":"demo","score":11}'), PROTOCOL), undefined);
-  assert.equal(parseLoopScore('no block here', PROTOCOL), undefined);
+  assert.deepEqual(parseLoopResult(reply, PROTOCOL), { score: 8.5, status: 'done' });
+  // A numeric string is accepted; an unknown status is dropped rather than guessed.
+  assert.deepEqual(parseLoopResult(block('dsht-loop', '{"kind":"demo","score":"9.5","status":"weird"}'), PROTOCOL), { score: 9.5 });
+  // A verifier may report blocked with no score at all; that still ends the run.
+  assert.deepEqual(parseLoopResult(block('dsht-loop', '{"kind":"demo","status":"blocked"}'), PROTOCOL), { status: 'blocked' });
+  // A wrong kind, wrong marker, bad JSON or out-of-range score yields no result.
+  assert.equal(parseLoopResult(block('dsht-loop', '{"kind":"other","score":9}'), PROTOCOL), undefined);
+  assert.equal(parseLoopResult(block('other', '{"kind":"demo","score":9}'), PROTOCOL), undefined);
+  assert.equal(parseLoopResult(block('dsht-loop', '{not json}'), PROTOCOL), undefined);
+  assert.deepEqual(parseLoopResult(block('dsht-loop', '{"kind":"demo","score":11}'), PROTOCOL), {});
+  assert.equal(parseLoopResult('no block here', PROTOCOL), undefined);
 });
 
 test('the turn text is gathered from the last user boundary to the end', () => {
@@ -54,7 +57,7 @@ test('a step retries below the score, advances at it, and stops when the budget 
   loop.sent();
   assert.equal(loop.settled, true);
   // A low score costs one attempt; the next one exhausts the budget.
-  const retry = loop.settle(7);
+  const retry = loop.settle({ score: 7 });
   assert.equal(retry.kind, 'continue');
   assert.equal(retry.kind === 'continue' && retry.prompt, 'follow 1/2');
   assert.equal(loop.settled, false);
@@ -66,11 +69,11 @@ test('a step retries below the score, advances at it, and stops when the budget 
 
 test('reaching the score advances one step and the last step finishes the run', () => {
   const loop = new ScoredLoop('s1', PROTOCOL, { from: 1, to: 2, score: 8, tries: 3 });
-  assert.equal(loop.settle(8).kind, 'continue');
+  assert.equal(loop.settle({ score: 8 }).kind, 'continue');
   assert.equal(loop.progress.step, 2);
   assert.equal(loop.progress.attempt, 1);
   assert.equal(loop.progress.best, 0);
-  assert.equal(loop.settle(9.5).kind, 'passed');
+  assert.equal(loop.settle({ score: 9.5 }).kind, 'passed');
   assert.equal(loop.progress.phase, 'passed');
 });
 
@@ -80,4 +83,11 @@ test('cancelling ends the loop and it never continues', () => {
   assert.equal(loop.active, false);
   assert.equal(loop.settled, false);
   assert.equal(loop.progress.phase, 'cancelled');
+});
+
+test('a blocked verdict ends the run instead of spending the remaining budget', () => {
+  const loop = new ScoredLoop('s1', PROTOCOL, { from: 1, to: 10, score: 8, tries: 10 });
+  assert.equal(loop.settle({ status: 'blocked' }).kind, 'blocked');
+  assert.equal(loop.progress.phase, 'blocked');
+  assert.equal(loop.active, false);
 });

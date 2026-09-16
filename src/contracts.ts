@@ -43,8 +43,8 @@ export interface LoopProgress {
   attempt: number;
   /** Best score seen in the current step. */
   best: number;
-  /** `running` while the loop runs; the other values are terminal. */
-  phase: 'running' | 'passed' | 'exhausted' | 'cancelled';
+  /** `running` while the loop runs; `blocked` means the verifier proved the task impossible. */
+  phase: 'running' | 'passed' | 'exhausted' | 'blocked' | 'cancelled';
 }
 
 /** The presentational outcome of one submitted line.

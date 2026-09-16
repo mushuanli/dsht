@@ -1,7 +1,7 @@
 /** The client-driven loop, driven end to end against the host fixture through one protocol. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Controller, DESIGN_REVIEW_PROTOCOL } from '../../src/controller/index.ts';
+import { Controller, designReviewProtocol } from '../../src/controller/index.ts';
 import { array, object } from '../../src/transport/wire.ts';
 import { host, until } from '../support/host.ts';
 
@@ -32,7 +32,7 @@ test('the loop sends the brief, advances on a passing score and stops on a faili
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  assert.equal(await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, { from: 1, to: 2, score: 8, tries: 2 }), true);
+  assert.equal(await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 }), true);
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The opening send is the scoped brief, not a follow-up.
   assert.match(lastPrompt(fixture), /只执行第 1 轮的第 1 次尝试/);
@@ -69,20 +69,20 @@ test('typed text, an explicit stop and a session switch all end the loop', async
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.equal(controller.queries.loop?.phase, 'running');
   // A human turn takes the conversation back, so the loop stops instead of racing it.
   await controller.actions.prompt('never mind');
   assert.equal(controller.queries.loop?.phase, 'cancelled');
 
-  await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
   assert.equal(controller.queries.loop?.phase, 'running');
   controller.actions.stopLoop();
   assert.equal(controller.queries.loop?.phase, 'cancelled');
 
   // A loop belongs to its session, so opening another one drops it entirely.
-  await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
   assert.equal(controller.queries.loop?.step, 1);
   await controller.actions.selectSession('s2');
   await until(() => controller.state.sessionId === 's2');
@@ -98,7 +98,7 @@ test('loop prompts stay out of composer recall while typed prompts remain', asyn
 
   // The opened snapshot already contributes one prompt (the fixture's `你好`).
   const before = controller.queries.recallLength;
-  await controller.actions.startLoop(DESIGN_REVIEW_PROTOCOL, { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The host echoes a prompt back as a durable user message; a loop prompt must not become recall.
   const brief = lastPrompt(fixture);
@@ -116,4 +116,22 @@ test('loop prompts stay out of composer recall while typed prompts remain', asyn
     data: { content: [{ type: 'text', text: 'remember me' }] } } });
   await until(() => controller.queries.recallLength === before + 1);
   assert.equal(controller.queries.recall(-1, 'draft'), 'remember me');
+});
+
+test('a blocked verdict stops the loop without spending the remaining budget', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  const before = fixture.calls.filter(call => call.method === 'session/prompt').length;
+  // The verifier proved the task impossible; the run ends here rather than trying nine more times.
+  reply(fixture, 30, 'cannot be done\n```dsht-loop\n{"kind":"design-review","step":1,"attempt":1,"status":"blocked"}\n```');
+  await until(() => controller.queries.record.messages.some(message => message.text.includes('cannot be done')));
+  idle(fixture);
+  await until(() => controller.queries.loop?.phase === 'blocked');
+  assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, before);
 });

@@ -71,3 +71,24 @@ test('a generic /loop wraps its prompt and starts the scored loop', async t => {
   assert.ok(text.startsWith('do the thing\n'));
   assert.match(text, /"kind":"loop"/);
 });
+
+test('/verify stores a standard the next loop injects, and clears it', async t => {
+  const { app, fixture } = await controller(t);
+  assert.deepEqual(await run(app, '/verify'), { closePanels: true, notice: 'No verification standard set · use /verify <criteria>' });
+  assert.deepEqual(await run(app, '/verify npm test 必须通过\n不得新增 any'), {
+    closePanels: true, notice: 'Verification standard set · the next loop verifies against it' });
+  assert.equal(app.queries.verification, 'npm test 必须通过\n不得新增 any');
+  assert.deepEqual(await run(app, '/verify'), {
+    closePanels: true, notice: 'Verification standard: npm test 必须通过 不得新增 any' });
+
+  // The next loop carries the standard into its first prompt and marks its progress label.
+  assert.deepEqual(await run(app, '/loop 8 2 do the thing'), {
+    closePanels: true, live: true, scroll: 0, notice: 'Loop started · steps 1–1 · pass 8 · ≤2 tries' });
+  const call = fixture.calls.filter(entry => entry.method === 'session/prompt').at(-1)!;
+  const text = String(object(array(object(object(object(call.payload).args).request).content)[0]).text);
+  assert.match(text, /npm test 必须通过\n不得新增 any/);
+  assert.equal(app.queries.loop?.title, 'Loop · do the thing (verified)');
+
+  assert.deepEqual(await run(app, '/verify off'), { closePanels: true, notice: 'Verification standard cleared' });
+  assert.equal(app.queries.verification, undefined);
+});

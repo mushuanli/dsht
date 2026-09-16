@@ -33,6 +33,8 @@ export type Command =
   | { kind: 'designReview'; options: LoopOptions }
   /** Wrap one free-form prompt in the scored loop; see `LoopOptions`. */
   | { kind: 'loop'; options: LoopOptions; prompt: string }
+  /** Set, clear or inspect the session's verification standard. */
+  | { kind: 'verify'; criteria?: string; clear?: boolean }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -218,6 +220,12 @@ export function parseCommand(line: string): Command {
   }
   if (/^\/design-review(?: |$)/.test(value)) return designReviewCommand(value);
   if (/^\/loop(?: |$)/.test(value)) return loopCommand(value);
+  if (/^\/verify(?: |$)/.test(value)) {
+    // Internal line breaks matter: the standard is a checklist the verifier reads verbatim.
+    const criteria = value.slice('/verify'.length).replace(/^\s+/, '').replace(/\s+$/, '');
+    if (!criteria) return { kind: 'verify' };
+    return criteria === 'off' ? { kind: 'verify', clear: true } : { kind: 'verify', criteria };
+  }
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };
   if (value === '/deny') return { kind: 'approval', allowed: false };

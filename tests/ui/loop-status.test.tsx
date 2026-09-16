@@ -19,7 +19,7 @@ test('a running loop shows its protocol title, position and best score', () => {
 });
 
 test('a finished loop appends its terminal phase', () => {
-  for (const phase of ['passed', 'exhausted', 'cancelled'] as const) {
+  for (const phase of ['passed', 'exhausted', 'blocked', 'cancelled'] as const) {
     const ui = render(<LoopStatus progress={{ ...PROGRESS, phase }} />);
     try { assert.equal(ui.lastFrame(), `Design review · step 3/10 · attempt 2/10 · best 7.5/8 · ${phase}`); }
     finally { ui.unmount(); ui.cleanup(); }

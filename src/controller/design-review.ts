@@ -3,6 +3,7 @@
  * Everything mechanical lives in `loop.ts`; this module is only the text the agent receives and the
  * step count, so a second review command adds a sibling file rather than another loop.
  */
+import { LOOP_MARKER, followUpContract, resultContract } from './loop-contract.ts';
 import type { LoopLimits, LoopProtocol } from './loop.ts';
 
 /** Rounds the review protocol defines; `--to` defaults to the last one. */
@@ -39,7 +40,7 @@ const ROUND_CHECKS: readonly string[] = [
 ];
 
 /** The shared header of every round's brief. */
-function briefHeader(limits: LoopLimits, step: number, attempt: number): string[] {
+function briefHeader(limits: LoopLimits, step: number, attempt: number, verification?: string): string[] {
   return [
     '你是一名资深软件架构师。请对下面的软件架构、模块设计、代码组织或重构方案进行系统审查。',
     '',
@@ -65,29 +66,26 @@ function briefHeader(limits: LoopLimits, step: number, attempt: number): string[
     '- 修改后减少了什么耦合或复杂度',
     '- 本轮收敛结论',
     '',
-    '评分：用 0–10 表示本轮结论的成熟度（允许小数）。分数应由独立 verifier 子代理（subagent，全新上下文，以上面的优先目标与输出格式作为 rubric）给出；若当前环境没有 subagent 能力，则由你自己评分并在 verdict 中标注 self-scored。',
-    '',
-    '结尾必须输出唯一一个 ```' + DESIGN_REVIEW_PROTOCOL_MARKER + ' 代码块，并且它必须是回复正文的最后内容：',
-    `{"kind":"design-review","step":${step},"attempt":${attempt},"score":X,"verdict":"pass|retry","top_findings":["..."],"next_focus":"..."}`,
-    `score 小于 ${limits.score} 时 verdict 必须是 retry，并列出仍未解决的 blocking 问题。`,
+    ...resultContract('design-review', limits, step, attempt, verification),
   ];
 }
 
-/** Marker shared by every loop protocol's result block. */
-export const DESIGN_REVIEW_PROTOCOL_MARKER = 'dsht-loop';
-
-/** The protocol the `/design-review` command runs. */
-export const DESIGN_REVIEW_PROTOCOL: LoopProtocol = {
-  marker: DESIGN_REVIEW_PROTOCOL_MARKER,
-  kind: 'design-review',
-  title: 'Design review',
-  steps: DESIGN_REVIEW_ROUNDS,
-  brief: (limits, step, attempt) => briefHeader(limits, step, attempt).join('\n'),
-  followUp: (limits, step, attempt) => [
-    `现在是第 ${step} 轮、第 ${attempt}/${limits.tries} 次尝试（及格线 ${limits.score}）。`,
-    `阅读上面的结果、意见与建议，按第 ${step} 轮（${ROUND_TITLES[step] ?? '收敛审查'}）的要求继续改进；`,
-    '上一版未解决、未回应的 blocking 问题必须逐条处理。',
-    '结尾仍然只输出一个 ```' + DESIGN_REVIEW_PROTOCOL_MARKER + ' JSON 块，'
-      + `kind=design-review、step=${step}、attempt=${attempt}、score 为本次评分。`,
-  ].join('\n'),
-};
+/** The protocol the `/design-review` command runs.
+ * @param verification - Standard `/verify` set for this session, when any.
+ * @returns The protocol the scored loop runs.
+ */
+export function designReviewProtocol(verification?: string): LoopProtocol {
+  return {
+    marker: LOOP_MARKER,
+    kind: 'design-review',
+    title: `Design review${verification === undefined ? '' : ' (verified)'}`,
+    steps: DESIGN_REVIEW_ROUNDS,
+    brief: (limits, step, attempt) => briefHeader(limits, step, attempt, verification).join('\n'),
+    followUp: (limits, step, attempt) => [
+      `现在是第 ${step} 轮、第 ${attempt}/${limits.tries} 次尝试（及格线 ${limits.score}）。`,
+      `阅读上面的结果、意见与建议，按第 ${step} 轮（${ROUND_TITLES[step] ?? '收敛审查'}）的要求继续改进；`,
+      '上一版未解决、未回应的 blocking 问题必须逐条处理。',
+      followUpContract('design-review', step, attempt),
+    ].join('\n'),
+  };
+}
