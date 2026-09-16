@@ -2,7 +2,8 @@
  *
  * `!cmd` executes on the machine this client runs on — the operator's laptop or a jump host — never
  * on the host the agent works in. The host's shell belongs to the model's own tools; this module is
- * a separate, local facility, and it is the only place in `src/` allowed to spawn a process.
+ * a separate, local facility, and it is the only place in `src/` allowed to spawn a process — including
+ * the `dsht` child that verifies a scored round in a session of its own.
  */
 import { spawn } from 'node:child_process';
 
@@ -60,8 +61,31 @@ function signalGroup(child: { pid?: number; kill(signal?: NodeJS.Signals): boole
  * @returns How the command ended.
  */
 export function runShell(command: string, options: ShellRunOptions): Promise<ShellExit> {
+  return spawnLines(shellPath(), ['-c', command], options);
+}
+
+/** Run one program with its own arguments, without a shell.
+ *
+ * A forked verifier is spawned this way: arguments reach the child verbatim, so a prompt can never be
+ * re-read as shell syntax.
+ * @param file - Program to run.
+ * @param args - Arguments, passed verbatim.
+ * @param options - Directory, environment, cancellation and the line sink.
+ * @returns How the program ended.
+ */
+export function runProcess(file: string, args: readonly string[], options: ShellRunOptions): Promise<ShellExit> {
+  return spawnLines(file, [...args], options);
+}
+
+/** Spawn one program, merge both pipes into a single line stream, and resolve when it closes.
+ * @param file - Program to run.
+ * @param args - Arguments, passed verbatim.
+ * @param options - Directory, environment, cancellation and the line sink.
+ * @returns How the program ended.
+ */
+function spawnLines(file: string, args: readonly string[], options: ShellRunOptions): Promise<ShellExit> {
   return new Promise<ShellExit>(resolve => {
-    const child = spawn(shellPath(), ['-c', command], {
+    const child = spawn(file, [...args], {
       cwd: options.cwd, env: options.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     const carry: Record<ShellStream, string> = { stdout: '', stderr: '' };

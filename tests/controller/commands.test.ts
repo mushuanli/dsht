@@ -92,3 +92,21 @@ test('/verify stores a standard the next loop injects, and clears it', async t =
   assert.deepEqual(await run(app, '/verify off'), { closePanels: true, notice: 'Verification standard cleared' });
   assert.equal(app.queries.verification, undefined);
 });
+
+test('/designdoc-review starts the loop scoped to the named document', async t => {
+  const { app, fixture } = await controller(t);
+  assert.deepEqual(await run(app, '/designdoc-review --to 2 tui-design.md'), {
+    closePanels: true, live: true, scroll: 0,
+    notice: 'Design doc review started · tui-design.md · steps 1–2 · pass 8 · ≤10 tries' });
+  const call = fixture.calls.filter(entry => entry.method === 'session/prompt').at(-1)!;
+  const text = String(object(array(object(object(object(call.payload).args).request).content)[0]).text);
+  assert.match(text, /tui-design\.md/);
+  assert.match(text, /"kind":"designdoc-review"/);
+  assert.equal(app.queries.loop?.title, 'Designdoc review · tui-design.md');
+  assert.equal(app.queries.loop?.stepLabel, '定位与范围');
+  // A reversed range is refused before anything is sent.
+  const before = fixture.calls.filter(entry => entry.method === 'session/prompt').length;
+  assert.deepEqual(await run(app, '/designdoc-review --from 5 --to 1 x.md'), {
+    closePanels: true, error: 'Use /designdoc-review [--from N] [--to N] [--score X] [--tries N] <path>' });
+  assert.equal(fixture.calls.filter(entry => entry.method === 'session/prompt').length, before);
+});

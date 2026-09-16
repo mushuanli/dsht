@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller, designReviewProtocol } from '../../src/controller/index.ts';
 import { array, object } from '../../src/transport/wire.ts';
-import { host, until } from '../support/host.ts';
+import { host, until, workspace } from '../support/host.ts';
 
 /** Text of the newest `session/prompt` request. */
 function lastPrompt(fixture: Awaited<ReturnType<typeof host>>): string {
@@ -17,8 +17,9 @@ function reply(fixture: Awaited<ReturnType<typeof host>>, seq: number, text: str
     data: { message: { content: [{ type: 'text', text }] } } } });
 }
 
-/** Report the reviewed session idle, which is the signal the loop waits for. */
+/** Report the reviewed session idle, the way the host does: busy first, then idle. */
 function idle(fixture: Awaited<ReturnType<typeof host>>): void {
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', false] });
 }
 
@@ -57,6 +58,8 @@ test('the loop sends the brief, advances on a passing score and stops on a faili
   reply(fixture, 12, 'no block at all');
   await until(() => controller.queries.record.messages.length > 3);
   idle(fixture);
+  // The fixture keeps the earlier block visible, so the score repeats at the last attempt, which
+  // spends the remaining budget (a single plateau is tolerated rather than called a stall).
   await until(() => controller.queries.loop?.phase === 'exhausted');
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 3);
   assert.equal(controller.queries.loop?.best, 7);
@@ -134,4 +137,107 @@ test('a blocked verdict stops the loop without spending the remaining budget', a
   idle(fixture);
   await until(() => controller.queries.loop?.phase === 'blocked');
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, before);
+});
+
+test('a result block committed just after the idle event is still read', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  // The host reports the turn idle a moment before the final message reaches the follow stream, so
+  // the first parse finds no block. That is not a failed attempt: the loop keeps looking for it.
+  // The idle event arrives on its own stream, so wait for the counter only that event increments:
+  // otherwise the reply can be processed first and the regression this test guards is not exercised.
+  const finished = controller.queries.turnsCompleted;
+  idle(fixture);
+  await until(() => controller.queries.turnsCompleted > finished);
+  // Deciding the attempt here is what the old code did; the block may still be on its way.
+  assert.equal(controller.queries.loop?.attempt, 1);
+  assert.equal(controller.queries.loop?.best, 0);
+  assert.equal(controller.queries.loop?.phase, 'running');
+
+  // The late reply carries a passing score, so the loop advances instead of spending a second try.
+  // Advancing is the whole guard: the old code had already spent the attempt and would sit at step 1.
+  reply(fixture, 40, 'findings…\n' + block(1, 1, 9));
+  await until(() => controller.queries.loop?.step === 2, 15_000);
+});
+
+test('a control frame this client cannot decode never strands a running loop', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+
+  // A jobs frame with no rows once failed the whole generation, which left the loop settling
+  // against a transcript that could never refill; live metrics now degrade instead.
+  fixture.control({ type: 'jobs', sessionId: 's1' });
+  await until(() => controller.state.controlError !== undefined);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(controller.state.online, true);
+  assert.equal(controller.queries.loop?.phase, 'running');
+
+  reply(fixture, 50, 'findings…\n' + block(1, 1, 9));
+  idle(fixture);
+  await until(() => controller.queries.loop?.step === 2);
+});
+
+test('a reconnect re-attaches the loop when the picker replaced the selection', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // Registering the client's own directory as a workspace is what makes a reconnect fall back to
+  // the picker and drop the session, so the loop has to find its session again by itself.
+  fixture.baseline = [{ ...workspace, path: process.cwd() }];
+  // No `initialSession`, so nothing but the loop can put the session back after the drop.
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  // `ready()` adopts the local workspace and drops the selection on its way in, so pick only after
+  // it has settled on the session list.
+  await until(() => controller.state.online && controller.state.workspaceId === 'w1' && controller.state.screen === 'sessions', 15_000);
+  await controller.actions.selectSession('s1');
+  await until(() => controller.state.sessionId === 's1' && controller.queries.record.ready, 15_000);
+
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+
+  fixture.disconnect();
+  await until(() => !controller.state.online);
+  await until(() => controller.state.online && controller.state.sessionId === 's1' && controller.queries.record.ready, 15_000);
+  assert.equal(controller.queries.loop?.phase, 'running');
+
+  // The re-attached transcript still settles the attempt that was outstanding across the drop.
+  reply(fixture, 60, 'findings…\n' + block(1, 1, 9));
+  idle(fixture);
+  await until(() => controller.queries.loop?.step === 2, 15_000);
+});
+
+test('a reconnect keeps the loop while a switch to another session ends it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  assert.equal(controller.queries.loop?.phase, 'running');
+
+  // A dropped generation is not a session switch: the host keeps reviewing, so the loop waits.
+  fixture.disconnect();
+  await until(() => !controller.state.online);
+  assert.equal(controller.queries.loop?.phase, 'running');
+  await until(() => controller.state.online && controller.state.sessionId === 's1' && controller.queries.record.ready, 15_000);
+  assert.equal(controller.queries.loop?.phase, 'running');
+
+  // Selecting another session is the real boundary.
+  await controller.actions.selectSession('s2');
+  await until(() => controller.state.sessionId === 's2');
+  assert.equal(controller.queries.loop, undefined);
 });

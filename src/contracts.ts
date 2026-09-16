@@ -45,8 +45,12 @@ export interface LoopProgress {
   stepLabel?: string;
   /** Best score seen in the current step. */
   best: number;
-  /** `running` while the loop runs; `blocked` means the verifier proved the task impossible. */
-  phase: 'running' | 'passed' | 'exhausted' | 'blocked' | 'cancelled';
+  /** One line about how the last attempt was decided, when there is something to say. */
+  note?: string;
+  /** `running` while the loop runs; `blocked` means the verifier proved the task impossible, and
+   *  `stalled` that another attempt would only repeat the previous verdict. */
+  /** `unavailable` means the verifier could not judge, so no attempt was spent on a score. */
+  phase: 'running' | 'passed' | 'exhausted' | 'stalled' | 'blocked' | 'unavailable' | 'cancelled';
 }
 
 /** The presentational outcome of one submitted line.

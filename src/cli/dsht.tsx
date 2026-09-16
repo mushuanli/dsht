@@ -7,10 +7,14 @@ import { CostLedger, loadPrices } from '../cost/index.ts';
 import { parseArgs } from 'node:util';
 import { mount } from '../ui/mount.tsx';
 import { ensureDirectory } from '../storage/index.ts';
+import { runStartup } from './startup.ts';
 import { sessionLabel } from '../session-title.ts';
 import { CookieStore, login } from '../transport/auth.ts';
 import { Client } from '../transport/client.ts';
+import { fileURLToPath } from 'node:url';
 import { historyLimits } from '../session/memory.ts';
+import { ProcessVerifier } from './verifier.ts';
+import type { VerifierPort } from '../controller/verifier.ts';
 import { Controller } from '../controller/controller.ts';
 import { endpoint } from '../transport/endpoint.ts';
 import { errorText, string } from '../transport/wire.ts';
@@ -22,7 +26,14 @@ With no command, choose a workspace and session interactively.
 
   --url <url>           Host URL, or the dsh web URL with ?token= (DSH_URL)
   --workspace <id>      Filter list sessions by workspace
-  --session <id>        Open a session directly
+  --session <id|new>    Open a session directly, or create one
+  --ws <id|name|path>   Select this workspace at startup (default: this directory)
+  --command <line>      Run this slash command once the session is ready (repeatable)
+  --prompt <text>       Send this plain prompt once the session is ready
+  --wait                With --headless, exit when the sent prompt's turn has finished
+  --verdict <path>      With --prompt/--wait, write the reply's verdict to this file
+  --verdict-identity <id>  <runId>/<kind>/<step>/<attempt> the verdict must declare
+  --headless            Run --command without the terminal interface, then exit
   --auth-dir <path>     Private cookie directory (or DSHT_AUTH_DIR)
   --history-records <n> Soft history record limit (default 2000)
   --history-mb <n>      Soft history payload budget in MiB (default 16)
@@ -52,7 +63,9 @@ async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     url: { type: 'string', default: process.env.DSH_URL ?? 'http://127.0.0.1:3080' },
     'history-records': { type: 'string' }, 'history-mb': { type: 'string' },
-    workspace: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
+    workspace: { type: 'string' }, ws: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
+    command: { type: 'string', multiple: true }, prompt: { type: 'string' }, wait: { type: 'boolean' },
+    verdict: { type: 'string' }, 'verdict-identity': { type: 'string' }, headless: { type: 'boolean' },
     'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' }, 'no-shell': { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
@@ -60,6 +73,9 @@ async function main(): Promise<void> {
   if (positionals.length && !list) throw new Error('Unknown command. Use --help.');
   if (!list && (values.json || values.workspace)) throw new Error('--json and --workspace apply to list commands');
   if (list && values.session) throw new Error('--session applies to interactive mode');
+  if (list && (values.ws || values.command?.length || values.prompt !== undefined || values.wait || values.headless)) {
+    throw new Error('--ws, --command, --prompt, --wait and --headless apply to interactive mode');
+  }
   const limits = historyLimits(values['history-records'], values['history-mb']);
   const { url, token } = endpoint(values.url, process.env.DSH_TOKEN);
   const store = new CookieStore(values['auth-dir']);
@@ -86,21 +102,76 @@ async function main(): Promise<void> {
   const costDirectory = join(stateRoot, 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory, custom);
   await costs.load();
-  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive mode requires a terminal. Use list workspaces or list sessions for scripts.');
+  if (!values.headless && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+    throw new Error('Interactive mode requires a terminal. Use --headless or list workspaces/list sessions for scripts.');
+  }
   const shellEnabled = !values['no-shell'] && process.env.DSHT_NO_SHELL !== '1';
+  const localDirectory = process.cwd();
+  // A scored review can delegate each round's verdict to a child client, which needs no shared state
+  // with this one: it is handed a session and a prompt, and answers through a file.
+  const verifier: VerifierPort | undefined = process.env.DSHT_NO_VERIFY === '1' ? undefined : new ProcessVerifier({
+    command: [process.execPath, ...process.execArgv, process.argv[1] ?? fileURLToPath(import.meta.url)],
+    url: values.url,
+    ...(values['auth-dir'] === undefined ? {} : { authDir: values['auth-dir'] }),
+    directory: localDirectory, cwd: localDirectory, env: process.env,
+    timeoutMs: verifyTimeoutMs(process.env.DSHT_VERIFY_TIMEOUT_MS),
+    createSession: (title: string): Promise<string | undefined> => controller.actions.createVerifierSession(title),
+    cancelSession: async (sessionId: string): Promise<void> => { await controller.actions.cancelVerifierSession(sessionId); },
+    onLine: line => { if (values.headless) log(line); },
+  });
   const controller = new Controller({
-    base: url, token, initialSession: values.session,
+    base: url, token, initialSession: values.session === 'new' ? undefined : values.session,
     authenticate: client => login(client, token, store),
+    localDirectory, verifier,
+    // Verdicts belong to this client rather than to the reviewed tree, and the client's own
+    // directory is the one place it is always allowed to write; DSHT_VERDICT_ROOT points them
+    // elsewhere when the review targets a workspace this machine cannot write.
+    verdictRoot: process.env.DSHT_VERDICT_ROOT ?? localDirectory,
     costs, historyLimits: limits, shellEnabled,
     memoryLogPath: memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']),
     promptsPath: join(stateRoot, 'prompts.json'),
   });
+  const plan = {
+    ...(values.ws === undefined ? {} : { workspace: values.ws }),
+    ...(values.session === undefined ? {} : { session: values.session }),
+    commands: values.command ?? [],
+    ...(values.prompt === undefined ? {} : { prompt: values.prompt }),
+    ...(values.wait === undefined ? {} : { wait: values.wait }),
+    ...(values.verdict === undefined ? {} : { verdict: { file: values.verdict, identity: requireIdentity(values['verdict-identity']) } }),
+    timeoutSeconds: 3600,
+  };
+  const log = (line: string) => process.stderr.write(`${line}\n`);
+  controller.start();
+  if (values.headless) {
+    // No renderer: run the plan, follow a started loop to its verdict, and report it as the exit code.
+    try { process.exitCode = await runStartup(controller, plan, log) === 'failed' ? 1 : 0; }
+    finally { await controller.shutdown(); }
+    return;
+  }
   const app = mount(controller);
   const terminate = () => app.unmount();
   process.once('SIGTERM', terminate);
-  controller.start();
+  void runStartup(controller, plan, log).catch(error => process.stderr.write(`${errorText(error)}\n`));
   try { await app.waitUntilExit(); }
   finally { process.off('SIGTERM', terminate); await controller.shutdown(); }
+}
+
+/** The identity a written verdict must declare, refused when the flag that carries it is missing.
+ * @param value - `--verdict-identity` value.
+ * @returns The identity.
+ */
+function requireIdentity(value: string | undefined): string {
+  if (value === undefined || value.trim() === '') throw new Error('--verdict requires --verdict-identity');
+  return value;
+}
+
+/** How long one forked verification may run, from a minute count in the environment.
+ * @param value - `DSHT_VERIFY_TIMEOUT_MS` when set.
+ * @returns The timeout in milliseconds, defaulting to twenty minutes.
+ */
+function verifyTimeoutMs(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 20 * 60_000;
 }
 
 /** Resolve the runtime memory log path: an explicit flag wins, then the environment, then the default.

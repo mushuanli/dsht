@@ -3,8 +3,8 @@
  * Everything mechanical lives in `loop.ts`; this module is only the text the agent receives and the
  * step count, so a second review command adds a sibling file rather than another loop.
  */
-import { LOOP_MARKER, followUpContract, resultContract } from './loop-contract.ts';
-import type { LoopLimits, LoopProtocol } from './loop.ts';
+import { LOOP_MARKER, followUpContract, resultContract, verdictBrief } from './loop-contract.ts';
+import type { LoopLimits, LoopProtocol, PriorVerdict, VerifyTarget } from './loop.ts';
 
 /** Rounds the review protocol defines; `--to` defaults to the last one. */
 export const DESIGN_REVIEW_ROUNDS = 10;
@@ -42,8 +42,14 @@ const ROUND_CHECKS: readonly string[] = [
   '完成前面所有检查后重新整体审查一次，禁止再引入新的架构模式。只判断：当前设计是否已经足够简单？哪些是 P0 必须修改？哪些是 P1 值得修改？哪些只是理论洁癖应保持现状？哪些抽象应该删除？哪些状态应该移动？哪些接口应该缩小？哪些依赖应该禁止？最终推荐的依赖关系是什么？是否已到"停止设计、开始实施"的阶段？',
 ];
 
+/** Rubric one round is scored against: the round's own checklist plus any operator standard. */
+function standardFor(step: number, verification?: string): string {
+  const checks = ROUND_CHECKS[step] ?? ROUND_CHECKS[DESIGN_REVIEW_ROUNDS]!;
+  return verification === undefined ? checks : `${checks}\n\n额外要求（由 /verify 提供）：\n${verification}`;
+}
+
 /** The shared header of every round's brief. */
-function briefHeader(limits: LoopLimits, step: number, attempt: number, verification?: string): string[] {
+function briefHeader(limits: LoopLimits, step: number, attempt: number, verification: string | undefined, forked: boolean): string[] {
   return [
     '你是一名资深软件架构师。请对下面的软件架构、模块设计、代码组织或重构方案进行系统审查。',
     '',
@@ -74,25 +80,31 @@ function briefHeader(limits: LoopLimits, step: number, attempt: number, verifica
     '',
     ...resultContract('design-review', limits, step, attempt, {
       // The round's own checklist is the rubric; an operator standard is added on top of it.
-      standard: verification === undefined ? ROUND_CHECKS[step] : `${ROUND_CHECKS[step]}\n\n额外要求（由 /verify 提供）：\n${verification}`,
+      standard: standardFor(step, verification),
       artifact: DESIGN_REVIEW_ARTIFACT,
       focus: `第 ${step} 轮 · ${ROUND_TITLES[step] ?? '收敛审查'}`,
-    }),
+    }, forked ? 'forked' : 'subagent'),
   ];
 }
 
 /** The protocol the `/design-review` command runs.
  * @param verification - Standard `/verify` set for this session, when any.
+ * @param forked - Delegate each round's verdict to an independent verifier process.
  * @returns The protocol the scored loop runs.
  */
-export function designReviewProtocol(verification?: string): LoopProtocol {
+export function designReviewProtocol(verification?: string, forked = false): LoopProtocol {
   return {
     marker: LOOP_MARKER,
     kind: 'design-review',
-    title: `Design review${verification === undefined ? '' : ' (verified)'}`,
+    title: `Design review${verification === undefined ? '' : ' (verified)'}${forked ? ' · forked' : ''}`,
     steps: DESIGN_REVIEW_ROUNDS,
+    artifact: DESIGN_REVIEW_ARTIFACT,
     stepLabel: step => ROUND_TITLES[step] ?? '收敛审查',
-    brief: (limits, step, attempt) => briefHeader(limits, step, attempt, verification).join('\n'),
+    brief: (limits, step, attempt) => briefHeader(limits, step, attempt, verification, forked).join('\n'),
+    ...(forked ? { verify: (limits: LoopLimits, step: number, attempt: number, target: VerifyTarget, previous?: PriorVerdict) => verdictBrief({
+      ...target, kind: 'design-review', step, attempt, previous, standard: standardFor(step, verification),
+      artifact: DESIGN_REVIEW_ARTIFACT, focus: `第 ${step} 轮 · ${ROUND_TITLES[step] ?? '收敛审查'}`,
+    }) } : {}),
     followUp: (limits, step, attempt) => [
       `现在是第 ${step} 轮、第 ${attempt}/${limits.tries} 次尝试（及格线 ${limits.score}）。`,
       `阅读上面的结果、意见与建议，按第 ${step} 轮（${ROUND_TITLES[step] ?? '收敛审查'}）的要求继续改进；`,

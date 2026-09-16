@@ -5,9 +5,10 @@
  * new command needs no UI change unless it introduces a genuinely new presentational verb.
  */
 import type { CommandIntent } from '../contracts.ts';
-import { DESIGN_REVIEW_USAGE, LOOP_USAGE, type Command } from '../slash/index.ts';
+import { DESIGNDOC_REVIEW_USAGE, DESIGN_REVIEW_USAGE, LOOP_USAGE, type Command } from '../slash/index.ts';
 import type { Controller } from './controller.ts';
 import { designReviewProtocol } from './design-review.ts';
+import { designdocReviewProtocol } from './designdoc-review.ts';
 import { resolveLoop } from './loop.ts';
 import { promptLoopProtocol } from './loop-prompt.ts';
 
@@ -159,13 +160,22 @@ export async function runCommand(controller: Controller, command: RunnableComman
       return { closePanels: true, live: true, scroll: 0, notice: 'Handoff requested · local HANDOFF.md cleared' };
     }
     case 'designReview': {
-      const protocol = designReviewProtocol(controller.queries.verification);
+      const protocol = designReviewProtocol(controller.queries.verification, controller.queries.forkedVerification);
       const limits = resolveLoop(protocol, command.options);
       if (limits === undefined) return { closePanels: true, error: DESIGN_REVIEW_USAGE };
       if (!await controller.actions.startLoop(protocol, limits)) return undefined;
       controller.actions.setViewWindow(undefined);
       return { closePanels: true, live: true, scroll: 0,
         notice: `Design review started · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` };
+    }
+    case 'designdocReview': {
+      const protocol = designdocReviewProtocol(command.path, controller.queries.verification, controller.queries.forkedVerification);
+      const limits = resolveLoop(protocol, command.options);
+      if (limits === undefined) return { closePanels: true, error: DESIGNDOC_REVIEW_USAGE };
+      if (!await controller.actions.startLoop(protocol, limits)) return undefined;
+      controller.actions.setViewWindow(undefined);
+      return { closePanels: true, live: true, scroll: 0,
+        notice: `Design doc review started · ${command.path} · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` };
     }
     case 'verify': {
       if (command.clear) {

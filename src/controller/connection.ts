@@ -124,7 +124,13 @@ export class ConnectionController implements HostAccess, ConnectionView {
                 this.listener.event({ kind: 'control', frame: controlFrame(value) });
                 this.store.update({});
                 clearTimeout(timer); resolve();
-              } catch (error) { clearTimeout(timer); reject(error); fail(new Error(errorText(error))); }
+              } catch (error) {
+                // Live metrics are not worth the connection: a frame this client cannot decode is
+                // reported and skipped, because failing the generation would blind a running turn.
+                clearTimeout(timer);
+                this.store.update({ controlError: `Live metrics degraded: ${errorText(error)}` });
+                resolve();
+              }
             },
             end: error => {
               clearTimeout(timer);

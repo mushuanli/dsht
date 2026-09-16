@@ -10,3 +10,6 @@ tmp/
 .diagnostics/
 snapshot-*
 HANDOFF.md
+
+# Verdict files a forked verifier writes inside the reviewed workspace.
+.dsht/

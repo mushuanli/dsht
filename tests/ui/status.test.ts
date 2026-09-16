@@ -43,7 +43,7 @@ test('projection snapshots preserve newer keys, remove absent capabilities and r
   assert.deepEqual(telemetry.pending('other'), []);
   assert.equal(telemetry.view('s').jobs, 1);
   telemetry.accept(controlFrame({ type: 'queue', sessionId: 's', items: [] }));
-  telemetry.accept(controlFrame({ type: 'jobs', sessionId: 's', items: [{ status: 'stopping' }] }));
+  telemetry.accept(controlFrame({ type: 'jobs', sessionId: 's', jobs: [{ status: 'stopping' }] }));
   assert.equal(telemetry.view('s').queued, 0);
   telemetry.accept(controlFrame({ type: 'baseline', value: { projections: {}, queues: {}, jobs: {} } }));
   assert.deepEqual(telemetry.view('s').values, {});

@@ -102,7 +102,8 @@ export function controlFrame(value: unknown): ControlFrame {
       return { kind: 'projection', sessionId, key: string(frame.key), seq: sequence(frame.seq), value: frame.value };
     }
     if (frame.type === 'queue') return { kind: 'queue', sessionId, items: queuedInputs(frame.items) };
-    return { kind: 'jobs', sessionId, count: activeJobs(frame.items) };
+    // The host names the job rows `jobs`; the loopback fixtures used `items`, so accept either.
+    return { kind: 'jobs', sessionId, count: activeJobs(frame.jobs ?? frame.items) };
   }
   throw new Error('Unknown session control frame');
 }

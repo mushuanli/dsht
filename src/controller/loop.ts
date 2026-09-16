@@ -27,6 +27,8 @@ export interface LoopProtocol {
   title: string;
   /** Steps the protocol defines; `--to` defaults to this. */
   steps: number;
+  /** Workspace file the rounds maintain, when there is one; verified for tampering when readable. */
+  artifact?: string;
   /** Optional name of one step, shown in the progress line. */
   stepLabel?(step: number): string;
   /** Passing score used when the command omits `--score`; default 8. */
@@ -37,14 +39,62 @@ export interface LoopProtocol {
   brief(limits: LoopLimits, step: number, attempt: number): string;
   /** Prompt for a later attempt, once the protocol is already in context. */
   followUp(limits: LoopLimits, step: number, attempt: number): string;
+  /** Prompt a forked verifier session receives for one finished round.
+   *
+   * A protocol that defines this delegates the verdict to an independent process and names the file
+   * that process must write; the reply block stays as the fallback when no verdict arrives.
+   * @param limits - Resolved run limits.
+   * @param step - Step in flight.
+   * @param attempt - Attempt in flight.
+   * @param target - Where the verdict goes and the identity it must declare.
+   * @param previous - What the previous attempt on this step concluded, when there was one.
+   * @returns The verifier's prompt.
+   */
+  verify?(limits: LoopLimits, step: number, attempt: number, target: VerifyTarget, previous?: PriorVerdict): string;
 }
+
+/** Longest evidence line and finding kept from a verdict, so untrusted model output stays bounded. */
+const MAX_EVIDENCE_CHARS = 600;
+const MAX_FINDING_CHARS = 300;
+const MAX_FINDINGS = 8;
+
+/** Consecutive attempts on one step that may fail to improve the score before the run stops.
+ *
+ * One plateau can be verifier jitter, so it is tolerated; two in a row mean the retry is not
+ * converging. Set to 1 to stop on the first non-improvement (which includes a strict decrease).
+ */
+const STALL_STREAK = 2;
 
 /** What one reply's result block reported. */
 export interface LoopResult {
   /** Completion score in 0–10; absent when the block omitted or malformed it. */
   score?: number;
-  /** Verdict; `blocked` stops the run immediately instead of spending its budget. */
+  /** What the verifier called it; advisory only — the loop decides from `score` and `blocked`. */
   status?: 'done' | 'retry' | 'blocked';
+  /** The verifier proved the task impossible; the only verdict that overrides the score. */
+  blocked?: boolean;
+  /** What the verifier still objects to, so the next attempt can answer it. */
+  findings?: readonly string[];
+  /** The basis it gave for the score, so a retry does not have to guess. */
+  evidence?: string;
+}
+
+/** Where one round's verdict goes, and the identity that file must declare. */
+export interface VerifyTarget {
+  /** Absolute path the verdict must be written to. */
+  file: string;
+  /** Identity embedded in the verdict, checked before the round. */
+  verificationId: string;
+}
+
+/** What the previous attempt on this step concluded, when there was one. */
+export interface PriorVerdict {
+  /** Step that attempt belonged to. */
+  step: number;
+  /** Attempt number it was. */
+  attempt: number;
+  /** Its verdict. */
+  result: LoopResult;
 }
 
 /** What one consumed attempt decided. */
@@ -52,6 +102,7 @@ export type LoopStepResult =
   | { kind: 'continue'; prompt: string }
   | { kind: 'passed' }
   | { kind: 'exhausted' }
+  | { kind: 'stalled' }
   | { kind: 'blocked' };
 
 /** Apply a protocol's defaults and reject a range that cannot run.
@@ -89,15 +140,40 @@ export function parseLoopResult(text: string, protocol: Pick<LoopProtocol, 'mark
   }
   if (body === undefined) return undefined;
   try {
-    const parsed = JSON.parse(body.trim()) as { kind?: unknown; score?: unknown; status?: unknown };
+    const parsed = JSON.parse(body.trim()) as { kind?: unknown };
     if (parsed.kind !== protocol.kind) return undefined;
-    const score = typeof parsed.score === 'number' ? parsed.score : Number(parsed.score);
-    const status = parsed.status === 'done' || parsed.status === 'retry' || parsed.status === 'blocked' ? parsed.status : undefined;
-    return {
-      ...(Number.isFinite(score) && score >= 0 && score <= 10 ? { score } : {}),
-      ...(status === undefined ? {} : { status }),
-    };
+    return readResultFields(parsed);
   } catch { return undefined; }
+}
+
+/** Validate the score and verdict of one decoded result object.
+ *
+ * Shared with the forked verifier's verdict file, so a score means the same thing however it
+ * travelled: an out-of-range or unknown field is absent rather than a value the loop would trust.
+ * @param parsed - Decoded object expected to carry `score` and `status`.
+ * @returns The usable fields; an empty result when the object carried none.
+ */
+export function readResultFields(parsed: object): LoopResult {
+  const fields = parsed as { score?: unknown; status?: unknown; blocked?: unknown; top_findings?: unknown; evidence?: unknown };
+  const score = typeof fields.score === 'number' ? fields.score : Number(fields.score);
+  const status = fields.status === 'done' || fields.status === 'retry' || fields.status === 'blocked' ? fields.status : undefined;
+  const rawFindings = fields.top_findings;
+  const findings = Array.isArray(rawFindings)
+    ? rawFindings.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+      .slice(0, MAX_FINDINGS).map(item => item.slice(0, MAX_FINDING_CHARS))
+    : [];
+  const evidence = typeof fields.evidence === 'string' && fields.evidence.trim() !== ''
+    ? fields.evidence.slice(0, MAX_EVIDENCE_CHARS) : undefined;
+  // `blocked` is a fact about the task, so it is the one field that can override the score; the
+  // model's own `status` is kept only as an explanation, never as the run's state.
+  const blocked = fields.blocked === true || status === 'blocked';
+  return {
+    ...(Number.isFinite(score) && score >= 0 && score <= 10 ? { score } : {}),
+    ...(status === undefined ? {} : { status }),
+    ...(blocked ? { blocked: true } : {}),
+    ...(findings.length === 0 ? {} : { findings }),
+    ...(evidence === undefined ? {} : { evidence }),
+  };
 }
 
 /** Assistant text of the turn that just finished: from the last user/context row to the end.
@@ -123,8 +199,10 @@ export class ScoredLoop {
   private step: number;
   private attempt = 1;
   private best = 0;
+  private noProgress = 0;
   private phase: LoopProgress['phase'] = 'running';
   private awaiting = false;
+  private noteText?: string;
 
   constructor(readonly sessionId: string, readonly protocol: LoopProtocol, private readonly limits: LoopLimits) {
     this.step = limits.from;
@@ -134,8 +212,14 @@ export class ScoredLoop {
   get progress(): LoopProgress {
     const stepLabel = this.protocol.stepLabel?.(this.step);
     return { title: this.protocol.title, ...this.limits, step: this.step, attempt: this.attempt, best: this.best, phase: this.phase,
-      ...(stepLabel === undefined ? {} : { stepLabel }) };
+      ...(stepLabel === undefined ? {} : { stepLabel }),
+      ...(this.noteText === undefined ? {} : { note: this.noteText }) };
   }
+
+  /** Attach one line about the attempt just decided, shown until the next verdict replaces it.
+   * @param text - Note to show, or an empty string to clear it.
+   */
+  note(text: string): void { this.noteText = text === '' ? undefined : text; }
 
   /** Whether the run may still send or settle an attempt. */
   get active(): boolean { return this.phase === 'running'; }
@@ -156,14 +240,23 @@ export class ScoredLoop {
   settle(result: LoopResult | undefined): LoopStepResult {
     this.awaiting = false;
     // A verifier that proved the task impossible ends the run instead of burning the budget.
-    if (result?.status === 'blocked') { this.phase = 'blocked'; return { kind: 'blocked' }; }
+    // Either spelling ends the run: `blocked` is the fact, `status` the legacy way of saying it.
+    if (result?.blocked === true || result?.status === 'blocked') { this.phase = 'blocked'; return { kind: 'blocked' }; }
     const score = result?.score;
-    if (score !== undefined) this.best = Math.max(this.best, score);
+    const previousBest = this.best;
+    if (score !== undefined) {
+      if (score > previousBest) this.noProgress = 0;
+      else if (this.attempt > 1) this.noProgress += 1;
+      this.best = Math.max(this.best, score);
+    }
     if (score !== undefined && score >= this.limits.score) {
       if (this.step >= this.limits.to) { this.phase = 'passed'; return { kind: 'passed' }; }
-      this.step += 1; this.attempt = 1; this.best = 0;
+      this.step += 1; this.attempt = 1; this.best = 0; this.noProgress = 0;
       return { kind: 'continue', prompt: this.protocol.followUp(this.limits, this.step, this.attempt) };
     }
+    // Retries that keep not improving are not converging: spending the rest of the step's budget on
+    // them only reaches the same conclusion later, so the run stops and says so.
+    if (this.noProgress >= STALL_STREAK) { this.phase = 'stalled'; return { kind: 'stalled' }; }
     // A missing or low score is a failed attempt and costs one from the step's budget.
     this.attempt += 1;
     if (this.attempt > this.limits.tries) { this.phase = 'exhausted'; return { kind: 'exhausted' }; }
@@ -172,4 +265,11 @@ export class ScoredLoop {
 
   /** Stop the run; a cancelled run never sends again. */
   cancel(): void { this.phase = 'cancelled'; this.awaiting = false; }
+
+  /** End the run because independent verification was impossible.
+   *
+   * Deliberately not a verdict: no attempt is consumed, so the run stops on an infrastructure
+   * failure instead of pretending the reviewer produced nothing.
+   */
+  unavailable(): void { this.phase = 'unavailable'; this.awaiting = false; }
 }

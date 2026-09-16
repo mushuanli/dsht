@@ -35,6 +35,8 @@ export type Command =
   | { kind: 'loop'; options: LoopOptions; prompt: string }
   /** Set, clear or inspect the session's verification standard. */
   | { kind: 'verify'; criteria?: string; clear?: boolean }
+  /** Review one design document in the scored loop; see `LoopOptions`. */
+  | { kind: 'designdocReview'; options: LoopOptions; path: string }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -90,6 +92,43 @@ export function parseLoopOptions(rest: string): LoopOptions | undefined {
     options[spec.key] = number;
   }
   return options;
+}
+
+/** Consume leading loop flags and return the remaining text.
+ *
+ * `parseLoopOptions` parses a line that is only flags; this splits flags from a trailing free-text
+ * argument, which is what a command taking a path needs.
+ * @param rest - Text after the command name.
+ * @returns The options and the remaining text, or undefined when a flag is malformed.
+ */
+function takeLoopFlags(rest: string): { options: LoopOptions; tail: string } | undefined {
+  let remaining = rest.replace(/^\s+/, '');
+  const options: LoopOptions = {};
+  for (;;) {
+    const flag = /^(--from|--to|--score|--tries)\s+(\S+)\s*/.exec(remaining);
+    if (!flag) break;
+    const spec = LOOP_FLAGS[flag[1]!];
+    const number = Number(flag[2]);
+    if (spec === undefined || !spec.valid(number)) return undefined;
+    if (flag[1] === '--to' && number > LOOP_STEPS_MAX) return undefined;
+    options[spec.key] = number;
+    remaining = remaining.slice(flag[0].length);
+  }
+  return { options, tail: remaining.trim() };
+}
+
+/** The one message every malformed `/designdoc-review` line receives. */
+export const DESIGNDOC_REVIEW_USAGE = 'Use /designdoc-review [--from N] [--to N] [--score X] [--tries N] <path>';
+
+/** Parse `/designdoc-review` and the document it reviews.
+ * @param value - Trimmed line that starts with `/designdoc-review`.
+ * @returns The command, or the usage error.
+ */
+function designdocReviewCommand(value: string): Command {
+  const parsed = takeLoopFlags(value.slice('/designdoc-review'.length));
+  // An unknown leading flag is a usage error, not a document called `--nope`.
+  if (parsed === undefined || !parsed.tail || parsed.tail.startsWith('--')) return { kind: 'error', message: DESIGNDOC_REVIEW_USAGE };
+  return { kind: 'designdocReview', options: parsed.options, path: unquote(parsed.tail) };
 }
 
 /** Parse `/design-review` and its flags, rejecting anything malformed.
@@ -219,6 +258,7 @@ export function parseCommand(line: string): Command {
     return { kind: 'handoff' };
   }
   if (/^\/design-review(?: |$)/.test(value)) return designReviewCommand(value);
+  if (/^\/designdoc-review(?: |$)/.test(value)) return designdocReviewCommand(value);
   if (/^\/loop(?: |$)/.test(value)) return loopCommand(value);
   if (/^\/verify(?: |$)/.test(value)) {
     // Internal line breaks matter: the standard is a checklist the verifier reads verbatim.

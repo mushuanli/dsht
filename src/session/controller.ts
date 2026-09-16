@@ -385,6 +385,33 @@ export class SessionController {
     await this.selectSession(string(result.sessionId));
   }
 
+  /** Create a session for another purpose without selecting it, named so a reader can tell it apart.
+   *
+   * A verifier runs in its own session while the reviewed session stays selected, so this never
+   * follows the new session and never touches the reader's transcript.
+   * @param title - Session title to apply; hosts without a title service keep the default.
+   * @returns The new session's id, or undefined when its identity could not be read.
+   */
+  async createNamedSession(title: string): Promise<string | undefined> {
+    const workspaceId = this.store.state.workspaceId;
+    if (!workspaceId) throw new Error('Select a workspace before creating a session');
+    const created = object(await this.host.require().call('session/create', { request: { workspaceId } }));
+    const sessionId = string(created.sessionId);
+    try { await this.host.require().call('session/rename', { request: { sessionId, title } }); }
+    catch { /* A deployment without the title service still gets a usable session. */ }
+    return sessionId;
+  }
+
+  /** Stop a session this client owns but has not selected, such as a verifier's.
+   *
+   * Killing the child client leaves the host's agent generation running, so the turn has to be
+   * cancelled on the host itself.
+   * @param sessionId - Session whose turn should stop.
+   */
+  async cancelNamedSession(sessionId: string): Promise<void> {
+    await this.host.require().call('session/cancel', { request: { sessionId } });
+  }
+
   /** Replace the selected transcript and cancel its preceding follow stream.
    * @param sessionId - Session to follow.
    */

@@ -61,7 +61,10 @@ test('session/control frames decode to named fields, not DSH shapes', () => {
 
   assert.deepEqual(controlFrame({ type: 'projection', sessionId: 's1', key: 'title', seq: 4, value: 'X' }),
     { kind: 'projection', sessionId: 's1', key: 'title', seq: 4, value: 'X' });
-  assert.deepEqual(controlFrame({ type: 'jobs', sessionId: 's1', items: [{ status: 'stopping' }] }),
+  assert.deepEqual(controlFrame({ type: 'jobs', sessionId: 's1', jobs: [{ status: 'stopping' }, { status: 'completed' }] }),
+    { kind: 'jobs', sessionId: 's1', count: 1 });
+  // The host names the rows `jobs`; an `items` frame from an older fixture still counts.
+  assert.deepEqual(controlFrame({ type: 'jobs', sessionId: 's1', items: [{ status: 'running' }] }),
     { kind: 'jobs', sessionId: 's1', count: 1 });
 
   assert.throws(() => controlFrame({ type: 'projection', sessionId: 's1', key: 'x', seq: 1 }), /Missing projection value/);

@@ -1,5 +1,6 @@
 /** Application facade: composes the connection, session, catalog and cost domains. */
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { Client } from '../transport/client.ts';
 import { removeFile, writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, type Json, type ObjectValue } from '../transport/wire.ts';
@@ -16,7 +17,9 @@ import { CostController } from '../cost/controller.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
 import { MemoryLog } from './memory-log.ts';
 import { PromptStore } from './prompts.ts';
-import { latestAssistantText, parseLoopResult, ScoredLoop, type LoopLimits, type LoopProtocol } from './loop.ts';
+import { latestAssistantText, parseLoopResult, ScoredLoop, type LoopLimits, type LoopProtocol, type LoopResult, type PriorVerdict } from './loop.ts';
+import { findingsLines } from './loop-contract.ts';
+import { verificationId, verdictFile, type VerifierOutcome, type VerifierPort } from './verifier.ts';
 import type { LoopProgress } from '../contracts.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
@@ -39,6 +42,17 @@ function shellEnv(): NodeJS.ProcessEnv {
   delete env.DSH_TOKEN; delete env.DSH_URL;
   return env;
 }
+
+/** How many times a verifier outage is retried before the run reports verification unavailable. */
+const VERIFIER_RETRIES = 2;
+
+/** How long a finished turn may take to commit its final assistant message.
+ *
+ * The host reports the turn idle just before that message reaches the follow stream, so a single
+ * parse can miss the result block that decides the attempt. Waiting too long only delays a reply
+ * that never complies, while deciding too early spends an attempt the reviewer never got.
+ */
+const LOOP_SETTLE_GRACE_MS = 4000;
 
 /** File `/handoff` clears on this machine before it asks the agent to write a handoff. */
 const HANDOFF_FILE = 'HANDOFF.md';
@@ -67,6 +81,10 @@ export interface Actions {
   selectSession(sessionId: string): Promise<boolean>;
   createWorkspace(path: string): Promise<boolean>;
   createSession(): Promise<boolean>;
+  /** Create a named session without selecting it; used by a forked verifier. */
+  createVerifierSession(title: string): Promise<string | undefined>;
+  /** Stop a verifier session's turn on the host without selecting it. */
+  cancelVerifierSession(sessionId: string): Promise<boolean>;
   showPicker(screen: 'workspaces' | 'sessions'): Promise<boolean>;
   removeTarget(target: RemovalTarget): Promise<boolean>;
   removalTarget(kind: 'workspace' | 'session', query: string): Promise<RemovalTarget | undefined>;
@@ -119,6 +137,12 @@ export interface Actions {
 /** Read-only operations the UI drives; none of them changes observable state. */
 export interface Queries {
   readonly running: boolean;
+  /** Turns the selected session has finished since this client connected. */
+  readonly turnsCompleted: number;
+  /** Whether a forked verifier is available to score rounds. */
+  readonly forkedVerification: boolean;
+  /** Whether this connection generation finished its startup work and is safe to drive. */
+  readonly connectionSettled: boolean;
   readonly sessionName: string | undefined;
   readonly sessionMode: string | undefined;
   readonly workingSince: number | undefined;
@@ -175,6 +199,12 @@ export interface ControllerOptions {
   shellEnabled?: boolean;
   /** File holding the operator's shortcut prompts; absent keeps them in memory for this run. */
   promptsPath?: string;
+  /** Independent verifier for scored rounds; absent keeps verification inside the reviewed session. */
+  verifier?: VerifierPort;
+  /** Allow a reply block to decide when the verifier is unavailable; the progress line says so. */
+  allowSelfFallback?: boolean;
+  /** Client-side root for verdict files; defaults to the workspace this client runs in. */
+  verdictRoot?: string;
 }
 
 /** Application facade over the domain controllers; the UI owns only this object.
@@ -202,6 +232,28 @@ export class Controller implements ControllerStore, ConnectionListener {
   private loopPrompt?: string;
   /** Verification standard for this session, read when a loop starts. */
   private verification?: string;
+  /** Finished turns of the selected session, so a waiter never has to sample a cached flag. */
+  private completedTurns = 0;
+  /** Sessions the host reported busy, so a lone idle frame cannot claim a finished turn. */
+  private readonly busySessions = new Set<string>();
+  /** When the in-flight attempt's turn ended, while its result block is still awaited. */
+  private loopEndedAt?: number;
+  /** Timer that settles an attempt whose reply never commits its result block. */
+  private loopSettleTimer?: NodeJS.Timeout;
+  /** Whether an attempt is currently being judged by an independent verifier. */
+  private loopVerifying = false;
+  /** Cancels that verification when the loop is stopped or replaced. */
+  private loopVerifyAbort?: AbortController;
+  /** Verdict of the previous attempt on the current step, for the retry and the next verifier. */
+  private loopPrevious?: PriorVerdict;
+  /** Identity of the run in flight, so its verdicts are isolated from every other run's. */
+  private loopRunId?: string;
+  /** Consecutive verifier outages in this attempt, so a broken verifier is retried then reported. */
+  private loopVerifierMisses = 0;
+  /** Whether a reply block may stand in for a missing verdict; off unless asked for. */
+  private readonly allowSelfFallback: boolean;
+  /** Client-side directory verdict files are written under. */
+  private readonly verdictRoot: string;
   /** Local `!` commands, run on this machine and shown inline in the transcript. */
   readonly shell: ShellController;
   /** Mutating surface the UI drives. */
@@ -218,10 +270,13 @@ export class Controller implements ControllerStore, ConnectionListener {
   readonly memoryLogPath: string | undefined;
   /** Directory this client runs in. */
   readonly localDirectory: string;
+  /** Independent verifier for scored rounds, when one was supplied. */
+  private readonly verifier: VerifierPort | undefined;
   /** Session opened at startup, when one was named. */
   private readonly initialSession: string | undefined;
   private readonly observers = new Set<() => void>();
   private selector = 0;
+  private connectionSettled = false;
 
   constructor(options: ControllerOptions) {
     const { base, token, initialSession, costs } = options;
@@ -232,6 +287,9 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.base = base; this.costs = costs; this.historyLimits = historyLimits;
     this.memoryLogPath = options.memoryLogPath; this.localDirectory = options.localDirectory ?? process.cwd();
     this.initialSession = initialSession;
+    this.verifier = options.verifier;
+    this.allowSelfFallback = options.allowSelfFallback === true;
+    this.verdictRoot = options.verdictRoot ?? this.localDirectory;
     const connectionOptions: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
     this.connection = new ConnectionController(this, connectionOptions, this);
     this.session = new SessionController(this, this.connection, this.connection, historyLimits);
@@ -288,12 +346,19 @@ export class Controller implements ControllerStore, ConnectionListener {
       ? this.session.pendingFor(next) : [];
     // The shell service owns its blocks; state carries only the plain snapshot the UI renders.
     if (this.shell) next.shell = this.shell.snapshot();
-    // A loop and its verification standard belong to the session; switching away ends them.
-    if (this.state.sessionId !== next.sessionId) { if (this.loop !== undefined) this.forgetLoop(); this.verification = undefined; }
+    // A loop and its verification standard belong to one session: selecting a different session ends
+    // them, but a reconnect — which transiently clears the selection — must not, or a long review
+    // could never finish.
+    if (next.sessionId !== undefined && next.sessionId !== this.state.sessionId && this.loop?.sessionId !== next.sessionId) {
+      this.forgetLoop();
+      this.verification = undefined;
+    }
     this.state = next;
     for (const observer of this.observers) observer();
     // A prompt the loop could not send yet (offline, busy or answering) goes out as soon as it can.
     if (this.loopPrompt !== undefined) void this.flushLoop();
+    // A finished attempt whose reply is still committing gets another look on every publish.
+    if (this.loopEndedAt !== undefined) this.trySettleLoop();
   }
 
   /** Bind every mutating entry point to its private implementation. */
@@ -304,6 +369,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       selectSession: id => this.runAction(() => this.selectSession(id)),
       createWorkspace: path => this.runAction(() => this.createWorkspace(path)),
       createSession: () => this.runAction(() => this.createSession()),
+      createVerifierSession: title => this.runActionValue(() => this.session.createNamedSession(title)),
+      cancelVerifierSession: sessionId => this.runAction(() => this.session.cancelNamedSession(sessionId)),
       showPicker: screen => this.runAction(() => this.showPicker(screen)),
       removeTarget: target => this.runAction(() => this.removeTarget(target)),
       removalTarget: (kind, query) => this.runActionValue(() => this.removalTarget(kind, query)),
@@ -360,6 +427,9 @@ export class Controller implements ControllerStore, ConnectionListener {
     const controller = this;
     return {
       get running() { return controller.running; },
+      get turnsCompleted() { return controller.completedTurns; },
+      get forkedVerification() { return controller.verifier !== undefined; },
+      get connectionSettled() { return controller.connectionSettled; },
       get sessionName() { return controller.sessionName; },
       get sessionMode() { return controller.sessionMode; },
       get workingSince() { return controller.workingSince; },
@@ -507,6 +577,9 @@ export class Controller implements ControllerStore, ConnectionListener {
   begin(): void {
     this.session.beginGeneration();
     this.catalog.reset();
+    this.connectionSettled = false;
+    // A busy state does not survive the connection it was observed on.
+    this.busySessions.clear();
     this.update({ controlError: undefined });
   }
 
@@ -521,14 +594,26 @@ export class Controller implements ControllerStore, ConnectionListener {
     if (screen !== 'sessions' && !this.initialSession && this.session.adoptLocalWorkspace(this.localDirectory) !== undefined) {
       this.update({ status: 'Workspace from this directory · ← to switch' });
     }
-    const sessionId = this.state.sessionId ?? this.initialSession;
-    if (sessionId && (screen === 'chat' || this.initialSession && !this.state.sessionId)) await this.session.selectSession(sessionId);
+    // A loop outlives a reconnect, so it re-attaches to its own session even when the picker
+    // replaced the selection; without that the loop would keep settling against an empty transcript.
+    const looping = this.loop?.sessionId;
+    const sessionId = this.state.sessionId ?? looping ?? this.initialSession;
+    if (sessionId && (screen === 'chat' || looping !== undefined || this.initialSession && !this.state.sessionId)) {
+      await this.session.selectSession(sessionId);
+    }
+    // `online` means the socket works; `connectionSettled` means the picker and the selection are
+    // done, which is what an automation caller must wait for or it races `showPicker`.
+    this.connectionSettled = true;
+    this.update({});
     this.cost?.start();
   }
 
-  /** The generation ended; invalidate session work and stop the scan. */
+  /** The generation ended; invalidate session work and stop the scan.
+   *
+   * A running loop is deliberately left alone: the host keeps running the review, and the client
+   * re-selects the same session after reconnecting, so only a switch to another session ends it.
+   */
   async ended(): Promise<void> {
-    this.stopLoop();
     this.session.endGeneration();
     await this.cost?.stop();
   }
@@ -548,7 +633,15 @@ export class Controller implements ControllerStore, ConnectionListener {
       case 'cancel': this.session.cancelled(event.eventId); return true;
       case 'agent-status':
         this.session.status(event.sessionId, event.running);
-        if (!event.running) { this.cost?.onTurnIdle(); this.settleLoop(event.sessionId); }
+        if (event.running) this.busySessions.add(event.sessionId);
+        else {
+          // Only a turn this client watched start counts as finished. A replayed or duplicated idle
+          // frame would otherwise look like a prompt completing, which `--wait` would trust.
+          const started = this.busySessions.delete(event.sessionId);
+          if (started && event.sessionId === this.state.sessionId) this.completedTurns += 1;
+          this.cost?.onTurnIdle();
+          this.settleLoop(event.sessionId);
+        }
         return true;
       case 'catalog-invalidated': this.catalog.refresh(); return true;
       case 'session-error': this.session.reportError(event.sessionId, event.error); return true;
@@ -809,6 +902,9 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Stop a running review; the terminal progress stays visible for the reader. */
   private stopLoop(): void {
     if (this.loop === undefined) return;
+    this.forgetSettleTimer();
+    this.abortVerification();
+    this.loopEndedAt = undefined;
     this.loop.cancel();
     this.loopPrompt = undefined;
     this.update({});
@@ -822,21 +918,146 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** Drop the loop entirely, without publishing a cancelled phase. */
   private forgetLoop(): void {
+    this.forgetSettleTimer();
+    this.abortVerification();
+    this.loopPrevious = undefined;
+    this.loopRunId = undefined;
+    this.loopVerifierMisses = 0;
     this.loop = undefined;
     this.loopPrompt = undefined;
+    this.loopEndedAt = undefined;
   }
 
-  /** Consume one finished attempt and continue the loop when it has a next step.
+  /** Note that an attempt's turn ended; its block may still be arriving.
    * @param sessionId - Session the host reported idle.
    */
   private settleLoop(sessionId: string): void {
     const loop = this.loop;
     if (loop === undefined || !loop.active || !loop.settled || loop.sessionId !== sessionId) return;
-    const text = latestAssistantText(this.state.session.record.messages);
-    const step = loop.settle(parseLoopResult(text, loop.protocol));
-    if (step.kind === 'continue') this.loopPrompt = step.prompt;
+    this.loopEndedAt ??= Date.now();
+    this.trySettleLoop();
+  }
+
+  /** Consume the attempt once its result block is committed, or the grace period expires.
+   *
+   * The final assistant message can land a moment after the idle event, so an empty parse is not yet
+   * a failed attempt: the next publish retries, and one timer covers a transcript that never grows.
+   */
+  private trySettleLoop(): void {
+    const loop = this.loop;
+    if (loop === undefined || !loop.active || !loop.settled) { this.forgetSettleTimer(); this.loopEndedAt = undefined; return; }
+    // Only a turn that actually ended may be consumed: a timer that fired just before the attempt
+    // settled must not decide the attempt that replaced it.
+    const endedAt = this.loopEndedAt;
+    if (endedAt === undefined) { this.forgetSettleTimer(); return; }
+    // An independent verifier decides the round; the reply block below stays as its fallback.
+    if (loop.protocol.verify !== undefined && this.verifier !== undefined) {
+      if (!this.loopVerifying) void this.verifyRound(loop);
+      return;
+    }
+    const result = parseLoopResult(latestAssistantText(this.state.session.record.messages), loop.protocol);
+    if (result === undefined && Date.now() - endedAt < LOOP_SETTLE_GRACE_MS) {
+      if (this.loopSettleTimer === undefined) {
+        this.loopSettleTimer = setTimeout(() => { this.loopSettleTimer = undefined; this.trySettleLoop(); }, LOOP_SETTLE_GRACE_MS);
+        this.loopSettleTimer.unref();
+      }
+      return;
+    }
+    this.forgetSettleTimer();
+    this.loopEndedAt = undefined;
+    this.settleWith(loop, result);
+  }
+
+  /** Score one finished round out of band, in a process of its own.
+   *
+   * The child writes its verdict to a file, so a slow or failed verifier delays the attempt instead
+   * of corrupting it: with no verdict the reply block decides, and with neither the attempt fails.
+   * @param loop - The run whose attempt just finished.
+   */
+  private async verifyRound(loop: ScoredLoop): Promise<void> {
+    const verifier = this.verifier;
+    if (verifier === undefined) return;
+    const { step, attempt } = loop.progress;
+    const { kind } = loop.protocol;
+    const runId = this.loopRunId ?? (this.loopRunId = randomUUID());
+    const file = verdictFile(this.verdictRoot, runId, kind, step, attempt);
+    const identity = verificationId(runId, kind, step, attempt);
+    const prompt = loop.protocol.verify!(loop.progress, step, attempt, { file, verificationId: identity }, this.loopPrevious);
+    this.loopVerifying = true;
+    const abort = new AbortController();
+    this.loopVerifyAbort = abort;
+    let outcome: VerifierOutcome;
+    try {
+      outcome = await verifier.verify({ verificationId: identity, kind, step, attempt, prompt, file,
+        ...(loop.protocol.artifact === undefined ? {} : { artifact: loop.protocol.artifact }),
+        title: `[dsht-verify] ${loop.protocol.title} · ${step}/${attempt}` }, abort.signal);
+    } catch (error) {
+      outcome = { type: 'unavailable', reason: `verifier failed: ${errorText(error)}` };
+    } finally {
+      if (this.loopVerifyAbort === abort) this.loopVerifyAbort = undefined;
+      this.loopVerifying = false;
+    }
+    // Verification outlives nothing: a cancelled or replaced loop must not be settled by its result.
+    if (this.loop !== loop || !loop.active || !loop.settled) return;
+    this.forgetSettleTimer();
+    this.loopEndedAt = undefined;
+    // The review was cancelled: nothing to decide, and nothing to report as a verdict.
+    if (outcome.type === 'cancelled') return;
+    if (outcome.type === 'verified') { this.loopVerifierMisses = 0; this.settleWith(loop, outcome.result); return; }
+
+    // Unavailable is not a verdict, so it never consumes the attempt: retry the verifier, and only
+    // then stop the run. Self-scoring is opt-in and is always visible in the progress line.
+    this.loopVerifierMisses += 1;
+    if (this.loopVerifierMisses <= VERIFIER_RETRIES) {
+      loop.note(`⚠ verification unavailable · retrying (${outcome.reason})`);
+      this.update({});
+      void this.verifyRound(loop);
+      return;
+    }
+    if (this.allowSelfFallback) {
+      const fallback = parseLoopResult(latestAssistantText(this.state.session.record.messages), loop.protocol);
+      this.settleWith(loop, fallback, fallback === undefined
+        ? `⚠ verification fallback · self-reported (and no reply block: ${outcome.reason})`
+        : '⚠ verification fallback · self-reported');
+      return;
+    }
+    loop.note(`⚠ verification unavailable · ${outcome.reason}`);
+    loop.unavailable();
+    this.update({});
+  }
+
+  /** Apply one attempt's verdict, and continue the run when it has a next step.
+   * @param loop - The run being settled.
+   * @param result - Verdict to consume, or undefined when the attempt produced none.
+   */
+  private settleWith(loop: ScoredLoop, result: LoopResult | undefined, note = ''): void {
+    const before = loop.progress;
+    const step = loop.settle(result);
+    // The note describes the attempt just decided, so it is applied after the state moved on.
+    loop.note(note);
+    if (step.kind === 'continue') {
+      // A retry on the same step carries the verdict that caused it; a new step starts clean.
+      this.loopPrevious = before.step === loop.progress.step && result !== undefined
+        ? { step: before.step, attempt: before.attempt, result } : undefined;
+      const findings = result === undefined ? [] : findingsLines(result);
+      this.loopPrompt = [step.prompt, ...findings].join('\n');
+    }
     this.update({});
     if (step.kind === 'continue') void this.flushLoop();
+  }
+
+  /** Stop an in-flight verification, if any; its result can no longer decide anything. */
+  private abortVerification(): void {
+    this.loopVerifyAbort?.abort();
+    this.loopVerifyAbort = undefined;
+    this.loopVerifying = false;
+  }
+
+  /** Drop a pending settle timer, if any. */
+  private forgetSettleTimer(): void {
+    if (this.loopSettleTimer === undefined) return;
+    clearTimeout(this.loopSettleTimer);
+    this.loopSettleTimer = undefined;
   }
 
   /** Send the prompt the loop is holding, once the client can actually send it. */
@@ -844,6 +1065,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     const loop = this.loop;
     const prompt = this.loopPrompt;
     if (loop === undefined || prompt === undefined || !loop.active) return;
+    if (this.state.sessionId !== loop.sessionId) return;
     if (!this.state.online || this.state.operation.busy || this.state.pending.length) return;
     // Consume before awaiting, so a re-entrant update cannot send the same prompt twice.
     this.loopPrompt = undefined;

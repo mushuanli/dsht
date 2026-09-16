@@ -4,6 +4,7 @@ export type { ControllerOptions, HistorySearch, RemovalTarget, SavedPrompt, Stat
 export { removalIntent, runCommand } from './commands.ts';
 export type { CommandPort, RunnableCommand } from './commands.ts';
 export { designReviewProtocol, DESIGN_REVIEW_ROUNDS } from './design-review.ts';
+export { designdocReviewProtocol, DESIGNDOC_REVIEW_ARTIFACT, DESIGNDOC_REVIEW_ROUNDS } from './designdoc-review.ts';
 export { LOOP_MARKER, LOOP_STATUSES, followUpContract, resultContract } from './loop-contract.ts';
 export { promptLoopProtocol } from './loop-prompt.ts';
 export { ScoredLoop, parseLoopResult, resolveLoop } from './loop.ts';

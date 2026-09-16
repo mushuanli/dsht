@@ -145,6 +145,27 @@ test('/loop takes a positional score and tries plus a free-form prompt', () => {
   assert.deepEqual(suggestedCommands('/loo'), ['/loop']);
 });
 
+test('/designdoc-review takes a document path after the shared options', () => {
+  assert.deepEqual(parseCommand('/designdoc-review tui-design.md'), {
+    kind: 'designdocReview', options: {}, path: 'tui-design.md' });
+  assert.deepEqual(parseCommand('/designdoc-review --to 3 --score 8.5 docs/design.md'), {
+    kind: 'designdocReview', options: { to: 3, score: 8.5 }, path: 'docs/design.md' });
+  // A quoted path keeps its spaces, and the flags may not follow it.
+  const quoted = parseCommand('/designdoc-review "docs/my design.md"');
+  assert.ok(quoted.kind === 'designdocReview');
+  assert.equal(quoted.path, 'docs/my design.md');
+  for (const line of ['/designdoc-review', '/designdoc-review --to 3', '/designdoc-review --nope 1 x.md',
+    '/designdoc-review --score 11 x.md', '/designdoc-review --to 11 x.md']) {
+    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /designdoc-review [--from N] [--to N] [--score X] [--tries N] <path>' }, line);
+  }
+  assert.deepEqual(COMMAND_POLICY.designdocReview, { chatOnly: true, blockedByPending: true });
+  // A costly review is typed in full.
+  assert.deepEqual(parseCommand('/designdoc-rev x.md'), { kind: 'error', message: 'Type the full command: /designdoc-review' });
+  const hint = COMMAND_HINTS.find(item => item.command === '/designdoc-review');
+  assert.equal(hint?.usage, '[options]');
+  assert.deepEqual(suggestedCommands('/designdoc'), ['/designdoc-review']);
+});
+
 test('/verify stores, inspects and clears the standard the next loop uses', () => {
   assert.deepEqual(parseCommand('/verify'), { kind: 'verify' });
   assert.deepEqual(parseCommand('/verify off'), { kind: 'verify', clear: true });
@@ -170,8 +191,8 @@ test('/design-review parses its four options and rejects a malformed line', () =
   }
   // It sends a turn, so it needs a conversation and a settled answer; a costly run is typed in full.
   assert.deepEqual(COMMAND_POLICY.designReview, { chatOnly: true, blockedByPending: true });
-  assert.deepEqual(parseCommand('/des'), { kind: 'error', message: 'Type the full command: /design-review' });
+  assert.deepEqual(parseCommand('/design-r'), { kind: 'error', message: 'Type the full command: /design-review' });
   const hint = COMMAND_HINTS.find(item => item.command === '/design-review');
   assert.equal(hint?.usage, '[options]');
-  assert.deepEqual(suggestedCommands('/design'), ['/design-review']);
+  assert.deepEqual(suggestedCommands('/design-'), ['/design-review']);
 });
