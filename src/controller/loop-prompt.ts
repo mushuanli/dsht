@@ -30,7 +30,7 @@ export function promptLoopProtocol(prompt: string, verification?: string): LoopP
       `这是一次迭代循环：第 ${step} 轮第 ${attempt} 次尝试（共 ${limits.to} 轮，及格线 ${limits.score}，每轮最多 ${limits.tries} 次）。`,
       '请直接完成上面的要求，不要输出冗长的内部思维过程。',
       '',
-      ...resultContract('loop', limits, step, attempt, verification),
+      ...resultContract('loop', limits, step, attempt, { standard: verification }),
     ].join('\n'),
     followUp: (limits: LoopLimits, step, attempt) => [
       `现在是第 ${step} 轮、第 ${attempt}/${limits.tries} 次尝试（及格线 ${limits.score}）。`,

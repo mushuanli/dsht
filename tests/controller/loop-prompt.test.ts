@@ -30,9 +30,9 @@ test('a verification standard is injected and marked on the label', () => {
   const verified = promptLoopProtocol('do the thing', 'npm test 必须通过\n不得新增 any');
   assert.equal(plain.title, 'Loop · do the thing');
   assert.equal(verified.title, 'Loop · do the thing (verified)');
-  assert.match(plain.brief({ from: 1, to: 1, score: 8, tries: 1 }, 1, 1), /验证标准：未设置/);
+  assert.match(plain.brief({ from: 1, to: 1, score: 8, tries: 1 }, 1, 1), /评分标准：未提供/);
   const brief = verified.brief({ from: 1, to: 1, score: 8, tries: 1 }, 1, 1);
-  assert.match(brief, /验证标准（由 \/verify 提供，逐条对照）：/);
+  assert.match(brief, /评分标准（逐条对照）：/);
   assert.match(brief, /npm test 必须通过\n不得新增 any/);
 });
 

@@ -9,6 +9,9 @@ import type { LoopLimits, LoopProtocol } from './loop.ts';
 /** Rounds the review protocol defines; `--to` defaults to the last one. */
 export const DESIGN_REVIEW_ROUNDS = 10;
 
+/** Workspace file each round appends to, so a fresh verifier can read the review itself. */
+export const DESIGN_REVIEW_ARTIFACT = 'DESIGN-REVIEW.md';
+
 /** Round titles, indexed from 1 so `ROUND_TITLES[step]` is the round's name. */
 const ROUND_TITLES = [
   '',
@@ -66,7 +69,15 @@ function briefHeader(limits: LoopLimits, step: number, attempt: number, verifica
     '- 修改后减少了什么耦合或复杂度',
     '- 本轮收敛结论',
     '',
-    ...resultContract('design-review', limits, step, attempt, verification),
+    `每轮结论必须写入工作区文件 ${DESIGN_REVIEW_ARTIFACT} 的 “## 第 ${step} 轮 · ${ROUND_TITLES[step] ?? '收敛审查'}” 小节：不存在则创建，已存在则替换该小节，不要覆盖其它轮次。验证者会直接读这个文件。若工作区不可写，则在正文给出完整内容并在 evidence 中说明。`,
+    '若本轮确实没有可改进项，请如实在 status 中给 done 并说明无需改进，不要为了触发重试而压低分数。',
+    '',
+    ...resultContract('design-review', limits, step, attempt, {
+      // The round's own checklist is the rubric; an operator standard is added on top of it.
+      standard: verification === undefined ? ROUND_CHECKS[step] : `${ROUND_CHECKS[step]}\n\n额外要求（由 /verify 提供）：\n${verification}`,
+      artifact: DESIGN_REVIEW_ARTIFACT,
+      focus: `第 ${step} 轮 · ${ROUND_TITLES[step] ?? '收敛审查'}`,
+    }),
   ];
 }
 
@@ -80,11 +91,13 @@ export function designReviewProtocol(verification?: string): LoopProtocol {
     kind: 'design-review',
     title: `Design review${verification === undefined ? '' : ' (verified)'}`,
     steps: DESIGN_REVIEW_ROUNDS,
+    stepLabel: step => ROUND_TITLES[step] ?? '收敛审查',
     brief: (limits, step, attempt) => briefHeader(limits, step, attempt, verification).join('\n'),
     followUp: (limits, step, attempt) => [
       `现在是第 ${step} 轮、第 ${attempt}/${limits.tries} 次尝试（及格线 ${limits.score}）。`,
       `阅读上面的结果、意见与建议，按第 ${step} 轮（${ROUND_TITLES[step] ?? '收敛审查'}）的要求继续改进；`,
-      '上一版未解决、未回应的 blocking 问题必须逐条处理。',
+      '上一版未解决、未回应的 blocking 问题必须逐条处理，并更新工作区文件 '
+        + `${DESIGN_REVIEW_ARTIFACT} 中本轮的小节。`,
       followUpContract('design-review', step, attempt),
     ].join('\n'),
   };

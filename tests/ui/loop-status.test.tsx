@@ -26,6 +26,12 @@ test('a finished loop appends its terminal phase', () => {
   }
 });
 
+test('a named step is shown between the title and the position', () => {
+  const ui = render(<LoopStatus progress={{ ...PROGRESS, stepLabel: '接口审查' }} />);
+  try { assert.equal(ui.lastFrame(), 'Design review · 接口审查 · step 3/10 · attempt 2/10 · best 7.5/8'); }
+  finally { ui.unmount(); ui.cleanup(); }
+});
+
 test('another protocol renders through the same line', () => {
   const ui = render(<LoopStatus progress={{ ...PROGRESS, title: 'Security review', score: 9.5, phase: 'passed' }} />);
   try { assert.equal(ui.lastFrame(), 'Security review · step 3/10 · attempt 2/10 · best 7.5/9.5 · passed'); }

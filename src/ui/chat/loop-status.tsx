@@ -14,6 +14,6 @@ export function LoopStatus({ progress }: { progress: LoopProgress }) {
   const theme = useTheme();
   const running = progress.phase === 'running';
   return <Text color={running ? theme.colors.context : theme.colors.muted}>
-    {progress.title} · step {progress.step}/{progress.to} · attempt {progress.attempt}/{progress.tries} · best {progress.best}/{progress.score}{running ? '' : ` · ${progress.phase}`}
+    {progress.title}{progress.stepLabel === undefined ? '' : ` · ${progress.stepLabel}`} · step {progress.step}/{progress.to} · attempt {progress.attempt}/{progress.tries} · best {progress.best}/{progress.score}{running ? '' : ` · ${progress.phase}`}
   </Text>;
 }

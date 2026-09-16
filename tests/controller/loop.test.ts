@@ -91,3 +91,13 @@ test('a blocked verdict ends the run instead of spending the remaining budget', 
   assert.equal(loop.progress.phase, 'blocked');
   assert.equal(loop.active, false);
 });
+
+test('a protocol that names its steps shows that name in the progress snapshot', () => {
+  const labelled = { ...PROTOCOL, stepLabel: (step: number) => `phase ${step}` };
+  const loop = new ScoredLoop('s1', labelled, { from: 2, to: 3, score: 8, tries: 2 });
+  assert.equal(loop.progress.stepLabel, 'phase 2');
+  assert.equal(loop.settle({ score: 9 }).kind, 'continue');
+  assert.equal(loop.progress.stepLabel, 'phase 3');
+  // A protocol without labels keeps the field absent, so the UI shows no separator.
+  assert.equal(new ScoredLoop('s1', PROTOCOL, { from: 1, to: 1, score: 8, tries: 1 }).progress.stepLabel, undefined);
+});

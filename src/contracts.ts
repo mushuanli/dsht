@@ -41,6 +41,8 @@ export interface LoopProgress {
   /** Step and attempt in flight, both 1-based. */
   step: number;
   attempt: number;
+  /** What this step is about, when the protocol names its steps. */
+  stepLabel?: string;
   /** Best score seen in the current step. */
   best: number;
   /** `running` while the loop runs; `blocked` means the verifier proved the task impossible. */

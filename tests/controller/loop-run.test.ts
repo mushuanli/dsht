@@ -37,7 +37,7 @@ test('the loop sends the brief, advances on a passing score and stops on a faili
   // The opening send is the scoped brief, not a follow-up.
   assert.match(lastPrompt(fixture), /只执行第 1 轮的第 1 次尝试/);
   assert.deepEqual(controller.queries.loop, {
-    title: 'Design review', from: 1, to: 2, score: 8, tries: 2, step: 1, attempt: 1, best: 0, phase: 'running' });
+    title: 'Design review', from: 1, to: 2, score: 8, tries: 2, step: 1, attempt: 1, best: 0, phase: 'running', stepLabel: '职责与归属' });
 
   // A passing score advances to step 2 with a short follow-up.
   reply(fixture, 10, 'findings…\n' + block(1, 1, 8.5));

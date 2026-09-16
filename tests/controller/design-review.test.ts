@@ -1,7 +1,7 @@
 /** The design-review protocol: the text and step count the generic loop runs with. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DESIGN_REVIEW_ROUNDS, designReviewProtocol } from '../../src/controller/design-review.ts';
+import { DESIGN_REVIEW_ARTIFACT, DESIGN_REVIEW_ROUNDS, designReviewProtocol } from '../../src/controller/design-review.ts';
 import { LOOP_MARKER } from '../../src/controller/loop-contract.ts';
 
 test('the protocol declares ten rounds and the shared result marker', () => {
@@ -22,6 +22,13 @@ test('the brief scopes one attempt and restates the priorities and the result bl
   assert.match(brief, new RegExp('```' + LOOP_MARKER));
   assert.match(brief, /"kind":"design-review","step":3,"attempt":2/);
   assert.match(brief, /"status":"done\|retry\|blocked"/);
+  assert.match(brief, /"evidence"/);
+  // The round's own checklist is the verifier's rubric, and the artifact is a workspace file.
+  assert.match(brief, /本步焦点：第 3 轮 · 接口审查/);
+  assert.match(brief, /评分标准（逐条对照）：/);
+  assert.match(brief, /逐个检查 public API/);
+  assert.match(brief, new RegExp(`## 第 3 轮 · 接口审查`));
+  assert.match(brief, new RegExp(DESIGN_REVIEW_ARTIFACT));
   // The last round clamps to a sensible check set rather than reading past the table.
   assert.match(designReviewProtocol().brief({ from: 1, to: 10, score: 8, tries: 10 }, 10, 1), /第 10 轮 · 最终收敛/);
 });
@@ -34,13 +41,24 @@ test('the follow-up restates the round and budget without resending the brief', 
   assert.doesNotMatch(followUp, /优先目标/);
 });
 
-test('a verification standard is injected and marked on the label', () => {
+test('a verification standard is folded on top of the round rubric and marked on the label', () => {
   const plain = designReviewProtocol();
   const verified = designReviewProtocol('必须通过 npm test\n且不得新增 any');
   assert.equal(plain.title, 'Design review');
   assert.equal(verified.title, 'Design review (verified)');
   assert.doesNotMatch(plain.brief({ from: 1, to: 1, score: 8, tries: 1 }, 1, 1), /必须通过 npm test/);
   const brief = verified.brief({ from: 1, to: 1, score: 8, tries: 1 }, 1, 1);
-  assert.match(brief, /验证标准（由 \/verify 提供，逐条对照）：/);
+  // The round checklist stays the base rubric; the operator's standard is added, not substituted.
+  assert.match(brief, /逐个模块\/类\/服务\/Store/);
+  assert.match(brief, /额外要求（由 \/verify 提供）：/);
   assert.match(brief, /必须通过 npm test\n且不得新增 any/);
+});
+
+test('each round names itself for the progress line', () => {
+  const protocol = designReviewProtocol();
+  assert.equal(protocol.stepLabel?.(1), '职责与归属');
+  assert.equal(protocol.stepLabel?.(6), '删除式审查');
+  assert.equal(protocol.stepLabel?.(10), '最终收敛');
+  // A step outside the table still gets a readable label rather than undefined.
+  assert.equal(protocol.stepLabel?.(11), '收敛审查');
 });

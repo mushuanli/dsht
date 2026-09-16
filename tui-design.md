@@ -179,7 +179,7 @@ C4Component
   Component(session, "session/", "16 文件 2969 行", "对话投影、排版、遥测、导航、引用、导出与 SessionController")
   Component(cost, "cost/", "9 文件 852 行", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "2 文件 87 行", "模型路由与 agent preset")
-  Component(controller, "controller/", "11 文件 1952 行", "Controller 门面、命令策略、通用评分循环、设计审查与 /loop 协议、ConnectionController、内存日志与快捷提示词")
+  Component(controller, "controller/", "11 文件 1987 行", "Controller 门面、命令策略、通用评分循环、设计审查与 /loop 协议、ConnectionController、内存日志与快捷提示词")
   Component(ui, "ui/", "21 文件 2592 行", "commands、chat、dialogs、input、theme 与唯一的 Ink 渲染入口")
   Component(cli, "cli/", "2 文件 137 行", "参数、目录准备与进程生命周期")
   Component(shell, "shell/", "3 文件 276 行", "本地 ! 命令的执行、有界输出与进程组终止")
@@ -754,7 +754,7 @@ dsht [options] [list workspaces|list sessions]
 
 路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `chatOnly` 与 `blockedByPending`，`ui/routing.ts` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。命令的执行策略集中在 `controller/commands.ts`：`runCommand(controller, command, port)` 调用应用动作并返回 `CommandIntent`，其中 `port.run` 借出 UI 的"可取消操作 + 加载标签"机制；UI 只解释意图，因此新增命令不需要改动 `ui/`，除非它引入新的表现层动词或新面板。
 
-**带评分的分步循环是通用机制，协议只是数据**：`controller/loop.ts` 提供 `LoopProtocol`（`marker`/`kind`/`title`/`steps`/默认分/默认次数/`brief`/`followUp`）、`ScoredLoop`（无 I/O 的 step／attempt／best／phase 状态机）、`resolveLoop`（套用协议默认值并校验 `to >= from`）与 `parseLoopScore`（按 `marker` + `kind` 读正文最后一个块）；`Controller` 负责发送、在 `agent-status running:false` 时推进、以及在任何会打断循环的事件上停止（用户发送普通消息、`/cancel`、Esc/Ctrl+C、切换会话、断线）。`controller/design-review.ts` 现在只是一个协议（十轮标题/检查要点 + 两个提示词构造函数），**新增同类命令只需再加一个协议文件、一条 slash 语法与一条 `COMMAND_POLICY`，不必碰循环与 UI**。状态只存在于内存并绑定当前会话，不持久化；UI 只读 `Queries.loop` 的只读快照，由叶子组件 `ui/chat/loop-status.tsx` 渲染一行 `title · step · attempt · best/target`，不做判断；该组件只吃 `LoopProgress`，不认识任何协议。分数必须出现在 assistant **正文**的最后一块（正文不裁剪，reasoning 会被折行），缺失、越界或 `kind` 不符都按一次失败尝试计入 `--tries`。契约文本集中在 `controller/loop-contract.ts`（`resultContract`/`followUpContract`），要求回复以 `dsht-loop` 块结尾，块内至少含 `score`、`status`（`done|retry|blocked`）与 `evidence`；`status=blocked` 立即结束循环（`ScoredLoop` 的 `blocked` 终态），不再消耗尝试预算。契约还要求把产出物落到工作区，并由**全新 verifier 子代理**独立打分——`/verify <criteria>` 提供该验证者对照的标准（控制器内存、属于当前会话；`/verify` 查看、`/verify off` 清除），协议在启动时读取并注入，标题追加 `(verified)` 标记。
+**带评分的分步循环是通用机制，协议只是数据**：`controller/loop.ts` 提供 `LoopProtocol`（`marker`/`kind`/`title`/`steps`/默认分/默认次数/`brief`/`followUp`）、`ScoredLoop`（无 I/O 的 step／attempt／best／phase 状态机）、`resolveLoop`（套用协议默认值并校验 `to >= from`）与 `parseLoopScore`（按 `marker` + `kind` 读正文最后一个块）；`Controller` 负责发送、在 `agent-status running:false` 时推进、以及在任何会打断循环的事件上停止（用户发送普通消息、`/cancel`、Esc/Ctrl+C、切换会话、断线）。`controller/design-review.ts` 现在只是一个协议（十轮标题/检查要点 + 两个提示词构造函数），**新增同类命令只需再加一个协议文件、一条 slash 语法与一条 `COMMAND_POLICY`，不必碰循环与 UI**。状态只存在于内存并绑定当前会话，不持久化；UI 只读 `Queries.loop` 的只读快照，由叶子组件 `ui/chat/loop-status.tsx` 渲染一行 `title · step · attempt · best/target`，不做判断；该组件只吃 `LoopProgress`，不认识任何协议。分数必须出现在 assistant **正文**的最后一块（正文不裁剪，reasoning 会被折行），缺失、越界或 `kind` 不符都按一次失败尝试计入 `--tries`。契约文本集中在 `controller/loop-contract.ts`（`resultContract`/`followUpContract`），要求回复以 `dsht-loop` 块结尾，块内至少含 `score`、`status`（`done|retry|blocked`）与 `evidence`；`status=blocked` 立即结束循环（`ScoredLoop` 的 `blocked` 终态），不再消耗尝试预算。契约还要求把产出物落到工作区，并由**全新 verifier 子代理**独立打分——`/verify <criteria>` 提供该验证者对照的标准（控制器内存、属于当前会话；`/verify` 查看、`/verify off` 清除），协议在启动时读取并注入，标题追加 `(verified)` 标记。`resultContract` 接收 `VerificationBrief`（`standard`/`artifact`/`focus`），因此协议可以自带 rubric：`/design-review` 用**本轮检查要点**作为标准、把 `/verify` 的标准叠加在其上，要求每轮写入工作区文件 `DESIGN-REVIEW.md`（验证者在全新上下文里只能读文件），并通过可选的 `LoopProtocol.stepLabel` 在进度行显示轮次主题。
 
 面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由 `surfaces` 的 `keepFor` 决定）。
 
@@ -1712,9 +1712,9 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/controller.ts` | 912 | `Actions`、`Queries`、`Controller` |
 | `controller/commands.ts` | 195 | `RunnableCommand`、`CommandPort`、`runCommand`、`removalIntent` |
 | `controller/index.ts` | 13 | `Controller`、`ConnectionController`、`runCommand`、`removalIntent`、`resolveLoop`、`ScoredLoop`、`designReviewProtocol` |
-| `controller/loop.ts` | 171 | `LoopLimits`、`LoopProtocol`、`LoopResult`、`LoopStepResult`、`resolveLoop`、`parseLoopResult`、`latestAssistantText`、`ScoredLoop` |
-| `controller/design-review.ts` | 91 | `DESIGN_REVIEW_ROUNDS`、`designReviewProtocol` |
-| `controller/loop-contract.ts` | 52 | `LOOP_MARKER`、`LOOP_STATUSES`、`resultContract`、`followUpContract` |
+| `controller/loop.ts` | 175 | `LoopLimits`、`LoopProtocol`、`LoopResult`、`LoopStepResult`、`resolveLoop`、`parseLoopResult`、`latestAssistantText`、`ScoredLoop` |
+| `controller/design-review.ts` | 104 | `DESIGN_REVIEW_ROUNDS`、`DESIGN_REVIEW_ARTIFACT`、`designReviewProtocol` |
+| `controller/loop-contract.ts` | 70 | `LOOP_MARKER`、`LOOP_STATUSES`、`VerificationBrief`、`resultContract`、`followUpContract` |
 | `controller/loop-prompt.ts` | 41 | `promptLoopProtocol` |
 | `controller/memory-log.ts` | 84 | `MemoryLog` |
 | `controller/perf-measures.ts` | 80 | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
@@ -1763,7 +1763,7 @@ C4Component
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "16 文件 2969 行")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "9 文件 852 行")
   Component(catalog, "catalog/", "controller, index", "2 文件 87 行")
-  Component(controller, "controller/", "controller, commands, loop, loop-contract, loop-prompt, design-review, connection, memory-log, perf-measures, prompts, index", "11 文件 1952 行")
+  Component(controller, "controller/", "controller, commands, loop, loop-contract, loop-prompt, design-review, connection, memory-log, perf-measures, prompts, index", "11 文件 1987 行")
   Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "21 文件 2592 行")
   Component(cli, "cli/", "index.ts, dsht.tsx", "2 文件 137 行")
   Component(shell, "shell/", "controller, runner, index", "3 文件 276 行")

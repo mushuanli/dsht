@@ -27,6 +27,8 @@ export interface LoopProtocol {
   title: string;
   /** Steps the protocol defines; `--to` defaults to this. */
   steps: number;
+  /** Optional name of one step, shown in the progress line. */
+  stepLabel?(step: number): string;
   /** Passing score used when the command omits `--score`; default 8. */
   defaultScore?: number;
   /** Attempts per step used when the command omits `--tries`; default 10. */
@@ -130,7 +132,9 @@ export class ScoredLoop {
 
   /** Snapshot the UI renders; the loop keeps the authoritative numbers. */
   get progress(): LoopProgress {
-    return { title: this.protocol.title, ...this.limits, step: this.step, attempt: this.attempt, best: this.best, phase: this.phase };
+    const stepLabel = this.protocol.stepLabel?.(this.step);
+    return { title: this.protocol.title, ...this.limits, step: this.step, attempt: this.attempt, best: this.best, phase: this.phase,
+      ...(stepLabel === undefined ? {} : { stepLabel }) };
   }
 
   /** Whether the run may still send or settle an attempt. */
