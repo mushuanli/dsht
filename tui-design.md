@@ -712,6 +712,8 @@ dsht [options] [list workspaces|list sessions]
 | `--history-mb <n>` | 历史软上限 MiB，默认 16，必须为正整数 |
 | `--json` | `list` 输出 `{ "items": [...] }` |
 | `--memory-log <path>` | 运行时内存日志路径，默认 `<state>/memory.log`；空值报错 |
+| `--trace <path>` | 状态迁移日志路径，默认 `<state>/trace.log`；记录连接代际、选择器请求、本地工作区采用、会话解析与屏幕／选中项变化；空值报错 |
+| `--no-trace` | 关闭状态迁移日志（默认开启） |
 | `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 先建好 `.diagnostics/` 再以 `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics` 启动，可在平台期用 `kill -USR2 <pid>` 把堆快照写进该目录（快照目录必须先存在，否则信号会让进程崩溃） |
 | `--help` | 打印帮助 |
 
@@ -724,7 +726,7 @@ dsht [options] [list workspaces|list sessions]
 - 交互模式注册 `SIGTERM` → `app.unmount()`，并在 `finally` 中调用 `controller.shutdown()`。
 - 失败时向 `stderr` 写 `errorText(error)` 并设 `process.exitCode = 1`。
 
-环境变量：`DSH_URL`、`DSH_TOKEN`、`DSHT_AUTH_DIR`、`DSHT_CONFIG_DIR`、`DSHT_STATE_DIR`、`DSHT_MEMORY_LOG`、`DSHT_REACT_DEV`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`HOME`。
+环境变量：`DSH_URL`、`DSH_TOKEN`、`DSHT_AUTH_DIR`、`DSHT_CONFIG_DIR`、`DSHT_STATE_DIR`、`DSHT_MEMORY_LOG`、`DSHT_TRACE`、`DSHT_REACT_DEV`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`HOME`。
 
 #### 3.3.1 React 构建选择
 
@@ -791,6 +793,7 @@ dsht [options] [list workspaces|list sessions]
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 |
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sessionHash>-<cut>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，原子重命名 |
+| 状态迁移日志 | `<state>/trace.log` | `--trace`、`DSHT_TRACE`、`DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，追加 + 每 2,000 行原子重写 |
 | 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG`、`DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，追加 + 每 1,000 行原子重写 |
 | 快捷 Prompt | `<state>/prompts.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600，原子重命名 |
 
@@ -1118,6 +1121,7 @@ C4Component
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 | 认证成功且服务端下发持久 Cookie 时 |
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 | 仅首次交互启动创建；之后由用户维护 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sha256(sessionId)>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600 | 每个会话一个文件，写入较新 cut 时替换 |
+| 状态迁移日志 | `<state>/trace.log` | `--trace`、`DSHT_TRACE` | 0600，追加 | 每次连接代际（`begin`/`ready`/`ended`/`settled`）、选择器请求、本地工作区采用、会话解析，以及 `screen`/`session`/`workspace`/`online` 变化各一行 JSON；满 2,000 行重写。只含标识与屏幕名，不含 prompt／工具／会话正文 |
 | 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本（含布局与渲染缓存计数、React 渲染 measure 计数与本次清理数、扫描工作量；带 `--expose-gc` 时另有回收后堆），满 1,000 行重写 |
 | 快捷提示词 | `<state>/prompts.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600，临时文件加原子重命名 | 启动时读取一次；`/prompt TEXT` 新增、`e` 编辑、`d` 删除时整表写回（串行队列，写失败回滚） |
 | 导出归档 | 用户指定，或 `<cwd>/session-<sanitized-id>-<Date.now()>.zip` | — | 0600，`wx` 独占 | `/export` 成功时 |
@@ -1470,7 +1474,7 @@ export interface SessionInfo {
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（31 篇）、`bug-fix/`（5 篇）与 `feature/`（18 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences；英文、中文与 `.i18n.yaml` 三项配对目前有一处缺口——`architecture/2026-09-15-session-interactions-and-prompt-recall` 只有英文，缺中文与配对文件（本文核对时）。变更非平凡行为时应新增同目录的 note，并按 7.7 补齐三项配对。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（32 篇）、`bug-fix/`（5 篇）与 `feature/`（18 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences；英文、中文与 `.i18n.yaml` 三项配对目前有一处缺口——`architecture/2026-09-15-session-interactions-and-prompt-recall` 只有英文，缺中文与配对文件（本文核对时）。变更非平凡行为时应新增同目录的 note，并按 7.7 补齐三项配对。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 下表是影响面较大的决策选摘，不是全量清单；完整列表见该目录本身。
 
@@ -1493,6 +1497,7 @@ export interface SessionInfo {
 | `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` | 九条无豁免禁边、wire 归一化（`HostEvent`/`ControlFrame`）、`SessionRuntime`、状态就近持有、`slash/` 纯语法、Controller 拆生命周期/Actions/Queries、朴素 UI 契约 |
 | `architecture/2026-09-11-terminal-approval-options` | 审批编号选择器、未选中起始、Esc 与重放重置 |
 | `architecture/2026-09-11-terminal-storage-unit` | 文件操作统一归属 `src/storage/`，由依赖门禁强制 |
+| `architecture/2026-09-19-terminal-transition-trace` | 默认启用的有界状态迁移日志（连接代际、选择器、工作区采用、会话解析、屏幕／选中项变化），回答"屏幕为什么自己动了" |
 | `architecture/2026-09-11-terminal-memory-log` | 默认启用的有界运行时内存日志，区分真实保留与 V8 高水位 |
 | `feature/2026-09-12-terminal-question-dismiss` | 提问的 Esc 放弃整组问题，以 `ASK_CANCELLED` 结算 |
 | `feature/2026-09-12-terminal-recall-full-history` | 回填在窗口边界处向前翻页，覆盖客户端连接之前的提示词 |
@@ -1544,7 +1549,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 `tests/` 不依赖父仓库，也不需要模型凭据：
 
 - `tests/support/host.ts` 是环回夹具，起一个 `http.Server` 与 `WebSocketServer`，逐条断言请求方法、路径、Cookie、请求体与参数名，可注入延迟、错误、队列、重放交互、子代理与分页行为；`tests/support/no-color.ts` 固定测试渲染的颜色级别。
-- `tests/` 下的 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`shell/`、`storage/`、`architecture/`），覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填（含翻页到更早的提示词、序号升级与预算淘汰后的窗口回填）、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、提问的 Esc 放弃（rejected/`ASK_CANCELLED` 结算、Other 的两步退出）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析。文件数与用例数以 `find tests -name '*.test.ts*'` 与 `npm test` 的输出为准（本文核对时：48 个文件、370 项）。
+- `tests/` 下的 `*.test.ts(x)` 按模块组织（`transport/`、`session/`、`cost/`、`controller/`、`ui/`、`cli/`、`shell/`、`storage/`、`architecture/`），覆盖传输、认证、Cookie 存储、CLI 子进程、命令、输入编辑、回填（含翻页到更早的提示词、序号升级与预算淘汰后的窗口回填）、记忆预算、导航、引用、状态（含启动连接与三种非 chat 界面的断线重连、复制模式画面保持）、主题、审批选择（未选中起始、Esc 清除、重放重置、确认前不发结果）、提问的 Esc 放弃（rejected/`ASK_CANCELLED` 结算、Other 的两步退出）、transcript 折叠与录制回放、实时尾部增量换行与一次性换行逐帧一致、账本文件的固定命名与残留清理、状态面板在窄屏的换行与分页（`tests/support/tty.ts` 提供指定尺寸的终端）、Markdown 在 32/100 列的录制快照与流式增量重解析、状态迁移日志的文件边界与"重连采用本地工作区并清空选中项"链路。文件数与用例数以 `find tests -name '*.test.ts*'` 与 `npm test` 的输出为准（本文核对时：48 个文件、395 项）。
 - `tests/architecture/dependencies.test.ts` 检查 `src/` 的依赖方向：每个单元只能导入为其列出的单元，React/Ink 只能在 `ui/` 下，`ui/` 不得直接调用传输层 client；同一文件内的合成用例证明每个禁止方向都会被拒绝。
 - `tests/expected/` 保存 13 份黄金输出（费用、文件引用、历史导航、输入编辑、窄屏推理、待答输入、审批选项、状态栏两种、工作区编辑两种、Markdown 32/100 列两种）；`tests/fixtures/` 提供 `legacy-packed-history.json` 与 `workspace-edit.session.jsonl`。
 - `scripts/test/terminal.mjs` 在强制颜色环境下重跑套件；`scripts/test/package.mjs` 打包后在隔离的离线环境运行 CLI。
@@ -1759,6 +1764,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/designdoc-review.ts` | `DESIGNDOC_REVIEW_ROUNDS`、`DESIGNDOC_REVIEW_ARTIFACT`、`designdocReviewProtocol` |
 | `controller/loop-contract.ts` | `LOOP_MARKER`、`LOOP_STATUSES`、`VerificationBrief`、`resultContract`、`followUpContract` |
 | `controller/loop-prompt.ts` | `promptLoopProtocol` |
+| `controller/trace-log.ts` | `TraceLog`、`readTrace` |
 | `controller/memory-log.ts` | `MemoryLog` |
 | `controller/perf-measures.ts` | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
 | `controller/prompts.ts` | `SavedPrompt`、`MAX_PROMPT_CHARS`、`MAX_SAVED_PROMPTS`、`PromptStore` |

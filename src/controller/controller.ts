@@ -16,6 +16,7 @@ import type { CostLedger } from '../cost/ledger.ts';
 import { CostController } from '../cost/controller.ts';
 import { ConnectionController, type ConnectionListener, type ConnectionOptions } from './connection.ts';
 import { MemoryLog } from './memory-log.ts';
+import { TraceLog } from './trace-log.ts';
 import { PromptStore } from './prompts.ts';
 import { latestAssistantText, parseLoopResult, ScoredLoop, type LoopLimits, type LoopProtocol, type LoopResult, type PriorVerdict } from './loop.ts';
 import { findingsLines } from './loop-contract.ts';
@@ -192,6 +193,8 @@ export interface ControllerOptions {
   /** History retention budgets. */
   historyLimits?: HistoryLimits;
   /** Runtime memory log path; absent disables the log. */
+  /** Connection, screen and selection trace path; absent disables the log. */
+  tracePath?: string;
   memoryLogPath?: string;
   /** Directory this client runs in, offered as a workspace the host has not registered. */
   localDirectory?: string;
@@ -223,6 +226,8 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Background billing scan; present only when a ledger was supplied. */
   readonly cost: CostController | undefined;
   /** Bounded runtime memory samples; present only when a log path was supplied. */
+  /** Bounded connection, screen and selection trace; present only when a path was supplied. */
+  readonly trace: TraceLog | undefined;
   readonly memoryLog: MemoryLog | undefined;
   /** Shortcut prompts the operator saved; in memory for this run when no path was supplied. */
   readonly promptStore: PromptStore;
@@ -310,6 +315,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       scanPage: (sessionId, records) => this.session.rememberScanPage(sessionId, records),
       scanDone: sessionId => this.session.rememberScanDone(sessionId),
     });
+    if (options.tracePath !== undefined) this.trace = new TraceLog(options.tracePath);
     if (this.memoryLogPath !== undefined) this.memoryLog = new MemoryLog(this.memoryLogPath, () => this.memorySample());
     this.promptStore = new PromptStore(options.promptsPath);
     this.actions = this.buildActions();
@@ -341,6 +347,7 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param patch - Fields to replace on the current state.
    */
   update(patch: Partial<State>): void {
+    const previous = this.state;
     const next = { ...this.state, ...patch, version: this.state.version + 1 };
     next.pending = next.online && next.screen === 'chat' && this.session
       ? this.session.pendingFor(next) : [];
@@ -353,12 +360,34 @@ export class Controller implements ControllerStore, ConnectionListener {
       this.forgetLoop();
       this.verification = undefined;
     }
+    this.traceTransition(previous, next);
     this.state = next;
     for (const observer of this.observers) observer();
     // A prompt the loop could not send yet (offline, busy or answering) goes out as soon as it can.
     if (this.loopPrompt !== undefined) void this.flushLoop();
     // A finished attempt whose reply is still committing gets another look on every publish.
     if (this.loopEndedAt !== undefined) this.trySettleLoop();
+  }
+  /** Record one diagnostic event; a no-op when no trace path was configured. */
+  private traceEvent(event: string, detail: ObjectValue = {}): void {
+    this.trace?.record({ event, ...detail });
+  }
+
+  /** Record the state fields that decide which screen the reader is looking at.
+   *
+   * Every non-user transition is written here as well as at its cause, so a screen that moved
+   * without an expected reason is still visible in the trace rather than silently skipped.
+   * @param previous - State before the patch.
+   * @param next - State after the patch.
+   */
+  private traceTransition(previous: State, next: State): void {
+    if (this.trace === undefined) return;
+    const changed: ObjectValue = {};
+    if (previous.screen !== next.screen) changed.screen = `${previous.screen} -> ${next.screen}`;
+    if (previous.sessionId !== next.sessionId) changed.session = `${previous.sessionId ?? 'none'} -> ${next.sessionId ?? 'none'}`;
+    if (previous.workspaceId !== next.workspaceId) changed.workspace = `${previous.workspaceId ?? 'none'} -> ${next.workspaceId ?? 'none'}`;
+    if (previous.online !== next.online) changed.online = next.online;
+    if (Object.keys(changed).length > 0) this.traceEvent('state', changed);
   }
 
   /** Bind every mutating entry point to its private implementation. */
@@ -470,6 +499,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     await this.session.settle();
     await this.catalog.settle();
     await this.cost?.stop();
+    await this.trace?.settle();
     await this.memoryLog?.stop();
     this.session.release();
   }
@@ -575,6 +605,7 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** A new generation starts; drop generation-scoped domain state. */
   begin(): void {
+    this.traceEvent('generation', { phase: 'begin', screen: this.state.screen, session: this.state.sessionId ?? 'none' });
     this.session.beginGeneration();
     this.catalog.reset();
     this.connectionSettled = false;
@@ -588,23 +619,36 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.catalog.refresh();
     this.update({ online: true, status: 'Connected', pending: [], operation: { ...this.state.operation, error: '' } });
     const screen = this.state.screen;
-    await this.session.showPicker(screen === 'sessions' ? 'sessions' : 'workspaces');
+    this.traceEvent('generation', { phase: 'ready', screen });
+    const picker = screen === 'sessions' ? 'sessions' : 'workspaces';
+    this.traceEvent('picker', { requested: picker });
+    await this.session.showPicker(picker);
     // Starting inside a registered workspace's directory already answers the first question, so the
     // reader lands on that workspace's sessions instead of a list they would pick from by hand.
-    if (screen !== 'sessions' && !this.initialSession && this.session.adoptLocalWorkspace(this.localDirectory) !== undefined) {
-      this.update({ status: 'Workspace from this directory · ← to switch' });
+    // The guard only excludes the `sessions` screen, so it also runs when the captured screen is
+    // `chat`: a reconnect mid-conversation then adopts the local workspace, `pickWorkspace` clears
+    // the selection, and the reader is returned to `/resume`. The trace records the `adopt` event
+    // and the `state` transition that follow, which is how that jump is told from a user action.
+    const mayAdopt = screen !== 'sessions' && !this.initialSession;
+    if (mayAdopt) {
+      const adopted = this.session.adoptLocalWorkspace(this.localDirectory);
+      this.traceEvent('adopt', { directory: this.localDirectory, workspace: adopted ?? 'none' });
+      if (adopted !== undefined) this.update({ status: 'Workspace from this directory · ← to switch' });
     }
     // A loop outlives a reconnect, so it re-attaches to its own session even when the picker
     // replaced the selection; without that the loop would keep settling against an empty transcript.
     const looping = this.loop?.sessionId;
     const sessionId = this.state.sessionId ?? looping ?? this.initialSession;
-    if (sessionId && (screen === 'chat' || looping !== undefined || this.initialSession && !this.state.sessionId)) {
+    const reselect = Boolean(sessionId && (screen === 'chat' || looping !== undefined || this.initialSession && !this.state.sessionId));
+    this.traceEvent('resolve', { session: sessionId ?? 'none', looping: looping ?? 'none', reselect });
+    if (sessionId && reselect) {
       await this.session.selectSession(sessionId);
     }
     // `online` means the socket works; `connectionSettled` means the picker and the selection are
     // done, which is what an automation caller must wait for or it races `showPicker`.
     this.connectionSettled = true;
     this.update({});
+    this.traceEvent('generation', { phase: 'settled', screen: this.state.screen, session: this.state.sessionId ?? 'none' });
     this.cost?.start();
   }
 
@@ -614,6 +658,7 @@ export class Controller implements ControllerStore, ConnectionListener {
    * re-selects the same session after reconnecting, so only a switch to another session ends it.
    */
   async ended(): Promise<void> {
+    this.traceEvent('generation', { phase: 'ended', screen: this.state.screen, session: this.state.sessionId ?? 'none' });
     this.session.endGeneration();
     await this.cost?.stop();
   }
@@ -761,7 +806,10 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Refresh both lists from the host, then show the requested picker.
    * @param screen - Picker to display after the refresh.
    */
-  private async showPicker(screen: 'workspaces' | 'sessions'): Promise<void> { await this.session.showPicker(screen); }
+  private async showPicker(screen: 'workspaces' | 'sessions'): Promise<void> {
+    this.traceEvent('action', { action: 'showPicker', screen });
+    await this.session.showPicker(screen);
+  }
 
   /** Resolve a removal command to one reviewable object.
    * @param kind - Workspace registration removal or session archival.
@@ -773,38 +821,62 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Apply a confirmed removal or verified empty-session archival.
    * @param target - Exact workspace or session identity reviewed by the user.
    */
-  private async removeTarget(target: RemovalTarget): Promise<void> { await this.session.removeTarget(target); }
+  private async removeTarget(target: RemovalTarget): Promise<void> {
+    this.traceEvent('action', { action: 'removeTarget', kind: target.kind, id: target.id });
+    await this.session.removeTarget(target);
+  }
 
   /** Pick a workspace, or use all sessions when the identity is omitted.
    * @param workspaceId - Workspace to select, if any.
    */
-  private pickWorkspace(workspaceId?: string): void { this.session.pickWorkspace(workspaceId); }
+  private pickWorkspace(workspaceId?: string): void {
+    this.traceEvent('action', { action: 'pickWorkspace', workspace: workspaceId ?? 'none' });
+    this.session.pickWorkspace(workspaceId);
+  }
 
   /** Open a workspace picker, or resolve a workspace target.
    * @param query - Workspace target, if any.
    */
-  private async switchWorkspace(query?: string): Promise<void> { await this.session.switchWorkspace(query); }
+  private async switchWorkspace(query?: string): Promise<void> {
+    this.traceEvent('action', { action: 'switchWorkspace', query: query ?? 'picker' });
+    await this.session.switchWorkspace(query);
+  }
 
   /** Guide session selection, list all sessions with `all`, or resolve a target.
    * @param query - Session target, `all`, or nothing for the guided picker.
    */
-  private async switchSession(query?: string): Promise<void> { await this.session.switchSession(query); }
+  private async switchSession(query?: string): Promise<void> {
+    this.traceEvent('action', { action: 'switchSession', query: query ?? 'picker' });
+    await this.session.switchSession(query);
+  }
 
   /** Prompt for a host path without starting a local agent. */
-  private enterPath(): void { this.session.enterPath(); }
+  private enterPath(): void {
+    this.traceEvent('action', { action: 'enterPath' });
+    this.session.enterPath();
+  }
 
   /** Register a host directory and move to its session picker.
    * @param path - Absolute directory path on the host.
    */
-  private async createWorkspace(path: string): Promise<void> { await this.session.createWorkspace(path); }
+  private async createWorkspace(path: string): Promise<void> {
+    this.traceEvent('action', { action: 'createWorkspace', path });
+    await this.session.createWorkspace(path);
+  }
 
   /** Create a session in the selected workspace. */
-  private async createSession(): Promise<void> { await this.session.createSession(); }
+  private async createSession(): Promise<void> {
+    this.traceEvent('action', { action: 'createSession', workspace: this.state.workspaceId ?? 'none' });
+    await this.session.createSession();
+  }
 
   /** Replace the selected transcript and follow the session.
    * @param sessionId - Session to follow.
    */
-  private async selectSession(sessionId: string): Promise<void> { await this.session.selectSession(sessionId); }
+  private async selectSession(sessionId: string): Promise<void> {
+    this.traceEvent('action', { action: 'selectSession', session: sessionId });
+    await this.session.selectSession(sessionId);
+  }
 
   /** Wait for the selected follow snapshot.
    * @param signal - Cancels waiting without closing the session.

@@ -38,6 +38,8 @@ With no command, choose a workspace and session interactively.
   --history-records <n> Soft history record limit (default 2000)
   --history-mb <n>      Soft history payload budget in MiB (default 16)
   --memory-log <path>   Append runtime memory samples; a failing log stops itself
+  --trace <path>        Append connection/screen/selection events (default: <state>/trace.log)
+  --no-trace            Disable the transition trace
   --no-memory-log       Disable the runtime memory log (default: enabled)
   --no-shell            Disable ! local commands (DSHT_NO_SHELL=1)
   --json               Print machine-readable list output
@@ -50,6 +52,7 @@ Cookies are saved per server origin and reused on later starts. Tokens are never
 /prompt lists saved shortcut prompts; /prompt TEXT saves one in <state>/prompts.json.
 !command runs on this machine, not on the host, and prints its output in the transcript.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
+The transition trace defaults to <state>/trace.log; DSHT_TRACE sets another path or 'off'.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
 prices.json overrides the shipped rates and is seeded on first use; every scan re-decides the
 history with the table loaded then, so an edited table reaches past requests on the next scan.
@@ -66,6 +69,7 @@ async function main(): Promise<void> {
     workspace: { type: 'string' }, ws: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
     command: { type: 'string', multiple: true }, prompt: { type: 'string' }, wait: { type: 'boolean' },
     verdict: { type: 'string' }, 'verdict-identity': { type: 'string' }, headless: { type: 'boolean' },
+    trace: { type: 'string' }, 'no-trace': { type: 'boolean' },
     'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' }, 'no-shell': { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
@@ -128,6 +132,7 @@ async function main(): Promise<void> {
     // elsewhere when the review targets a workspace this machine cannot write.
     verdictRoot: process.env.DSHT_VERDICT_ROOT ?? localDirectory,
     costs, historyLimits: limits, shellEnabled,
+    tracePath: tracePath(stateRoot, values.trace, values['no-trace']),
     memoryLogPath: memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']),
     promptsPath: join(stateRoot, 'prompts.json'),
   });
@@ -181,10 +186,34 @@ function verifyTimeoutMs(value: string | undefined): number {
  * @returns Absolute log path, or undefined when the log is disabled.
  */
 function memoryLogPath(stateRoot: string, requested: string | undefined, disabled: boolean | undefined): string | undefined {
-  if (requested !== undefined && requested.trim() === '') throw new Error('--memory-log requires a path');
+  return diagnosticLogPath('memory-log', 'memory.log', stateRoot, requested, disabled, process.env.DSHT_MEMORY_LOG);
+}
+
+/** Resolve the transition trace path: an explicit flag wins, then the environment, then the default.
+ * @param stateRoot - Application state root used for the default path.
+ * @param requested - `--trace` value, when given.
+ * @param disabled - `--no-trace` flag.
+ * @returns Absolute trace path, or undefined when the trace is disabled.
+ */
+function tracePath(stateRoot: string, requested: string | undefined, disabled: boolean | undefined): string | undefined {
+  return diagnosticLogPath('trace', 'trace.log', stateRoot, requested, disabled, process.env.DSHT_TRACE);
+}
+
+/** Resolve one diagnostic log path shared by the memory log and the transition trace.
+ * @param flag - Long option name, used in the error for an empty value.
+ * @param file - Default filename under the state root.
+ * @param stateRoot - Application state root.
+ * @param requested - Flag value, when given; an empty string is a mistyped flag, not a default.
+ * @param disabled - `--no-<flag>` flag.
+ * @param environment - Environment override, where `off` disables the log.
+ * @returns Absolute log path, or undefined when the log is disabled.
+ */
+function diagnosticLogPath(flag: string, file: string, stateRoot: string, requested: string | undefined,
+  disabled: boolean | undefined, environment: string | undefined): string | undefined {
+  if (requested !== undefined && requested.trim() === '') throw new Error(`--${flag} requires a path`);
   if (disabled) return undefined;
-  const chosen = (requested ?? process.env.DSHT_MEMORY_LOG)?.trim();
-  if (chosen === undefined || chosen === '') return join(stateRoot, 'memory.log');
+  const chosen = (requested ?? environment)?.trim();
+  if (chosen === undefined || chosen === '') return join(stateRoot, file);
   return chosen === 'off' ? undefined : chosen;
 }
 
