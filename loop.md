@@ -9,7 +9,7 @@
 
 **本文不记录**：面向使用者的命令用法与操作步骤（`README.md`；`/loop` 的机制侧契约与内部开关是例外，见 §4.6、§4.5、§6、§9）；`tui/` 整体架构与分层（`tui-design.md`；其 §3.4 只记与本路径相接的接口面）；贡献政策与提交／版本／发布／验证流程（父仓库 `CONTRIBUTING.md` 只声明贡献政策——当前不受理外部 PR；流程的事实源是 `tui-design.md` §7.4–§7.5、§7.7；文档集的登记与权威规则见其 §7.3，`tui/` 无独立 `CONTRIBUTING.md`）；计费（`cost.md`）；宿主协议字段的规范定义（父仓库 `docs/event-producer-consumer.md` 的事件索引与 `packages/api/session-controller/src/types.ts` 的字段类型；本文只记消费面）。
 
-**单一事实源**：本文是这条验证路径（fork 验证 loop）具体机制的事实源；与 `README.md`、`tui-design.md` 就本路径的描述冲突时以本文为准——`tui-design.md` §7.3 已登记本文并声明本路径的机制以本文为准（原先的互认缺口已由对方文档补齐，见 §9）；其 §3.4 的提前停下文案仍写「一期没有 `/loop answer`、`abstained` 同样是终态」，已被本文 §4「回到流程」取代（以本文为准；对方文档的同步记在 §9）。「本文不记录」让出的范围（`tui/` 架构与分层、贡献与发布流程、计费、宿主协议字段的规范定义）仍以各自文档为准，不因本行覆盖；接口签名以 `src/` 为准。**本文不是规范**：它是设计记录，§9 未定项在定稿前可变。
+**单一事实源**：本文是这条验证路径（fork 验证 loop）具体机制的事实源；与 `README.md`、`tui-design.md` 就本路径的描述冲突时以本文为准——`tui-design.md` §7.3 已登记本文并声明本路径的机制以本文为准（原先的互认缺口已由对方文档补齐，见 §9）；其 §3.4 的提前停下文案仍写「一期没有 `/loop answer`、`abstained` 同样是终态」，已被本文 §9「回到流程」取代（以本文为准；对方文档的同步记在 §9）。「本文不记录」让出的范围（`tui/` 架构与分层、贡献与发布流程、计费、宿主协议字段的规范定义）仍以各自文档为准，不因本行覆盖；接口签名以 `src/` 为准。**本文不是规范**：它是设计记录，§9 未定项在定稿前可变。
 
 ---
 
@@ -19,6 +19,7 @@
 | --- | --- |
 | 为什么要 fork 验证（已修的真实故障） | §1 |
 | 机制全貌、依赖方向与依赖规则 | §2、§2.1 |
+| 术语与缩写（只给定义位置） | §2.2 |
 | 一轮的完整时序（含取消/替换） | §3 |
 | 接口、port 与 verdict 文件契约 | §4.1–§4.4 |
 | CLI 参数与子进程构造 | §4.5 |
@@ -99,6 +100,20 @@
 * 特性之间不得互相 import；`controller/` 可以 import `session/`、`shell/`、`storage/`、`contracts.ts`。
 * `cli/` 是组合根，可以 import 上述全部。→ `ProcessVerifier`（进程 + 存储 + 连接能力）放在 `src/cli/verifier.ts`。
 * loop 只依赖 **port 类型**（`controller/verifier.ts`），不知道子进程、文件、session 的存在。
+
+### 2.2 术语（只给定义位置，不复制定义）
+
+同一份事实只在定义处维护，下表只做查词入口，避免第二份定义漂移。
+
+| 术语 | 定义／详述处 |
+|---|---|
+| `runId`／`verificationId`（一次验证任务的身份） | §3 步骤 6、§4.2、§9 G1 |
+| `attempt`＝每 step 的**评审次数** | §3 步骤 6、§6、§9「阶段顺序与预算命名」 |
+| `artifact`（产出物）／`artifactMarker`（本轮小节标题） | §3 步骤 8b2、§4.2、§4.6 |
+| `verdict` 文件，`status`／`score`／`blocked`／`abstained` | §4.3、§6、§9「设计：验证者提前停下与人工介入」 |
+| 暂停（`abstained`） vs 终态（`needs-human` 带 `terminalReason`） | §7、§9「状态机面」、§9「回到流程」 |
+| `tries`／`VERIFIER_RETRIES`／`deadline`（三种预算） | §6、§9「运行总预算与重试分类」 |
+| `selfScoring`（本轮回复块能否决定一次尝试） | §4.3、§4.5 |
 
 ---
 
@@ -255,13 +270,12 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 | `score` / `tries` | 可位置传参也可用旗标；省略时用记录的 `defaults`，记录没有才落到全局 `defaults` |
 | `--from` / `--to` | 本次运行的轮次区间覆盖，语义不变 |
 
-**记录的 `vars`（如 `designdoc-review` 的 `path`）是本次运行的输入，不是记录的常量**：它在参数表单里逐行覆盖（见下），命令行没有对应语法——知道有哪些变量名的是记录，不是 `parse.ts`，所以语法层不为它造旗标。表单把覆盖值经 `LoopOptions.vars` 交回应用，`runCommand` 用记录的 `vars` 校验名字（未知名字报错并列出该记录接受的变量），再交给 `loopProtocolFor(name, forked, vars)`；标题、brief、followUp 与验证者提示里所有 `{{path}}` 都换成新值，`loop.yaml` 本身不动。
+**记录的 `vars`（如 `designdoc-review` 的 `path`）是本次运行的输入，不是记录的常量**：它在参数表单里逐行覆盖（逐步操作见 `README.md`），命令行没有对应语法——知道有哪些变量名的是记录，不是 `parse.ts`，所以语法层不为它造旗标。表单把覆盖值经 `LoopOptions.vars` 交回应用，`runCommand` 用记录的 `vars` 校验名字（未知名字报错并列出该记录接受的变量），再交给 `loopProtocolFor(name, forked, vars)`；标题、brief、followUp 与验证者提示里所有 `{{path}}` 都换成新值，`loop.yaml` 本身不动。
 
-命令语法不变，但交互路径是"选"而不是"敲"（**已实现**）：
+命令语法不变，但交互路径是"选"而不是"敲"（**已实现**）。**记录列表、参数表单与开始按钮的按键和逐步操作以 `README.md` 为准**；本节只记机制侧契约：
 
-1. 草稿是 `/loop` 或 `/loop <前缀>` 时，输入框下方列出记录（名字 · 标题 · 轮数 · 默认及格线/尝试数 · 产出物 · 它指向的 `vars`）：↑/↓ 选择，Tab 把名字补进草稿（便于继续加旗标），Enter 确认高亮记录。Esc 只隐藏列表、不撤销选择——下一次 Enter 仍按当前候选确认，因为 `/loop` 单独出现没有别的含义。
-2. 确认后打开参数表单：**先是该记录自己的 `vars`（每个名字一行，自由文本）**，**再是 `From`／`To`／`Pass`／`Tries`**（数字，与命令行共用 `validLoopOption` 校验）；选中某行后直接输入即覆盖，改过的行标 `· default <原值>`。**离开一行（方向键或 Enter）即提交该行内容**，所以不需要每个输入框各按一次回车；取值不合法（越界、反向区间、变量为空）时光标留在该行并给出原因，不会被静默丢弃。`Start run` 才开始，`← Choose another record` 回到记录列表。未按 Start 前不发送任何 prompt，因此每个默认值都在被花掉之前可见，改 `path` 就把这次审查指向另一份文档而不影响记录本身。
-3. 命令行写了任一旗标（`/loop design-review 9 3`、`--from`…）即视为已经决定，跳过表单直接运行。**headless／脚本不变**：`runCommand` 只在调用方通过 `CommandPort.interactive` 声明"能显示面板并等人操作"时才返回表单结果（effect `{kind:'loop'}`），`cli/startup.ts` 的 port 不声明该字段，所以 `--command "/loop design-review"` 仍按记录默认值直接开跑；UI 则由 `ui/app.tsx` 声明。`/loop` 单独出现在无交互调用方时返回「Use /loop <name> · available: …」的报错。
+1. 数字行与命令行旗标共用 `validLoopOption` 校验（越界、反向区间被拒）。**未按 Start 不发送任何 prompt**；Esc 只隐藏记录列表、不撤销当前候选——`/loop` 单独出现没有别的含义，所以下一次 Enter 仍按该候选确认。
+2. 命令行写了任一旗标（`/loop design-review 9 3`、`--from`…）即视为已经决定，跳过表单直接运行：`runCommand` 只在调用方通过 `CommandPort.interactive` 声明"能显示面板并等人操作"时才返回表单结果（effect `{kind:'loop'}`）。`cli/startup.ts` 的 port 不声明该字段，所以 `--command "/loop design-review"` 仍按记录默认值直接开跑；UI 由 `ui/app.tsx` 声明。`/loop` 单独出现在无交互调用方时返回「Use /loop <name> · available: …」的报错。
 
 命令名确定并跟一个空格后，输入框下方还会显示该命令的 usage 与说明（`slash/registry.ts` 的 `argumentHint`，数据来自 `COMMAND_HINTS`）；`/loop` 的记录列表比这条通用提示更具体，因此两者不叠加。
 
@@ -305,7 +319,8 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 | `/verify <criteria\|off>` | 记录的 `standard:`；会话级标准状态与命令一并删除 |
 | `/loop <score> <tries> <prompt>` | 删除：loop 只执行记录。一次性目标写成一条记录，目标放进它的 `brief` |
 
-`answer`、`abort` 与 `stop` 是保留给 `/loop` 子命令的名字（三者都已实现：`stop`／`abort` 结束运行、`answer <text>` 恢复暂停的判断，见 §7 取消触发与 §4「回到流程」），schema 拒绝同名记录；模板里出现未知占位符会在**发送 prompt 之前**报错（`loop-prompts.ts` 的渲染器），不会把 `{{name}}` 原样发给模型。子进程侧参数（`--wait`、`--verdict`、`--verdict-identity`、`DSHT_NO_VERIFY`、`DSHT_VERDICT_ROOT`，§4.5）与命令面无关，不受影响。
+`answer`、`abort` 与 `stop` 是保留给 `/loop` 子命令的名字（三者都已实现：`stop`／`abort` 结束运行、`answer <text>` 恢复暂停的判断，见 §7 取消触发与 §9「回到流程」），schema 拒绝同名记录；模板里出现未知占位符会在**发送 prompt 之前**报错（`loop-prompts.ts` 的渲染器），不会把 `{{name}}` 原样发给模型。子进程侧参数（`--wait`、`--verdict`、`--verdict-identity`、`DSHT_NO_VERIFY`、`DSHT_VERDICT_ROOT`，§4.5）与命令面无关，不受影响。
+
 ---
 
 ## 5. 模块改动清单
@@ -451,7 +466,7 @@ fork 路径已在 tsx 启动方式（`npx tsx src/cli/index.ts`）下跑通过�
 | H | 验证者可以提前停下吗？怎么表达、怎么回到流程？ | 见下方「设计：验证者提前停下与人工介入」——**停下必须给理由**，但**不得跳过未验证的范围**：`cannot-fix`（无法改 → blocked）、`needs-human`（需要人介入 → 暂停，`/loop answer` 恢复；host 交互时才以终态 + exit 3 结束）；`no-change-needed` 只是解释字段。**已实现**（`reason` 必填、两种停下都不许带 `score`、label 必须自洽，否则整个块按「无判定」处理）；`code` 次级枚举与「每 step 一次人工补充」的预算规则属二期 |
 | I | 命令面是否收敛为单一 `/loop <name>`？ | 是（§4.6，**已实现**）：`/design-review`、`/designdoc-review`、`/verify` 已删除，协议、附加标准、`vars` 与默认值都由 `loop.yaml` 的记录承载 |
 
-**其它未做（状态以本节「收敛进展」表为准，此处只记门禁与理由）：**`README.md`／`README.zh.md` 已按现行命令面同步（`README.i18n.yaml` 的配对哈希已重记）；`tui-design.md` §3.4 的提前停下文案仍写「一期没有 `/loop answer`、`abstained` 同样是终态」，需要对方同步（机制以本文 §4 为准）；`{{path}}.review.md`（设计文档审查的产出物，现在是每份文档一个文件）未纳入版本控制（`.gitignore` 的 `*.review.md`）；本文本身已在版本控制内。
+**其它未做（状态以本节「收敛进展」表为准，此处只记门禁与理由）：**`README.md`／`README.zh.md` 已按现行命令面同步（`README.i18n.yaml` 的配对哈希已重记）；`tui-design.md` §3.4 的提前停下文案仍写「一期没有 `/loop answer`、`abstained` 同样是终态」，需要对方同步（机制以本文 §9 为准）；`{{path}}.review.md`（设计文档审查的产出物，现在是每份文档一个文件）未纳入版本控制（`.gitignore` 的 `*.review.md`）；本文本身已在版本控制内。
 
 ### 待补契约（建议的实现顺序：先统一语义 → 再身份与完成/取消边界 → 然后弃权恢复 → 最后发布入口与远端部署）
 
@@ -596,7 +611,7 @@ G7（命令面）**已实现**；G12 属于下一阶段。
 #### 阶段顺序与预算命名
 
 - 评审类协议**先验证、再订正**（critic 在前）：产出物已存在时，第一件事是把当前版本交给 verifier，而不是让工作 agent 先改一版。创建类协议**先生成一次**，再进入验证循环。协议用 `starts: 'verify' | 'work'` 声明，**默认 `work`**（不声明就是不改变现状）；两条内置记录都显式声明 `verify`，因为被评审的产出物本来就在工作区里。
-- `tries` 固定为**每 step 的评审次数上限**（代码里的 `attempt` 就是评审序号）；全文以「评审次数／`attempt`」为准，旧称「订正次数」只在 §11 的旧现场里出现。一次真正的订正体现在下一次评审的 attempt 上，不单独计数。
+- `tries` 固定为**每 step 的评审次数上限**（代码里的 `attempt` 就是评审序号）；全文以「评审次数／`attempt`」为准，旧称「订正次数」已全文弃用（§11 的旧现场也已改用现称）。一次真正的订正体现在下一次评审的 attempt 上，不单独计数。
 - **不能按「文件是否变化」计数**：agent 反复跑工具而不改文件同样消耗时间与费用，预算必须每次评审都记。
 
 #### 运行总预算与重试分类
@@ -717,7 +732,7 @@ codex --ask-for-approval never exec --json --sandbox read-only \
 | 一份完整 verdict 不会因为转义/占位符被丢弃 | ✅ 已实现 | `parseVerdict` 从 `{"` 起按字符串状态取候选，并对 JSON 未定义的转义做一次补齐；用例：`loop-contract.test.ts` 的两种真实形态 |
 | 缺失 verdict 的原因来自子进程自己的诊断 | ✅ 已实现 | `childFault()` 认出本进程自己写的那两句（`no JSON verdict in the reply` / `no reply committed after the turn`），不再退化成 `stderrClass unknown`；用例：`cli/verifier.test.ts` |
 | verifier 会话可只读观察、不必接管 | ✅ 已实现 | 会话由 client 登记为一个只读**输出源**（`createdBy: 'verifier'`、parent = 被评审会话、detail = verifier 名），`Ctrl+O`／整屏 peek 视图用 `session/follow` 跟随它，不选中、不写入；运行停止后源仍在列表里（`state: 'ended'`）。`/loop` 启动时会在 transcript 留一条**回显栏**（`ShellBlock.kind: 'note'`），每次创建验证会话都把这条栏重指到新会话，所以点它总是打开当前那一次验证。证据：`tests/controller/sources.test.ts`、`tests/ui/shell-blocks.test.ts`、`tests/ui/app.test.tsx`；机制与取舍见 `slash.md` §7.5 |
-| README / `tui-design.md` 同步 | ✅ 已做（G7 同批） | `README.md`/`README.zh.md` 命令表改为 `/loop <name>`（删除 `/design-review`、`/verify` 行）并重记 `README.i18n.yaml` 哈希；`tui-design.md` §3.4／附录 A 已按新命令面与文件集更新。**残留**：其 §3.4 的提前停下文案仍写「一期没有 `/loop answer`、`abstained` 同样是终态」（以本文 §4 为准，待对方同步） |
+| README / `tui-design.md` 同步 | ✅ 已做（G7 同批） | `README.md`/`README.zh.md` 命令表改为 `/loop <name>`（删除 `/design-review`、`/verify` 行）并重记 `README.i18n.yaml` 哈希；`tui-design.md` §3.4／附录 A 已按新命令面与文件集更新。**残留**：其 §3.4 的提前停下文案仍写「一期没有 `/loop answer`、`abstained` 同样是终态」（以本文 §9 为准，待对方同步） |
 
 
 **client 侧 verdict 路径**：默认 `<客户端目录>/.dsht/verify/<runId>/…`，`DSHT_VERDICT_ROOT` 可覆盖。默认值刻意选在客户端目录——这是客户端**始终被允许写入**的位置；把 verdictRoot 指到 state 目录时，运行环境的文件沙箱会以 `ENOENT: mkdir` 拒绝写入，表现为 `⚠ verification unavailable · verifier failed: ENOENT…`。也正因如此，`unavailable` 的原因必须出现在 headless 进度行里（已修），否则故障不可观测。
