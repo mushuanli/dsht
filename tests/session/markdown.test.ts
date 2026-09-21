@@ -11,7 +11,7 @@ import { historyLayout } from '../../src/session/history.ts';
 import { Transcript } from '../../src/session/transcript.ts';
 import { saveTranscriptHtml } from '../../src/session/export-html.ts';
 import { parseCommand } from '../../src/slash/parse.ts';
-import { routeEnter } from '../../src/ui/routing.ts';
+import { interpret, normalize, authorize } from '../../src/slash/pipeline.ts';
 
 const source = readFileSync(new URL('../fixtures/markdown.md', import.meta.url), 'utf8');
 const lines = (text: string, width = 80) => markdownRows(text, width).map(row => row.text);
@@ -120,6 +120,9 @@ test('offline HTML export includes inert SVG and MathJax math, preserves files, 
   await assert.rejects(saveTranscriptHtml(conversation, 's1', cancelled, abort.signal), { name: 'AbortError' });
   await assert.rejects(stat(cancelled), { code: 'ENOENT' });
   assert.deepEqual(parseCommand('/export-html "rich conversation.html"'), { kind: 'exportHtml', destination: 'rich conversation.html' });
-  const facts = { referenceOpen: false, copyMode: false, pending: false, question: false, screen: 'sessions' as const };
-  assert.deepEqual(routeEnter({ ...facts, line: '/export-html' }), { kind: 'error', message: 'Select a session first' });
+  const line = interpret({ line: '/export-html', referenceOpen: false, copyMode: false, screen: 'sessions' });
+  assert.equal(line.kind, 'line');
+  const command = normalize(line as Extract<typeof line, { kind: 'line' }>, { sessionSelected: false, question: false, pending: false });
+  assert.deepEqual(authorize(command, { sessionSelected: false, pending: false, during: 'idle' }),
+    { allow: false, error: { kind: 'error', message: 'Select a session first' } });
 });

@@ -5,8 +5,47 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Controller } from '../../src/controller/index.ts';
-import { TraceLog, readTrace } from '../../src/controller/trace-log.ts';
+import { TraceLog, compactCut, readTrace } from '../../src/controller/trace-log.ts';
 import { host, until, workspace } from '../support/host.ts';
+
+/** One trace line as the compactor sees it: a JSON object, or a header the compactor ignores. */
+const line = (event: Record<string, unknown>): string => JSON.stringify(event);
+
+test('a compacting cut never keeps a close whose begin was dropped', () => {
+  // A span opened before the cut and closed after it: the cut must move past the close.
+  const spanning = [
+    line({ event: 'command', phase: 'begin', commandId: 'C1' }),
+    line({ event: 'state', screen: 'chat' }),
+    line({ event: 'command', phase: 'end', commandId: 'C1' }),
+    line({ event: 'state', screen: 'sessions' }),
+  ];
+  assert.equal(compactCut(spanning, 2), 3);
+  // Nothing to move when the cut already falls between two whole spans.
+  assert.equal(compactCut(spanning, 1), 3);
+  // A span whose close never came cannot be split: the begin stays and the cut does not move.
+  const crashed = [line({ event: 'loop', phase: 'begin', runId: 'R1' }), line({ event: 'state' })];
+  assert.equal(compactCut(crashed, 1), 1);
+  // Moving the cut can expose a second split span, so the check repeats.
+  const nested = [
+    line({ event: 'command', phase: 'begin', commandId: 'C1' }),
+    line({ event: 'loop', phase: 'begin', runId: 'R1' }),
+    line({ event: 'command', phase: 'end', commandId: 'C1' }),
+    line({ event: 'loop', phase: 'end', runId: 'R1' }),
+    line({ event: 'state' }),
+  ];
+  assert.equal(compactCut(nested, 3), 4);
+  // An event outside a known span never moves the cut, and neither does a non-span phase.
+  const ordinary = [line({ event: 'verify', phase: 'begin', runId: 'R1' }), line({ event: 'loop', phase: 'form' })];
+  assert.equal(compactCut(ordinary, 1), 1);
+  // A generation carries no id, so it pairs by event name: one is open at a time.
+  const generation = [
+    line({ event: 'generation', phase: 'begin', session: 's1' }),
+    line({ event: 'state' }),
+    line({ event: 'generation', phase: 'ended' }),
+    line({ event: 'state' }),
+  ];
+  assert.equal(compactCut(generation, 2), 3);
+});
 
 /** Parse every recorded event, dropping the format header. */
 async function events(path: string): Promise<Record<string, unknown>[]> {

@@ -15,6 +15,8 @@ import { fileReferences, type FileReference } from './references.ts';
 import { SessionRuntime } from './runtime.ts';
 import type { Telemetry } from './telemetry.ts';
 import { PromptCache, type InteractionState, type ModelState, type OptionState, type PanelState, type PromptIndex, type SessionInfo } from './info.ts';
+import type { MutationAdmission } from './mutation-gate.ts';
+import { SessionMutationGate } from './mutation-gate.ts';
 import type { Reasoning } from './history.ts';
 import { recordPrompts, Transcript } from './transcript.ts';
 import type { ConnectionView } from './connection-view.ts';
@@ -49,8 +51,13 @@ export class SessionController {
   private stoppingSession?: string;
   private interruptTask: Promise<boolean> | undefined;
   private admission: Promise<Json | undefined> | undefined;
+  /** Admission order of this session's writes, so two concurrent decisions cannot interleave. */
+  private readonly mutations: SessionMutationGate;
   constructor(private readonly store: ControllerStore, private readonly host: HostAccess,
-    private readonly connection: ConnectionView, private readonly historyLimits: HistoryLimits) {}
+    private readonly connection: ConnectionView, private readonly historyLimits: HistoryLimits,
+    report?: (admission: MutationAdmission) => void) {
+    this.mutations = new SessionMutationGate(report);
+  }
 
   /** Host running state covers model generation, tools, and waits between assistant attempts. */
   get running(): boolean {
@@ -225,8 +232,10 @@ export class SessionController {
       try {
         // Admission must settle before cancellation can address the newly submitted turn.
         // The prompt caller reports admission failures; an existing turn still needs cancellation.
+        // This wait stays outside the gate: a control admission overtakes the *waiting* queue, and
+        // holding the gate while waiting here would block the very writes it precedes.
         await this.admission?.catch(() => undefined);
-        await this.host.require().call('session/cancel', { request: { sessionId } });
+        await this.mutations.admit(sessionId, 'control', () => this.host.require().call('session/cancel', { request: { sessionId } }));
         if (this.stoppingSession === sessionId && this.store.state.sessionId === sessionId) this.store.update({ status: 'Cancellation requested · waiting for host' });
       } catch (error) { this.stoppingSession = undefined; this.store.update({ status: 'Cancellation failed', operation: { ...this.store.state.operation, error: errorText(error) } }); }
       return false;
@@ -247,7 +256,9 @@ export class SessionController {
 
   /** Cancel the active turn; pending queue items remain host-owned. */
   async cancelTurn(): Promise<void> {
-    await this.host.require().call('session/cancel', { request: { sessionId: this.sessionId } });
+    const sessionId = this.sessionId;
+    // Cancellation is a control action: it may overtake queued writes, since its whole value is speed.
+    await this.mutations.admit(sessionId, 'control', () => this.host.require().call('session/cancel', { request: { sessionId } }));
     this.store.update({ status: 'Cancellation requested' });
   }
 
@@ -258,6 +269,18 @@ export class SessionController {
     const client = this.host.require();
     const [workspaces, sessions] = await Promise.all([client.listWorkspaces(), client.listSessions()]);
     this.store.update({ screen, workspaces, sessions });
+  }
+
+  /** Return to the selected conversation without re-selecting it.
+   *
+   * A picker opened over a conversation is a detour: leaving it must not re-subscribe, reload the
+   * transcript or lose the reading position, so this only changes which screen is shown.
+   * @returns Whether there was a selected conversation to return to.
+   */
+  showChat(): boolean {
+    if (this.store.state.sessionId === undefined) return false;
+    this.store.update({ screen: 'chat' });
+    return true;
   }
 
   /** Resolve a removal command to one reviewable object without changing the selection.
@@ -284,9 +307,10 @@ export class SessionController {
    */
   async removeTarget(target: RemovalTarget): Promise<void> {
     const client = this.host.require();
-    const receipt = object(await client.call(target.kind === 'workspace' ? 'workspace/delete' : 'workspace/archiveSession', {
-      request: target.kind === 'workspace' ? { workspaceId: target.id } : { sessionId: target.id },
-    }));
+    const receipt = object(target.kind === 'workspace'
+      ? await client.call('workspace/delete', { request: { workspaceId: target.id } })
+      // Archiving a session is a write on that session, so it queues behind that session's admissions.
+      : await this.mutations.admit(target.id, 'normal', () => client.call('workspace/archiveSession', { request: { sessionId: target.id } })));
     if (client !== this.host.client()) return;
     if (target.kind === 'session') {
       client.archivedSessionIds = new Set(array(receipt.archivedSessionIds).map(string));
@@ -409,7 +433,8 @@ export class SessionController {
    * @param sessionId - Session whose turn should stop.
    */
   async cancelNamedSession(sessionId: string): Promise<void> {
-    await this.host.require().call('session/cancel', { request: { sessionId } });
+    // Keyed by the session being stopped, not the selection: the verifier's session is someone else's.
+    await this.mutations.admit(sessionId, 'control', () => this.host.require().call('session/cancel', { request: { sessionId } }));
   }
 
   /** Replace the selected transcript and cancel its preceding follow stream.
@@ -499,10 +524,13 @@ export class SessionController {
    * @returns The host's successful command result text.
    */
   async command(line: string, signal: AbortSignal): Promise<string> {
-    if (!this.info.record.ready) throw new Error('Wait for the session snapshot before running commands');
-    const execution = await this.host.require().call('commands/execute', {
-      agentId: this.sessionId, line, submittedAttachments: [],
-    }, signal, null);
+    const sessionId = this.sessionId;
+    // The section decides and issues; the host's answer is awaited outside the gate, because a
+    // compaction can take minutes and must not hold every other write on this session.
+    const execution = await this.mutations.admit(sessionId, 'normal', () => {
+      if (!this.info.record.ready) throw new Error('Wait for the session snapshot before running commands');
+      return this.host.require().call('commands/execute', { agentId: sessionId, line, submittedAttachments: [] }, signal, null);
+    });
     if (execution === undefined) throw new Error(`This host does not provide ${line.split(/\s/, 1)[0]}`);
     const result = object(object(execution).result);
     if ((result.kind !== 'success' && result.kind !== 'error') || (result.text !== undefined && typeof result.text !== 'string')) {
@@ -520,7 +548,9 @@ export class SessionController {
    * @param itemId - Queue occurrence identity from session/control.
    */
   async removeQueued(itemId: string): Promise<void> {
-    await this.host.require().call('session/updateQueue', { request: { sessionId: this.sessionId, itemId, action: { kind: 'remove' } } });
+    const sessionId = this.sessionId;
+    await this.mutations.admit(sessionId, 'normal', () => this.host.require().call('session/updateQueue', {
+      request: { sessionId, itemId, action: { kind: 'remove' } } }));
   }
 
   /** Export the selected host log to a new local ZIP file.
@@ -545,14 +575,21 @@ export class SessionController {
    * @param text - Composed prompt text.
    */
   async prompt(text: string): Promise<void> {
-    if (this.store.state.pending.length) throw new Error('Answer the pending question or approval first');
-    this.stoppingSession = undefined;
-    if (!this.info.record.ready) throw new Error('Wait for the session snapshot before sending');
-    const admission = this.host.require().call('session/prompt', { request: {
-      sessionId: this.sessionId, requestId: randomUUID(), mode: this.running ? 'steer' : 'queue',
-      content: [{ type: 'text', text }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    } });
-    this.admission = admission;
+    const sessionId = this.sessionId;
+    // Deciding steer-versus-queue and issuing the request are one admitted step: the loop's own sends
+    // and everything the reader types go through this same point, so two of them cannot be decided
+    // against the same stale running state. The host's answer is awaited outside the gate.
+    const admission = await this.mutations.admit(sessionId, 'normal', () => {
+      if (this.store.state.pending.length) throw new Error('Answer the pending question or approval first');
+      this.stoppingSession = undefined;
+      if (!this.info.record.ready) throw new Error('Wait for the session snapshot before sending');
+      const issued = this.host.require().call('session/prompt', { request: {
+        sessionId, requestId: randomUUID(), mode: this.running ? 'steer' : 'queue',
+        content: [{ type: 'text', text }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      } });
+      this.admission = issued;
+      return issued;
+    });
     try { await admission; } finally { if (this.admission === admission) this.admission = undefined; }
     this.store.update({ status: 'Accepted · waiting for host' });
   }
@@ -575,7 +612,7 @@ export class SessionController {
   async answer(value: AnswerValue): Promise<void> {
     const pending = this.store.state.pending[0];
     if (!pending) throw new Error('No pending interaction');
-    await this.reply(pending.eventId, { kind: 'result', value });
+    await this.mutations.admit(this.sessionId, 'normal', () => this.reply(pending.eventId, { kind: 'result', value }));
     this.interactions.delete(pending.eventId);
     this.store.update({});
   }
@@ -586,7 +623,7 @@ export class SessionController {
   async approve(allowed: boolean): Promise<void> {
     const pending = this.store.state.pending[0];
     if (pending?.kind !== 'approval') throw new Error('No pending approval');
-    await this.reply(pending.eventId, { kind: 'result', value: allowed ? 'allowed-once' : 'rejected' });
+    await this.mutations.admit(this.sessionId, 'normal', () => this.reply(pending.eventId, { kind: 'result', value: allowed ? 'allowed-once' : 'rejected' }));
     this.interactions.delete(pending.eventId);
     this.store.update({});
   }
@@ -600,9 +637,9 @@ export class SessionController {
   async dismissQuestion(): Promise<void> {
     const pending = this.store.state.pending[0];
     if (pending?.kind !== 'question') throw new Error('No pending question');
-    await this.reply(pending.eventId, { kind: 'rejected', error: {
+    await this.mutations.admit(this.sessionId, 'normal', () => this.reply(pending.eventId, { kind: 'rejected', error: {
       name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED',
-    } });
+    } }));
     this.interactions.delete(pending.eventId);
     this.store.update({});
   }

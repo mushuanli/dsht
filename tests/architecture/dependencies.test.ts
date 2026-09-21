@@ -168,11 +168,56 @@ test('the dependency check rejects each forbidden direction', () => {
   assert.deepEqual(violations([{ path: 'shell/runner.ts', source: "import { spawn } from 'node:child_process';" }]), []);
 });
 
-test('the composition root applies view intents instead of dispatching commands', () => {
+test('the composition root runs the pipeline stages instead of dispatching commands', () => {
   const source = readFileSync(join(SRC, 'ui/app.tsx'), 'utf8');
-  // Only the two UI modes are decided in the root; every parsed command goes to the application.
-  const kinds = [...source.matchAll(/submission\.kind === '([^']+)'/g)].map(match => match[1]);
-  assert.deepEqual([...new Set(kinds)].sort(), ['ignore', 'reference'], 'the root must decide only UI modes');
-  assert.ok(source.includes('runCommand(controller, submission'), 'the root must delegate command effects to runCommand');
-  assert.ok(!/switch \(submission\.kind\)/.test(source), 'the root must not dispatch command kinds itself');
+  // The pipeline settles what a line means; the root decides only its own front-end modes and hands
+  // every command to the application in one call.
+  assert.deepEqual([...source.matchAll(/(?:plan|submission)\.action\.kind === '([^']+)'/g)].map(match => match[1]).sort(),
+    ['ignore'], 'the root must decide only its own front-end modes');
+  assert.ok(source.includes("submission.kind === 'mode'"), 'the root must read the submission it was handed');
+  // The three stages stay separate calls: merging them would let one stage read another's facts.
+  for (const stage of ['interpret({', 'normalize(submission,', 'authorize(command,']) {
+    assert.ok(source.includes(stage), `the root must call ${stage.slice(0, -1)})`);
+  }
+  assert.ok(source.includes('verdict.allow ? verdict.command : verdict.error'),
+    'the root must treat a refusal as the command to report, never as its own branch');
+  assert.ok(source.includes('runCommand(controller, executable'), 'the root must delegate command effects to runCommand');
+  assert.ok(!/switch \(executable\.kind\)/.test(source), 'the root must not dispatch command kinds itself');
+  assert.ok(!/executable\.kind ===/.test(source), 'the root must not branch on command kinds');
+});
+
+test('the front end applies effects but starts no business request of its own', () => {
+  const source = readFileSync(join(SRC, 'ui/app.tsx'), 'utf8');
+  // Two effects used to be triggered by the front end after reading a result: answering a pending
+  // question, and starting the cost refresh when the panel opened. Both now run inside `execute`, so
+  // the UI must not name them at all — a page that can start a host request is a second entry point
+  // that no invariant covers.
+  assert.ok(!source.includes('refreshCosts'), 'the cost refresh must start in the command, not in the UI');
+  assert.ok(!/\.answer\s*\(/.test(source), 'completing a question must go through the application pipeline');
+  // A result is applied by iterating its effects, never by branching on the command that produced it.
+  assert.ok(source.includes('for (const effect of result.effects)'), 'the root must apply effects in order');
+});
+
+test('the foreground slot has one owner, so the front end keeps no operation state of its own', () => {
+  const source = readFileSync(join(SRC, 'ui/app.tsx'), 'utf8');
+  // §6.2: "what is running, what is it, and how do I cancel it" used to be split between the
+  // controller's busy flag and a UI-owned abort controller, so Esc cancelled a different thing
+  // depending on which layer started the work. Both live in the controller now.
+  for (const shadow of ['historyAbort', 'historyLoading']) {
+    assert.ok(!source.includes(shadow), `the UI must not keep its own ${shadow}`);
+  }
+  assert.ok(source.includes('controller.queries.foreground'), 'the UI renders the controller\'s slot');
+  assert.ok(source.includes('controller.actions.cancelForeground'), 'the UI cancels through the controller');
+});
+
+test('Escape is decided by one ordered table, not by a chain of guards', () => {
+  const source = readFileSync(join(SRC, 'ui/app.tsx'), 'utf8');
+  // §5.4: the first rule whose condition holds wins. A chain let a surface ship with no Escape rule,
+  // or with one placed after the fallback where it could never run.
+  assert.ok(source.includes('const escapeRules'), 'the Escape rules must live in one table');
+  assert.ok(source.includes('escapeRules.find('), 'the handler must consult the table in order');
+  // Only copy mode (which owns the keyboard outright) and the table lookup itself may mention Escape:
+  // no `key.escape && …` guard may decide anything before the table gets its say.
+  assert.equal([...source.matchAll(/key\.escape &&/g)].length, 0, 'no Escape guard may bypass the table');
+  assert.equal([...source.matchAll(/key\.escape/g)].length, 2, 'Escape may appear only in copy mode and the lookup');
 });

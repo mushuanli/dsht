@@ -35,10 +35,7 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/permission', usage: '[preset]', description: 'View or switch the host permission preset' },
   { command: '/feedback', usage: 'text', description: 'Record feedback about the session' },
   { command: '/handoff', description: 'Delete local HANDOFF.md, then have the agent write a handoff' },
-  { command: '/design-review', usage: '[options]', description: 'Run the scored multi-round design review until each round passes', exactOnly: true },
-  { command: '/designdoc-review', usage: '[options]', description: 'Review a design document against the code it describes', exactOnly: true },
-  { command: '/loop', usage: '<score> <tries> <prompt>', description: 'Loop any prompt until its scored reply passes', exactOnly: true },
-  { command: '/verify', usage: '<criteria|off>', description: 'Set the standard the loop verifier scores against' },
+  { command: '/loop', usage: '[name|stop] [score] [tries]', description: 'Run a loop.yaml record; confirm its defaults; stop ends it', exactOnly: true },
   { command: '/export', usage: '[local.zip]', description: 'Save the session log ZIP to a new local file' },
   { command: '/export-html', usage: '[local.html]', description: 'Save loaded conversation with diagrams and math as offline HTML' },
   { command: '/coredump', usage: '[tag]', description: 'Write a V8 heap snapshot for memory diagnosis' },
@@ -86,37 +83,89 @@ export function resolveCommand(token: string): string | undefined {
   return only !== undefined && !EXACT_ONLY.has(only) ? only : undefined;
 }
 
-/** Where one parsed command may run, and what it must wait for. */
+/** What may happen to a command while the selected conversation is busy.
+ *
+ * Phase one has no queue: a command either runs while a turn or a loop is in flight, or it is refused
+ * with a reason. `'queue'` is deliberately absent — the host has no command queue, and a type the
+ * system cannot honour would only produce silent drops (see §3.4).
+ */
+export type DuringExecution = 'run' | 'deny';
+
+/** Where one parsed command may run, and what it must wait for.
+ *
+ * The names describe the application fact, not the screen that happens to represent it: a command
+ * that needs a session is refused wherever no session is selected, and a front end cannot make that
+ * requirement disappear by not having screens. An absent `duringTurn`/`duringLoop` means "no
+ * constraint" — the many reads and local commands need no entry to keep running.
+ */
 export interface CommandPolicy {
-  /** Needs a selected conversation, so a picker screen refuses it. */
-  chatOnly?: boolean;
-  /** Refused while an approval or a question is waiting. */
-  blockedByPending?: boolean;
+  /** Needs a selected conversation. */
+  requiresSession?: boolean;
+  /** Refused while an approval or a question of that conversation is waiting. */
+  requiresNoInteraction?: boolean;
+  /** Belongs to the control lane: admitted while another line owns the controller. */
+  control?: boolean;
+  /** While a turn of the selected conversation runs. */
+  duringTurn?: DuringExecution;
+  /** While a client-driven loop runs, which is what the operator must deal with first. */
+  duringLoop?: DuringExecution;
 }
 
 /** Routing policy per parsed command kind.
  *
- * The router reads this table instead of enumerating kinds itself, so a new command declares its
+ * The pipeline reads this table instead of enumerating kinds itself, so a new command declares its
  * constraints next to its syntax and no other module learns about it. A kind absent here has no
  * constraint and may run from any screen, even while an answer is pending.
  */
+/** A command that would write to the conversation another turn is already writing.
+ *
+ * `compact`, `handoff` and a `/loop` run each submit work of their own to the same session, so starting
+ * one mid-turn would interleave two writers on one conversation. The list is deliberately short: the
+ * host owns the busy rules of its own commands (`/plan`, `/goal`, `/model`, …), and a client-side deny
+ * there would contradict what the host would have accepted.
+ */
+const CONFLICTS_WITH_RUNNING: CommandPolicy = { duringTurn: 'deny', duringLoop: 'deny' };
+
+/** Commands that answer the operator or the host and must reach the session while it is busy. */
+const ANSWERS_WHILE_RUNNING: CommandPolicy = { duringTurn: 'run', duringLoop: 'run' };
+
 export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPolicy>>> = {
-  shell: { chatOnly: true },
-  models: { chatOnly: true },
-  queue: { chatOnly: true, blockedByPending: true },
-  history: { chatOnly: true },
-  prompts: { chatOnly: true },
-  think: { chatOnly: true },
-  compact: { chatOnly: true },
-  handoff: { chatOnly: true, blockedByPending: true },
-  designReview: { chatOnly: true, blockedByPending: true },
-  designdocReview: { chatOnly: true, blockedByPending: true },
-  loop: { chatOnly: true, blockedByPending: true },
-  verify: { chatOnly: true },
-  hostCommand: { chatOnly: true, blockedByPending: true },
-  export: { chatOnly: true },
-  exportHtml: { chatOnly: true },
+  shell: { requiresSession: true },
+  models: { requiresSession: true },
+  queue: { requiresSession: true, requiresNoInteraction: true },
+  history: { requiresSession: true },
+  historySearch: { requiresSession: true },
+  prompts: { requiresSession: true },
+  // Reading reasoning while the agent works is the point of the panel.
+  think: { requiresSession: true, ...ANSWERS_WHILE_RUNNING },
+  panel: { ...ANSWERS_WHILE_RUNNING },
+  copy: { ...ANSWERS_WHILE_RUNNING },
+  // Cancelling the turn, or settling the interaction that is holding it, must never be refused.
+  cancel: { ...ANSWERS_WHILE_RUNNING },
+  approval: { ...ANSWERS_WHILE_RUNNING },
+  compact: { requiresSession: true, ...CONFLICTS_WITH_RUNNING },
+  handoff: { requiresSession: true, requiresNoInteraction: true, ...CONFLICTS_WITH_RUNNING },
+  loop: { requiresSession: true, requiresNoInteraction: true, ...CONFLICTS_WITH_RUNNING },
+  loops: { requiresSession: true, requiresNoInteraction: true, ...CONFLICTS_WITH_RUNNING },
+  // The host decides whether its own registered commands may run while a turn is in flight.
+  hostCommand: { requiresSession: true, requiresNoInteraction: true },
+  // Stopping is a control-lane action: it stays allowed while an approval waits, and while the very
+  // line it is meant to interrupt still owns the controller, because that is exactly when it is needed.
+  loopStop: { requiresSession: true, control: true, ...ANSWERS_WHILE_RUNNING },
+  export: { requiresSession: true },
+  exportHtml: { requiresSession: true },
 };
+
+/** Whether one line belongs to the control lane, so a front end may admit it ahead of a waiting line.
+ *
+ * The lane is admission policy, not an effect: this only says "do not make it queue behind the line
+ * that already owns the controller". What the command then does is still `runCommand`'s business.
+ * @param kind - Parsed command kind.
+ * @returns True when the command may be dispatched while another line is in flight.
+ */
+export function isControlCommand(kind: string): boolean {
+  return (COMMAND_POLICY as Readonly<Record<string, CommandPolicy | undefined>>)[kind]?.control === true;
+}
 
 /** Longest common prefix of the candidate commands, so Tab can extend an ambiguous draft.
  * @param values - Command candidates.
@@ -151,4 +200,22 @@ export function completeCommand(input: string): string | undefined {
  */
 export function suggestedCommands(input: string): string[] {
   return COMMANDS.filter(command => input.startsWith('/') && !input.includes(' ') && command.startsWith(input));
+}
+
+/** The catalog entry whose arguments the draft is currently typing.
+ *
+ * A usage line is only useful once the name is settled and arguments have begun, so this requires
+ * whitespace after a token that names one command: `/model ` hints the model command, while `/co `
+ * names none and `/think` is still completing a name. A unique prefix counts, because the same prefix
+ * already runs that command.
+ * @param input - Current composer draft.
+ * @returns The command's hint, or undefined when no arguments are being typed.
+ */
+export function argumentHint(input: string): CommandHint | undefined {
+  if (!input.startsWith('/')) return undefined;
+  const space = input.search(/\s/);
+  if (space <= 0) return undefined;
+  const token = input.slice(0, space);
+  const command = COMMANDS.includes(token) ? token : resolveCommand(token);
+  return command === undefined ? undefined : COMMAND_HINTS.find(hint => hint.command === command);
 }

@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { host } from '../support/host.ts';
@@ -44,12 +44,27 @@ test('help requires no token and invalid commands fail without exposing the toke
   const help = await run(['--help']);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /list workspaces/);
+  assert.match(help.stdout, /--deadline <minutes>/);
+  assert.match(help.stdout, /--version/);
   const invalid = await run(['wrong'], { DSH_TOKEN: 'private-token' });
   assert.equal(invalid.code, 1);
   assert(!invalid.stderr.includes('private-token'));
   const missing = await run(['list', 'sessions']);
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /DSH_TOKEN/);
+  // A run that was supposed to be bounded must not start unbounded because of a typo.
+  const deadline = await run(['--headless', '--deadline', '0', '--command', '/status'], { DSH_TOKEN: 'fixture-token' });
+  assert.equal(deadline.code, 1);
+  assert.match(deadline.stderr, /--deadline must be a positive number of minutes/);
+});
+
+test('--version prints the manifest version without a host or credentials', async () => {
+  const printed = await run(['--version']);
+  assert.equal(printed.code, 0, printed.stderr);
+  assert.equal(printed.stderr, '');
+  // The manifest is the only place the version lives, so the flag has to agree with it exactly.
+  const manifest = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
+  assert.equal(printed.stdout.trim(), manifest.version);
 });
 
 test('the URL printed by dsh web authenticates without DSH_TOKEN', async t => {

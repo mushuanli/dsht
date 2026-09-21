@@ -45,13 +45,14 @@ test('the verifier prompt names the file as the only channel back, and the round
   assert.match(prompt, /"kind":"designdoc-review"/);
 });
 
-test('a forked round tells the agent it is not the scorer but still keeps the fallback block', () => {
+test('a forked round tells the agent it is not the scorer, and never promises self-scoring', () => {
   const limits = { from: 1, to: 1, score: 8, tries: 2 };
   const forked = resultContract('designdoc-review', limits, 1, 1, { artifact: 'tui-design.md' }, 'forked').join('\n');
   assert.match(forked, /独立验证进程/);
   assert.match(forked, /不要 spawn 子代理/);
-  assert.match(forked, /仍然必须存在/);
-  // The fallback is the same block the reply parser reads, so its format never diverges.
+  assert.match(forked, /评分以独立验证为准/);
+  assert.doesNotMatch(forked, /以你结尾输出的块为准/);
+  // The block the reply parser reads keeps its format wherever the score came from.
   assert.match(forked, /```dsht-loop/);
 
   const subagent = resultContract('designdoc-review', limits, 1, 1, { artifact: 'tui-design.md' }).join('\n');
@@ -77,6 +78,26 @@ test('a verdict carries findings into the retry and into the next verifier', () 
   assert.match(prompt, /上一次（第 2 轮第 1 次）/);
   assert.match(prompt, /缺章节映射/);
   assert.match(prompt, /没有解决的必须继续计入本轮评分/);
+});
+
+test('an early stop reaches the port whole, and a broken one reaches it not at all', () => {
+  const stop = (extra: Record<string, unknown>): string =>
+    JSON.stringify({ verificationId: identity, kind: 'designdoc-review', step: 2, attempt: 1, ...extra });
+  assert.deepEqual(parseVerdict(stop({ status: 'blocked', exit_reason: 'cannot-fix', reason: '没有取消端点' }), expect),
+    { status: 'blocked', blocked: true, exitReason: 'cannot-fix', reason: '没有取消端点' });
+  assert.deepEqual(parseVerdict(stop({ status: 'abstained', reason: '需要人决定', needs: '改哪一侧？' }), expect),
+    { status: 'abstained', abstained: true, exitReason: 'needs-human', reason: '需要人决定', needs: '改哪一侧？' });
+  // A stop with no reason, one hiding behind a score, or a label that disagrees with its status is
+  // no verdict, so the child reports verification unusable instead of letting a bad block end the run.
+  for (const broken of [{ status: 'blocked' }, { status: 'blocked', score: 9, reason: 'x' },
+    { status: 'abstained', score: 9, reason: 'x' }, { status: 'blocked', exit_reason: 'needs-human', reason: 'x' }]) {
+    assert.equal(parseVerdict(stop(broken), expect), undefined);
+  }
+  // And the brief states the rules the verdict will be read against.
+  const prompt = verdictBrief({ ...expect, file: '/w/verdict.json' });
+  assert.match(prompt, /提前停下/);
+  assert.match(prompt, /abstained/);
+  assert.match(prompt, /不许给 score/);
 });
 
 test('a verdict that explains nothing adds nothing to a prompt', () => {

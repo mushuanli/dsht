@@ -1,12 +1,41 @@
-/** Slash-command syntax, plus the UI routing that decides what Enter means right now. */
+/** Slash-command syntax, plus the pipeline that decides what Enter means right now. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCommand } from '../../src/slash/parse.ts';
-import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, commandMatches, resolveCommand, suggestedCommands } from '../../src/slash/registry.ts';
-import { routeEnter, type RouteFacts } from '../../src/ui/routing.ts';
+import { parseCommand, loopNameQuery, validLoopOption } from '../../src/slash/parse.ts';
+import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, argumentHint, commandMatches, isControlCommand, resolveCommand, suggestedCommands } from '../../src/slash/registry.ts';
+import { interpret, normalize, authorize, type LineCommand, type UiAction } from '../../src/slash/pipeline.ts';
 
-const CHAT: RouteFacts = { line: '', referenceOpen: false, copyMode: false, pending: false, question: false, screen: 'chat' };
-const route = (line: string, extra: Partial<RouteFacts> = {}) => routeEnter({ ...CHAT, line, ...extra });
+/** Front-end and application facts a test may vary; the defaults describe a live chat screen. */
+interface Facts {
+  referenceOpen?: boolean; copyMode?: boolean;
+  screen?: 'workspaces' | 'sessions' | 'chat' | 'path';
+  question?: boolean; pending?: boolean; sessionSelected?: boolean;
+  during?: 'idle' | 'turn' | 'loop';
+}
+const chat: Required<Omit<Facts, 'screen'>> & { screen: 'workspaces' | 'sessions' | 'chat' | 'path' } = {
+  referenceOpen: false, copyMode: false, screen: 'chat', question: false, pending: false, sessionSelected: true,
+  during: 'idle',
+};
+/** The three stages in order: a line's mode, or the command (or refusal) it becomes. */
+function stages(line: string, extra: Facts = {}) {
+  const facts = { ...chat, ...extra };
+  const submission = interpret({ line, referenceOpen: facts.referenceOpen, copyMode: facts.copyMode, screen: facts.screen });
+  if (submission.kind === 'mode') return { submission };
+  const command = normalize(submission, { sessionSelected: facts.sessionSelected, question: facts.question, pending: facts.pending });
+  const verdict = authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending, during: facts.during });
+  return { submission, command, verdict };
+}
+/** The command a line executes, or the error a refused line produces. */
+const route = (line: string, extra: Facts = {}): LineCommand => {
+  const { verdict } = stages(line, extra);
+  assert.ok(verdict !== undefined, line);
+  return verdict.allow ? verdict.command : verdict.error;
+};
+/** The front-end action a line produces, when the front end handles it itself. */
+const ui = (line: string, extra: Facts = {}): UiAction | undefined => {
+  const { submission } = stages(line, extra);
+  return submission.kind === 'mode' ? submission.action : undefined;
+};
 
 test('/coredump takes an optional tag and needs no session', () => {
   assert.deepEqual(parseCommand('/coredump'), { kind: 'coredump' });
@@ -19,21 +48,45 @@ test('/coredump takes an optional tag and needs no session', () => {
   assert.deepEqual(parseCommand('/coredumpx'), { kind: 'error', message: 'Unknown command. Use /help.' });
 });
 
-test('routing owns the UI modes while the parser owns the syntax', () => {
+test('the pipeline owns the front-end modes while the parser owns the syntax', () => {
   // Enter means something else before the line is ever parsed.
-  assert.deepEqual(route('anything', { referenceOpen: true }), { kind: 'reference' });
-  assert.deepEqual(route('/help', { copyMode: true }), { kind: 'ignore' });
-  assert.deepEqual(route('   '), { kind: 'ignore' });
+  assert.deepEqual(ui('anything', { referenceOpen: true }), { kind: 'reference' });
+  assert.deepEqual(ui('/help', { copyMode: true }), { kind: 'ignore' });
+  assert.deepEqual(ui('   '), { kind: 'ignore' });
   assert.deepEqual(route('free text', { question: true }), { kind: 'answer', text: 'free text' });
   assert.deepEqual(route('free text', { pending: true }), { kind: 'error', message: 'Answer the approval with /allow or /deny' });
   assert.deepEqual(route('some/path', { screen: 'path' }), { kind: 'path', value: 'some/path' });
   assert.deepEqual(route('hello'), { kind: 'prompt', text: 'hello' });
-  assert.deepEqual(route('hello', { screen: 'workspaces' }), { kind: 'error', message: 'Choose a session or type /ws or /resume' });
-  // A screen guard only decides whether a parsed command may run here.
-  assert.deepEqual(route('/model', { screen: 'workspaces' }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(route('hello', { sessionSelected: false }), { kind: 'error', message: 'Choose a session or type /ws or /resume' });
+  // A screen never decides policy: only the command's own constraint and the application facts do.
+  assert.deepEqual(route('/model', { sessionSelected: false }), { kind: 'error', message: 'Select a session first' });
   assert.deepEqual(route('/queue', { pending: true }), { kind: 'error', message: 'Answer the pending question or approval first' });
-  assert.deepEqual(route('!ls', { screen: 'workspaces' }), { kind: 'error', message: 'Select a session first' });
-  assert.deepEqual(route('/latest', { screen: 'workspaces' }), { kind: 'latest' });
+  assert.deepEqual(route('!ls', { sessionSelected: false }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(route('/latest', { sessionSelected: false }), { kind: 'latest' });
+});
+
+test('a running turn or loop refuses only the commands that would write to the same conversation', () => {
+  // A compact, a handoff and a second loop all submit work of their own to the session, so they wait.
+  assert.deepEqual(route('/compact', { during: 'turn' }), { kind: 'error', message: 'Wait for the running turn to finish' });
+  assert.deepEqual(route('/handoff', { during: 'turn' }), { kind: 'error', message: 'Wait for the running turn to finish' });
+  assert.deepEqual(route('/loop design-review 9', { during: 'turn' }), { kind: 'error', message: 'Wait for the running turn to finish' });
+  // During a loop the reason names the loop, because stopping it is what the operator has to do first.
+  assert.deepEqual(route('/compact', { during: 'loop' }), { kind: 'error', message: 'Stop the running loop first' });
+  assert.deepEqual(route('/loop design-review 9', { during: 'loop' }), { kind: 'error', message: 'Stop the running loop first' });
+  // Answering, cancelling, reading and view changes keep working while the agent works.
+  for (const during of ['turn', 'loop'] as const) {
+    assert.deepEqual(route('/cancel', { during }), { kind: 'cancel' });
+    assert.deepEqual(route('/help', { during }), { kind: 'panel', panel: 'help' });
+    assert.deepEqual(route('/allow', { during }), { kind: 'approval', allowed: true });
+    assert.deepEqual(route('/latest', { during }), { kind: 'latest' });
+    assert.deepEqual(route('/history', { during }), { kind: 'history', query: '' });
+    // The host owns the busy rules of its own registered commands.
+    assert.deepEqual(route('/plan off', { during }), { kind: 'hostCommand', line: '/plan off' });
+    assert.deepEqual(route('/model', { during }), { kind: 'models', args: [] });
+  }
+  // A pending interaction is the more actionable reason, so it wins over the running turn.
+  assert.deepEqual(route('/handoff', { pending: true, during: 'turn' }),
+    { kind: 'error', message: 'Answer the pending question or approval first' });
 });
 
 test('/coredump is advertised with its optional tag', () => {
@@ -51,9 +104,9 @@ test('/prompt opens the saved list or saves the trailing text verbatim', () => {
   // The saved text is what will be sent, so quoting is content rather than syntax.
   assert.deepEqual(parseCommand('/prompt "Review this code"'), { kind: 'savePrompt', text: '"Review this code"' });
   assert.deepEqual(parseCommand('/promptx'), { kind: 'error', message: 'Unknown command. Use /help.' });
-  // Listing needs a conversation the composer belongs to; saving works from any screen and offline.
-  assert.deepEqual(route('/prompt', { screen: 'workspaces' }), { kind: 'error', message: 'Select a session first' });
-  assert.deepEqual(route('/prompt Review for bugs', { screen: 'workspaces' }), { kind: 'savePrompt', text: 'Review for bugs' });
+  // Listing needs a conversation the composer belongs to; saving works without one.
+  assert.deepEqual(route('/prompt', { sessionSelected: false }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(route('/prompt Review for bugs', { sessionSelected: false }), { kind: 'savePrompt', text: 'Review for bugs' });
   assert.deepEqual(route('/prompt Review for bugs', { pending: true }), { kind: 'savePrompt', text: 'Review for bugs' });
 });
 
@@ -66,9 +119,14 @@ test('/prompt is advertised in the command catalog', () => {
 
 test('routing constraints live on the command, so the router enumerates no kinds', () => {
   // A command declares its own constraints; the router only reads this table.
-  assert.deepEqual(COMMAND_POLICY.prompts, { chatOnly: true });
-  assert.deepEqual(COMMAND_POLICY.queue, { chatOnly: true, blockedByPending: true });
-  assert.deepEqual(COMMAND_POLICY.hostCommand, { chatOnly: true, blockedByPending: true });
+  assert.deepEqual(COMMAND_POLICY.prompts, { requiresSession: true });
+  assert.deepEqual(COMMAND_POLICY.queue, { requiresSession: true, requiresNoInteraction: true });
+  assert.deepEqual(COMMAND_POLICY.hostCommand, { requiresSession: true, requiresNoInteraction: true });
+  // A turn or a loop in flight refuses only the commands that would write to the same conversation,
+  // and the host keeps deciding for its own registered commands.
+  assert.deepEqual(COMMAND_POLICY.compact, { requiresSession: true, duringTurn: 'deny', duringLoop: 'deny' });
+  assert.deepEqual(COMMAND_POLICY.models, { requiresSession: true });
+  assert.deepEqual(COMMAND_POLICY.cancel, { duringTurn: 'run', duringLoop: 'run' });
   // A kind with no policy runs anywhere, even while an answer is pending.
   assert.equal(COMMAND_POLICY.savePrompt, undefined);
   assert.equal(COMMAND_POLICY.coredump, undefined);
@@ -78,9 +136,10 @@ test('/handoff takes no arguments and waits for a pending answer', () => {
   assert.deepEqual(parseCommand('/handoff'), { kind: 'handoff' });
   assert.deepEqual(parseCommand('/handoff now'), { kind: 'error', message: 'Use /handoff (no arguments)' });
   assert.deepEqual(parseCommand('/handoffx'), { kind: 'error', message: 'Unknown command. Use /help.' });
-  assert.deepEqual(COMMAND_POLICY.handoff, { chatOnly: true, blockedByPending: true });
+  assert.deepEqual(COMMAND_POLICY.handoff, { requiresSession: true, requiresNoInteraction: true,
+    duringTurn: 'deny', duringLoop: 'deny' });
   // It sends a turn, so it needs a conversation and a settled approval or question.
-  assert.deepEqual(route('/handoff', { screen: 'workspaces' }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(route('/handoff', { sessionSelected: false }), { kind: 'error', message: 'Select a session first' });
   assert.deepEqual(route('/handoff', { pending: true }), { kind: 'error', message: 'Answer the pending question or approval first' });
   const hint = COMMAND_HINTS.find(item => item.command === '/handoff');
   assert.ok(hint && hint.description.length > 0);
@@ -123,76 +182,95 @@ test('the resolver reports one match, none, or the exact-only refusal', () => {
   assert.deepEqual(commandMatches('/nope'), []);
 });
 
-test('/loop takes a positional score and tries plus a free-form prompt', () => {
-  assert.deepEqual(parseCommand('/loop 8 5 帮我优化这个函数'), {
-    kind: 'loop', options: { score: 8, tries: 5 }, prompt: '帮我优化这个函数' });
-  // A leading step range is optional; the two numbers and the rest of the line follow it.
-  assert.deepEqual(parseCommand('/loop --from 2 --to 4 8.5 3 do the thing'), {
-    kind: 'loop', options: { from: 2, to: 4, score: 8.5, tries: 3 }, prompt: 'do the thing' });
-  // Line breaks inside the prompt survive, because only the leading tokens are numbers.
-  const multiline = parseCommand('/loop 8 2 first line\nsecond line');
-  assert.ok(multiline.kind === 'loop');
-  assert.equal(multiline.prompt, 'first line\nsecond line');
-  for (const line of ['/loop', '/loop 8', '/loop 8 5', '/loop abc 5 x', '/loop 11 5 x', '/loop 8 0 x',
-    '/loop 8 20 x', '/loop --to 11 8 5 x', '/loop --nope 1 8 5 x']) {
-    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /loop [--from N] [--to N] <score> <tries> <prompt>' }, line);
+test('/loop takes a record name, an optional positional score and tries, and the shared flags', () => {
+  assert.deepEqual(parseCommand('/loop design-review'), { kind: 'loop', name: 'design-review', options: {} });
+  assert.deepEqual(parseCommand('/loop designdoc-review 8.5 3 --from 2 --to 4'), {
+    kind: 'loop', name: 'designdoc-review', options: { from: 2, to: 4, score: 8.5, tries: 3 } });
+  // Flags and positional values are interchangeable, and the last one written wins.
+  assert.deepEqual(parseCommand('/loop design-review --score 9 7'), {
+    kind: 'loop', name: 'design-review', options: { score: 7 } });
+  for (const line of ['/loop --from 2', '/loop design-review abc', '/loop design-review 11',
+    '/loop design-review 8 0', '/loop design-review 8 3 extra', '/loop design-review --score 11', '/loop design-review --nope 1']) {
+    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /loop <name> [score] [tries] [--from N] [--to N] [--score X] [--tries N]' }, line);
   }
-  assert.deepEqual(COMMAND_POLICY.loop, { chatOnly: true, blockedByPending: true });
-  // An ad-hoc loop is costly, so a prefix of it must be typed in full.
-  assert.deepEqual(parseCommand('/lo 8 5 x'), { kind: 'error', message: 'Type the full command: /loop' });
+  // The name is looked up at execution time, so the syntax layer accepts any non-flag token.
+  assert.deepEqual(parseCommand('/loop nope'), { kind: 'loop', name: 'nope', options: {} });
+  // `stop` is `/loop`'s own subcommand, so it is never read as a record name.
+  assert.deepEqual(parseCommand('/loop stop'), { kind: 'loopStop' });
+  assert.deepEqual(parseCommand('/loop stop 9'), { kind: 'error', message: 'Use /loop stop (no arguments)' });
+  assert.deepEqual(parseCommand('/loop stop --to 3'), { kind: 'error', message: 'Use /loop stop (no arguments)' });
+  assert.deepEqual(COMMAND_POLICY.loopStop, { requiresSession: true, control: true, duringTurn: 'run', duringLoop: 'run' });
+  // The control lane is what lets `/loop stop` reach the application while the run owns the composer.
+  assert.equal(isControlCommand('loopStop'), true);
+  assert.equal(isControlCommand('loop'), false);
+  assert.deepEqual(COMMAND_POLICY.loop, { requiresSession: true, requiresNoInteraction: true,
+    duringTurn: 'deny', duringLoop: 'deny' });
+  // A costly run is typed in full.
+  assert.deepEqual(parseCommand('/lo design-review'), { kind: 'error', message: 'Type the full command: /loop' });
   const hint = COMMAND_HINTS.find(item => item.command === '/loop');
-  assert.equal(hint?.usage, '<score> <tries> <prompt>');
+  assert.equal(hint?.usage, '[name|stop] [score] [tries]');
   assert.deepEqual(suggestedCommands('/loo'), ['/loop']);
 });
 
-test('/designdoc-review takes a document path after the shared options', () => {
-  assert.deepEqual(parseCommand('/designdoc-review tui-design.md'), {
-    kind: 'designdocReview', options: {}, path: 'tui-design.md' });
-  assert.deepEqual(parseCommand('/designdoc-review --to 3 --score 8.5 docs/design.md'), {
-    kind: 'designdocReview', options: { to: 3, score: 8.5 }, path: 'docs/design.md' });
-  // A quoted path keeps its spaces, and the flags may not follow it.
-  const quoted = parseCommand('/designdoc-review "docs/my design.md"');
-  assert.ok(quoted.kind === 'designdocReview');
-  assert.equal(quoted.path, 'docs/my design.md');
-  for (const line of ['/designdoc-review', '/designdoc-review --to 3', '/designdoc-review --nope 1 x.md',
-    '/designdoc-review --score 11 x.md', '/designdoc-review --to 11 x.md']) {
-    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /designdoc-review [--from N] [--to N] [--score X] [--tries N] <path>' }, line);
-  }
-  assert.deepEqual(COMMAND_POLICY.designdocReview, { chatOnly: true, blockedByPending: true });
-  // A costly review is typed in full.
-  assert.deepEqual(parseCommand('/designdoc-rev x.md'), { kind: 'error', message: 'Type the full command: /designdoc-review' });
-  const hint = COMMAND_HINTS.find(item => item.command === '/designdoc-review');
-  assert.equal(hint?.usage, '[options]');
-  assert.deepEqual(suggestedCommands('/designdoc'), ['/designdoc-review']);
+test('/loop with no name asks for the record list instead of being a syntax error', () => {
+  assert.deepEqual(parseCommand('/loop'), { kind: 'loops' });
+  assert.deepEqual(parseCommand('/loop   '), { kind: 'loops' });
+  assert.deepEqual(COMMAND_POLICY.loops, { requiresSession: true, requiresNoInteraction: true,
+    duringTurn: 'deny', duringLoop: 'deny' });
+  // The list needs a conversation and a settled approval or question, exactly like the run itself.
+  assert.deepEqual(route('/loop', { sessionSelected: false }), { kind: 'error', message: 'Select a session first' });
+  assert.deepEqual(route('/loop', { pending: true }), { kind: 'error', message: 'Answer the pending question or approval first' });
 });
 
-test('/verify stores, inspects and clears the standard the next loop uses', () => {
-  assert.deepEqual(parseCommand('/verify'), { kind: 'verify' });
-  assert.deepEqual(parseCommand('/verify off'), { kind: 'verify', clear: true });
-  assert.deepEqual(parseCommand('/verify 必须通过 npm test'), { kind: 'verify', criteria: '必须通过 npm test' });
-  // Line breaks matter: the standard is a checklist the verifier reads verbatim.
-  const multiline = parseCommand('/verify first\nsecond');
-  assert.ok(multiline.kind === 'verify');
-  assert.equal(multiline.criteria, 'first\nsecond');
-  assert.deepEqual(COMMAND_POLICY.verify, { chatOnly: true });
-  const hint = COMMAND_HINTS.find(item => item.command === '/verify');
-  assert.equal(hint?.usage, '<criteria|off>');
-  assert.deepEqual(suggestedCommands('/ver'), ['/verify']);
+test('routing leaves the decision to run or confirm to the application', () => {
+  // A named record is one command; whether it opens its form depends on the caller's port, not here.
+  assert.deepEqual(route('/loop design-review'), { kind: 'loop', name: 'design-review', options: {} });
+  assert.deepEqual(route('/loop design-review 9'), { kind: 'loop', name: 'design-review', options: { score: 9 } });
+  assert.deepEqual(route('/loop design-review --to 3'), { kind: 'loop', name: 'design-review', options: { to: 3 } });
+  assert.deepEqual(route('/loop nope'), { kind: 'loop', name: 'nope', options: {} });
 });
 
-test('/design-review parses its four options and rejects a malformed line', () => {
-  assert.deepEqual(parseCommand('/design-review'), { kind: 'designReview', options: {} });
-  assert.deepEqual(parseCommand('/design-review --from 3 --to 5 --score 8.5 --tries 4'), {
-    kind: 'designReview', options: { from: 3, to: 5, score: 8.5, tries: 4 } });
-  // A non-number, an out-of-range value, a flag without a value and a stray word are all refused.
-  for (const line of ['/design-review --from x', '/design-review --score 11', '/design-review --tries',
-    '/design-review --from 0', '/design-review --from 3 extra', '/design-review --nope 1']) {
-    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /design-review [--from N] [--to N] [--score X] [--tries N]' }, line);
+test('the loop-name menu appears only while the draft is still one name', () => {
+  assert.equal(loopNameQuery('/loop'), '');
+  assert.equal(loopNameQuery('/loop '), '');
+  assert.equal(loopNameQuery('/loop des'), 'des');
+  // A trailing space after a complete name still confirms it rather than hiding the menu.
+  assert.equal(loopNameQuery('/loop design-review '), 'design-review');
+  // A second word means the operator moved on to the flags.
+  assert.equal(loopNameQuery('/loop design-review 9'), undefined);
+  assert.equal(loopNameQuery('/loop design-review --to'), undefined);
+  assert.equal(loopNameQuery('/loopx'), undefined);
+  assert.equal(loopNameQuery('/other des'), undefined);
+  assert.equal(loopNameQuery('hello'), undefined);
+});
+
+test('the form validates a value with the same rule the command line uses', () => {
+  assert.equal(validLoopOption('from', 1), true);
+  assert.equal(validLoopOption('from', 0), false);
+  assert.equal(validLoopOption('to', 3), true);
+  assert.equal(validLoopOption('score', 8.5), true);
+  assert.equal(validLoopOption('score', 11), false);
+  assert.equal(validLoopOption('tries', 0), false);
+  assert.equal(validLoopOption('tries', 2), true);
+});
+
+test('once arguments begin, the composer can name what the command takes', () => {
+  assert.equal(argumentHint('/think ')?.command, '/think');
+  assert.equal(argumentHint('/think 3')?.usage, '[seq or live]');
+  // A unique prefix already runs the command, so its arguments are hinted too.
+  assert.equal(argumentHint('/pro Add tests')?.command, '/prompt');
+  assert.equal(argumentHint('/loop ')?.command, '/loop');
+  // Still completing a name, naming no single command, or not a command at all: no hint.
+  assert.equal(argumentHint('/think'), undefined);
+  assert.equal(argumentHint('/co x'), undefined);
+  assert.equal(argumentHint('/nope x'), undefined);
+  assert.equal(argumentHint('hello'), undefined);
+});
+
+test('the commands that /loop replaced are gone', () => {
+  for (const line of ['/design-review', '/designdoc-review x.md', '/verify off']) {
+    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Unknown command. Use /help.' }, line);
   }
-  // It sends a turn, so it needs a conversation and a settled answer; a costly run is typed in full.
-  assert.deepEqual(COMMAND_POLICY.designReview, { chatOnly: true, blockedByPending: true });
-  assert.deepEqual(parseCommand('/design-r'), { kind: 'error', message: 'Type the full command: /design-review' });
-  const hint = COMMAND_HINTS.find(item => item.command === '/design-review');
-  assert.equal(hint?.usage, '[options]');
-  assert.deepEqual(suggestedCommands('/design-'), ['/design-review']);
+  assert.equal(COMMAND_HINTS.some(item => item.command === '/design-review'), false);
+  assert.equal(COMMAND_HINTS.some(item => item.command === '/verify'), false);
 });

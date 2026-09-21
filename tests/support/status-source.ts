@@ -13,9 +13,11 @@ export function statusSource(controller: Controller): StatusSource {
   const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
   const line = (total: CostTotal) => ({ text: costText(total), amount: total.amount, unknown: total.unknown });
   const session = ledger !== undefined && ledger.hasSession(state.sessionId!) ? ledger.total(state.sessionId!) : undefined;
+  const activity = controller.queries.activity;
   return {
     host: controller.base, online: state.online, status: state.status,
-    running: controller.queries.running, since: controller.queries.workingSince,
+    running: controller.queries.running,
+    ...(activity === undefined ? {} : { activity }),
     sessionId: state.sessionId, sessionMode: controller.queries.sessionMode,
     workspaceLabel: workspace ? `${string(workspace.title)} · ${string(workspace.path)}` : 'none selected',
     activeTurnStartedAt: state.session.record.activeTurnStartedAt,

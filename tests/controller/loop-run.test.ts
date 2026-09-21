@@ -1,8 +1,11 @@
 /** The client-driven loop, driven end to end against the host fixture through one protocol. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Controller, designReviewProtocol } from '../../src/controller/index.ts';
-import { array, object } from '../../src/transport/wire.ts';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Controller, loopProtocolFor } from '../../src/controller/index.ts';
+import { array, object, type ObjectValue } from '../../src/transport/wire.ts';
 import { host, until, workspace } from '../support/host.ts';
 
 /** Text of the newest `session/prompt` request. */
@@ -26,6 +29,15 @@ function idle(fixture: Awaited<ReturnType<typeof host>>): void {
 const block = (step: number, attempt: number, score: number | string) =>
   '```dsht-loop\n' + JSON.stringify({ kind: 'design-review', step, attempt, score }) + '\n```';
 
+/** The shipped record without the artifact contract.
+ *
+ * These tests drive the loop through its verdicts; whether a round's section reached the file is
+ * checked by its own tests, and no test may depend on a review file that happens to be in the repo.
+ * @param name - Record to build.
+ * @returns The record with no `artifactMarker`.
+ */
+const protocol = (name: string) => ({ ...loopProtocolFor(name)!, artifactMarker: undefined });
+
 test('the loop sends the brief, advances on a passing score and stops on a failing step', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
@@ -33,12 +45,18 @@ test('the loop sends the brief, advances on a passing score and stops on a faili
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  assert.equal(await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 }), true);
+  assert.equal(await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 }), true);
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The opening send is the scoped brief, not a follow-up.
   assert.match(lastPrompt(fixture), /只执行第 1 轮的第 1 次尝试/);
-  assert.deepEqual(controller.queries.loop, {
-    title: 'Design review', from: 1, to: 2, score: 8, tries: 2, step: 1, attempt: 1, best: 0, phase: 'running', stepLabel: '职责与归属' });
+  // The start time is a wall clock and the identity is generated per run, so the snapshot compares
+  // without them and only checks they are set.
+  const { startedAt, runId, ...progress } = controller.queries.loop!;
+  assert.ok(startedAt > 0);
+  assert.ok(runId.length > 0);
+  assert.deepEqual(progress, {
+    title: 'Design review', from: 1, to: 2, score: 8, tries: 2, total: 10, scope: 'rounds 1–2/10 · selected range',
+    step: 1, attempt: 1, best: 0, phase: 'running', active: true, activity: 'turn', stepLabel: '职责与归属' });
 
   // A passing score advances to step 2 with a short follow-up.
   reply(fixture, 10, 'findings…\n' + block(1, 1, 8.5));
@@ -65,6 +83,37 @@ test('the loop sends the brief, advances on a passing score and stops on a faili
   assert.equal(controller.queries.loop?.best, 7);
 });
 
+test('a loop prompt waits for the foreground slot instead of failing the run', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  assert.equal(await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 }), true);
+  await until(() => fixture.calls.filter(call => call.method === 'session/prompt').length === 1);
+  // A foreground operation owns the execution slot while the round's verdict is consumed.
+  let finish!: (value: ObjectValue) => void;
+  fixture.onCommand = () => new Promise(resolve => { finish = resolve; });
+  const compact = controller.actions.command('/compact', new AbortController().signal);
+  await until(() => controller.state.operation.busy);
+  reply(fixture, 10, 'findings…\n' + block(1, 1, 8.5));
+  await until(() => controller.queries.record.messages.some(message => message.text.includes('dsht-loop')));
+  idle(fixture);
+  // The next round is prepared but the slot is taken: the prompt is held, not dropped, and the run
+  // stays alive instead of ending as a rejected send.
+  await until(() => controller.queries.loop?.step === 2);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
+  assert.equal(controller.queries.loop?.active, true);
+  assert.equal(controller.queries.loop?.phase, 'running');
+  // Freeing the slot sends the held prompt, with the advanced round.
+  finish({ commandId: 'c1', result: { kind: 'success', text: 'Compacted.' } });
+  await compact;
+  await until(() => fixture.calls.filter(call => call.method === 'session/prompt').length === 2);
+  assert.match(lastPrompt(fixture), /现在是第 2 轮、第 1\/2 次尝试/);
+});
+
 test('typed text, an explicit stop and a session switch all end the loop', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
@@ -72,20 +121,20 @@ test('typed text, an explicit stop and a session switch all end the loop', async
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.equal(controller.queries.loop?.phase, 'running');
   // A human turn takes the conversation back, so the loop stops instead of racing it.
   await controller.actions.prompt('never mind');
   assert.equal(controller.queries.loop?.phase, 'cancelled');
 
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
   assert.equal(controller.queries.loop?.phase, 'running');
   controller.actions.stopLoop();
   assert.equal(controller.queries.loop?.phase, 'cancelled');
 
   // A loop belongs to its session, so opening another one drops it entirely.
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
   assert.equal(controller.queries.loop?.step, 1);
   await controller.actions.selectSession('s2');
   await until(() => controller.state.sessionId === 's2');
@@ -101,7 +150,7 @@ test('loop prompts stay out of composer recall while typed prompts remain', asyn
 
   // The opened snapshot already contributes one prompt (the fixture's `你好`).
   const before = controller.queries.recallLength;
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The host echoes a prompt back as a durable user message; a loop prompt must not become recall.
   const brief = lastPrompt(fixture);
@@ -128,14 +177,15 @@ test('a blocked verdict stops the loop without spending the remaining budget', a
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   const before = fixture.calls.filter(call => call.method === 'session/prompt').length;
   // The verifier proved the task impossible; the run ends here rather than trying nine more times.
-  reply(fixture, 30, 'cannot be done\n```dsht-loop\n{"kind":"design-review","step":1,"attempt":1,"status":"blocked"}\n```');
+  reply(fixture, 30, 'cannot be done\n```dsht-loop\n{"kind":"design-review","step":1,"attempt":1,"status":"blocked","reason":"做不到"}\n```');
   await until(() => controller.queries.record.messages.some(message => message.text.includes('cannot be done')));
   idle(fixture);
   await until(() => controller.queries.loop?.phase === 'blocked');
+  assert.deepEqual(controller.queries.loop?.exit, { reason: '做不到' });
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, before);
 });
 
@@ -146,7 +196,7 @@ test('a result block committed just after the idle event is still read', async t
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The host reports the turn idle a moment before the final message reaches the follow stream, so
   // the first parse finds no block. That is not a failed attempt: the loop keeps looking for it.
@@ -173,7 +223,7 @@ test('a control frame this client cannot decode never strands a running loop', a
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
 
   // A jobs frame with no rows once failed the whole generation, which left the loop settling
@@ -204,7 +254,7 @@ test('a reconnect re-attaches the loop when the picker replaced the selection', 
   await controller.actions.selectSession('s1');
   await until(() => controller.state.sessionId === 's1' && controller.queries.record.ready, 15_000);
 
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
 
   fixture.disconnect();
@@ -225,7 +275,7 @@ test('a reconnect keeps the loop while a switch to another session ends it', asy
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(designReviewProtocol(), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.equal(controller.queries.loop?.phase, 'running');
 
@@ -240,4 +290,46 @@ test('a reconnect keeps the loop while a switch to another session ends it', asy
   await controller.actions.selectSession('s2');
   await until(() => controller.state.sessionId === 's2');
   assert.equal(controller.queries.loop, undefined);
+});
+
+test('a passing reply block cannot pass a round whose section is missing from the artifact', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // The reviewed file exists but never got this round's section: the round's conclusion is not there.
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-loop-run-'));
+  await writeFile(join(directory, 'DESIGN-REVIEW.md'), '# 设计审查\n');
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
+    localDirectory: directory });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(loopProtocolFor('design-review')!, { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  reply(fixture, 20, 'looks great\n' + block(1, 1, 9));
+  await until(() => controller.queries.record.messages.some(message => message.text.includes('dsht-loop')));
+  idle(fixture);
+  // The score would pass, but the artifact requirement is a fact the client checks itself.
+  await until(() => fixture.calls.filter(call => call.method === 'session/prompt').length === 2);
+  assert.equal(controller.queries.loop?.step, 1, 'the round did not advance');
+  assert.equal(controller.queries.loop?.attempt, 2, 'the round cost one attempt');
+  assert.match(controller.queries.loop?.note ?? '', /artifact check/);
+  assert.match(lastPrompt(fixture), /工作区文件 DESIGN-REVIEW\.md 缺少本轮小节「## 第 1 轮 · 职责与归属」/);
+});
+
+test('a no-verifier workspace this client cannot read keeps its reply score', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
+    localDirectory: join(tmpdir(), 'dsht-loop-not-here-0000') });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(loopProtocolFor('design-review')!, { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  reply(fixture, 21, 'looks great\n' + block(1, 1, 9));
+  await until(() => controller.queries.record.messages.some(message => message.text.includes('dsht-loop')));
+  idle(fixture);
+  await until(() => controller.queries.loop?.step === 2);
+  assert.doesNotMatch(controller.queries.loop?.note ?? '', /artifact check/);
 });

@@ -1,5 +1,7 @@
 /** Session domain: the selected session, its transcript, layout, telemetry and navigation. */
 export { SessionController } from './controller.ts';
+export { SessionMutationGate } from './mutation-gate.ts';
+export type { MutationAdmission, MutationLane } from './mutation-gate.ts';
 export { contentText, Transcript } from './transcript.ts';
 export { toolLine } from '../text.ts';
 export type { LivePhase, Message, MessagePart, ThoughtEntry } from './transcript.ts';

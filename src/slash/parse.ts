@@ -2,7 +2,7 @@
  *
  * This module is a pure leaf. It reads no UI facts, performs no effects and imports nothing from the
  * application, so "what the line means" stays separate from "what Enter currently does" (which is
- * `ui/routing.ts`) and from "may this run now" (which is the application's dispatch).
+ * `slash/pipeline.ts` in the front end) and from "may this run now" (the pipeline's `authorize`).
  */
 import { commandMatches, resolveCommand } from './registry.ts';
 
@@ -29,14 +29,12 @@ export type Command =
   | { kind: 'compact' }
   /** Clear the client's own HANDOFF.md, then ask the agent to write a fresh session handoff. */
   | { kind: 'handoff' }
-  /** Start the client-driven scored design review. */
-  | { kind: 'designReview'; options: LoopOptions }
-  /** Wrap one free-form prompt in the scored loop; see `LoopOptions`. */
-  | { kind: 'loop'; options: LoopOptions; prompt: string }
-  /** Set, clear or inspect the session's verification standard. */
-  | { kind: 'verify'; criteria?: string; clear?: boolean }
-  /** Review one design document in the scored loop; see `LoopOptions`. */
-  | { kind: 'designdocReview'; options: LoopOptions; path: string }
+  /** Start the client-driven scored loop for one `loop.yaml` record. */
+  | { kind: 'loop'; name: string; options: LoopOptions }
+  /** Offer the `loop.yaml` records so one can be chosen instead of typed. */
+  | { kind: 'loops' }
+  /** Stop the running loop; the one `/loop` subcommand that takes no record. */
+  | { kind: 'loopStop' }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -48,139 +46,120 @@ export type Command =
   | { kind: 'error'; message: string }
   | { kind: 'prompt'; text: string };
 
-/** Options carried by the scored-loop commands (`/design-review` and its siblings).
+/** Options carried by `/loop`.
  *
  * Only the fields the operator actually typed are present, so the syntax layer validates each value
- * it sees and the application owns the defaults and the cross-field rules (`to >= from`).
+ * it sees and the application owns the defaults — command line first, then the record's `defaults`,
+ * then the global ones.
  */
 export interface LoopOptions {
   /** First step to run; default 1. */
   from?: number;
-  /** Last step to run; default the protocol's last step. */
+  /** Last step to run; default the record's last step. */
   to?: number;
-  /** Passing score per step, 0-10 and possibly fractional; default 8. */
+  /** Passing score per step, 0-10 and possibly fractional; default the record's, else 8. */
   score?: number;
-  /** Attempts allowed per step; default 10. */
+  /** Attempts allowed per step; default the record's, else 10. */
   tries?: number;
+  /** Values that replace the record's own `vars` for this run, such as the document under review.
+   *
+   * The interactive form fills this in; the command line has no syntax for it, because the record —
+   * not the syntax layer — is what knows which names exist.
+   */
+  vars?: Readonly<Record<string, string>>;
 }
 
+/** The numeric options a flag can carry; `vars` is not one, so it stays out of the flag table. */
+type LoopNumberOption = 'from' | 'to' | 'score' | 'tries';
+
 /** How each loop flag names an option and validates its value. */
-const LOOP_FLAGS: Readonly<Record<string, { key: keyof LoopOptions; valid: (value: number) => boolean }>> = {
+const LOOP_FLAGS: Readonly<Record<string, { key: LoopNumberOption; valid: (value: number) => boolean }>> = {
   '--from': { key: 'from', valid: value => Number.isSafeInteger(value) && value >= 1 },
   '--to': { key: 'to', valid: value => Number.isSafeInteger(value) && value >= 1 },
   '--score': { key: 'score', valid: value => Number.isFinite(value) && value >= 0 && value <= 10 },
   '--tries': { key: 'tries', valid: value => Number.isSafeInteger(value) && value >= 1 },
 };
 
-/** The one message every malformed `/design-review` line receives. */
-export const DESIGN_REVIEW_USAGE = 'Use /design-review [--from N] [--to N] [--score X] [--tries N]';
+/** The flag that carries one option, so a form keyed by option validates with the same rule. */
+const LOOP_OPTION_FLAGS: Readonly<Record<LoopNumberOption, string>> = {
+  from: '--from', to: '--to', score: '--score', tries: '--tries',
+};
 
-/** Parse the shared `--from/--to/--score/--tries` flags, shared by every scored-loop command.
- * @param rest - Text after the command name.
- * @returns The options, or undefined when any flag or value is malformed.
- */
-export function parseLoopOptions(rest: string): LoopOptions | undefined {
-  const options: LoopOptions = {};
-  const words = rest.trim().split(/\s+/).filter(Boolean);
-  for (let index = 0; index < words.length; index += 2) {
-    const flag = words[index]!;
-    const raw = words[index + 1];
-    const spec = LOOP_FLAGS[flag];
-    if (spec === undefined || raw === undefined) return undefined;
-    const number = Number(raw);
-    if (!spec.valid(number)) return undefined;
-    options[spec.key] = number;
-  }
-  return options;
-}
-
-/** Consume leading loop flags and return the remaining text.
+/** Whether one numeric value is acceptable for one loop option.
  *
- * `parseLoopOptions` parses a line that is only flags; this splits flags from a trailing free-text
- * argument, which is what a command taking a path needs.
- * @param rest - Text after the command name.
- * @returns The options and the remaining text, or undefined when a flag is malformed.
+ * The command line and the interactive form share this rule, so a value the form accepts is exactly
+ * one the syntax would have accepted if it had been typed.
+ * @param key - Option being set.
+ * @param value - Candidate number.
+ * @returns True when the option may carry that value.
  */
-function takeLoopFlags(rest: string): { options: LoopOptions; tail: string } | undefined {
-  let remaining = rest.replace(/^\s+/, '');
-  const options: LoopOptions = {};
-  for (;;) {
-    const flag = /^(--from|--to|--score|--tries)\s+(\S+)\s*/.exec(remaining);
-    if (!flag) break;
-    const spec = LOOP_FLAGS[flag[1]!];
-    const number = Number(flag[2]);
-    if (spec === undefined || !spec.valid(number)) return undefined;
-    if (flag[1] === '--to' && number > LOOP_STEPS_MAX) return undefined;
-    options[spec.key] = number;
-    remaining = remaining.slice(flag[0].length);
-  }
-  return { options, tail: remaining.trim() };
+export function validLoopOption(key: LoopNumberOption, value: number): boolean {
+  return LOOP_FLAGS[LOOP_OPTION_FLAGS[key]]!.valid(value);
 }
 
-/** The one message every malformed `/designdoc-review` line receives. */
-export const DESIGNDOC_REVIEW_USAGE = 'Use /designdoc-review [--from N] [--to N] [--score X] [--tries N] <path>';
-
-/** Parse `/designdoc-review` and the document it reviews.
- * @param value - Trimmed line that starts with `/designdoc-review`.
- * @returns The command, or the usage error.
+/** The record name the composer is currently typing after `/loop`, if any.
+ *
+ * The loop-name menu appears while the line is `/loop` or `/loop <one unfinished token>`; a second
+ * token means the operator moved on to the flags, so the menu stays out of the way. A trailing space
+ * after a complete name still counts: the menu then confirms that name rather than filtering it out.
+ * @param line - Composer draft exactly as typed.
+ * @returns The unfinished name (empty when none was started), or undefined for any other line.
  */
-function designdocReviewCommand(value: string): Command {
-  const parsed = takeLoopFlags(value.slice('/designdoc-review'.length));
-  // An unknown leading flag is a usage error, not a document called `--nope`.
-  if (parsed === undefined || !parsed.tail || parsed.tail.startsWith('--')) return { kind: 'error', message: DESIGNDOC_REVIEW_USAGE };
-  return { kind: 'designdocReview', options: parsed.options, path: unquote(parsed.tail) };
-}
-
-/** Parse `/design-review` and its flags, rejecting anything malformed.
- * @param value - Trimmed line that starts with `/design-review`.
- * @returns The command, or the usage error.
- */
-function designReviewCommand(value: string): Command {
-  const options = parseLoopOptions(value.slice('/design-review'.length));
-  return options === undefined ? { kind: 'error', message: DESIGN_REVIEW_USAGE } : { kind: 'designReview', options };
+export function loopNameQuery(line: string): string | undefined {
+  if (!line.startsWith('/loop')) return undefined;
+  const rest = line.slice('/loop'.length);
+  if (rest === '') return '';
+  const match = /^[ \t]+(\S*)[ \t]*$/.exec(rest);
+  // `stop` is a subcommand, never a record, so the menu must not filter records by it.
+  return match?.[1] === 'stop' ? undefined : match?.[1];
 }
 
 /** The one message every malformed `/loop` line receives. */
-export const LOOP_USAGE = 'Use /loop [--from N] [--to N] <score> <tries> <prompt>';
+export const LOOP_USAGE = 'Use /loop <name> [score] [tries] [--from N] [--to N] [--score X] [--tries N]';
 
-/** Largest attempt budget one `/loop` step may declare, so an ad-hoc loop stays bounded. */
-const LOOP_TRIES_MAX = 10;
+/** The one message a malformed `/loop stop` line receives. */
+export const LOOP_STOP_USAGE = 'Use /loop stop (no arguments)';
 
-/** Largest last step one `/loop` may declare, for the same reason. */
-const LOOP_STEPS_MAX = 10;
-
-/** Parse `/loop <score> <tries> <prompt>`, with an optional leading step range.
+/** Parse `/loop <name> [score] [tries] [flags]`.
  *
- * The prompt is free text, so only its two leading tokens are numbers; everything after them is
- * handed to the loop verbatim, line breaks included.
+ * The name is a record in `loop.yaml`; the syntax layer cannot know which records exist, so it only
+ * requires a name that is not a flag and leaves the lookup (and its error, which lists the available
+ * names) to the application. Score and tries may be positional or flagged; the last one wins. A line
+ * with no name at all is the request to be offered the records instead of typing one, and the name
+ * `stop` is `/loop`'s own subcommand rather than a record.
  * @param value - Trimmed line that starts with `/loop`.
  * @returns The command, or the usage error.
  */
 function loopCommand(value: string): Command {
-  let rest = value.slice('/loop'.length).replace(/^\s+/, '');
+  const words = value.slice('/loop'.length).trim().split(/\s+/).filter(Boolean);
+  const name = words[0];
+  if (name === undefined) return { kind: 'loops' };
+  // `stop` belongs to `/loop` itself, which is why a record may not take that name.
+  if (name === 'stop') return words.length === 1 ? { kind: 'loopStop' } : { kind: 'error', message: LOOP_STOP_USAGE };
+  if (name.startsWith('--')) return { kind: 'error', message: LOOP_USAGE };
   const options: LoopOptions = {};
-  // Optional step range first, so the two positional numbers and the prompt stay unambiguous.
-  for (;;) {
-    const flag = /^(--from|--to)\s+(\S+)\s*/.exec(rest);
-    if (!flag) break;
-    const name = flag[1]!;
-    const number = Number(flag[2]);
-    const valid = name === '--from'
-      ? LOOP_FLAGS['--from']!.valid(number)
-      : LOOP_FLAGS['--to']!.valid(number) && number <= LOOP_STEPS_MAX;
-    if (!valid) return { kind: 'error', message: LOOP_USAGE };
-    if (name === '--from') options.from = number; else options.to = number;
-    rest = rest.slice(flag[0].length);
+  let positionals = 0;
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (word.startsWith('--')) {
+      const spec = LOOP_FLAGS[word];
+      const raw = words[index + 1];
+      if (spec === undefined || raw === undefined) return { kind: 'error', message: LOOP_USAGE };
+      const number = Number(raw);
+      if (!spec.valid(number)) return { kind: 'error', message: LOOP_USAGE };
+      options[spec.key] = number;
+      index += 1;
+      continue;
+    }
+    // Two optional positionals: the passing score, then the attempt budget.
+    const number = Number(word);
+    if (positionals > 1) return { kind: 'error', message: LOOP_USAGE };
+    const spec = positionals === 0 ? LOOP_FLAGS['--score']! : LOOP_FLAGS['--tries']!;
+    if (!spec.valid(number)) return { kind: 'error', message: LOOP_USAGE };
+    options[spec.key] = number;
+    positionals += 1;
   }
-  const pair = /^(\S+)\s+(\S+)\s*/.exec(rest);
-  if (!pair) return { kind: 'error', message: LOOP_USAGE };
-  const score = Number(pair[1]);
-  const tries = Number(pair[2]);
-  if (!LOOP_FLAGS['--score']!.valid(score)) return { kind: 'error', message: LOOP_USAGE };
-  if (!Number.isSafeInteger(tries) || tries < 1 || tries > LOOP_TRIES_MAX) return { kind: 'error', message: LOOP_USAGE };
-  const prompt = rest.slice(pair[0].length).trim();
-  if (!prompt) return { kind: 'error', message: LOOP_USAGE };
-  return { kind: 'loop', options: { ...options, score, tries }, prompt };
+  return { kind: 'loop', name, options };
 }
 
 /** Parse workspace and resume navigation, including their long aliases. */
@@ -257,15 +236,7 @@ export function parseCommand(line: string): Command {
     if (value !== '/handoff') return { kind: 'error', message: 'Use /handoff (no arguments)' };
     return { kind: 'handoff' };
   }
-  if (/^\/design-review(?: |$)/.test(value)) return designReviewCommand(value);
-  if (/^\/designdoc-review(?: |$)/.test(value)) return designdocReviewCommand(value);
   if (/^\/loop(?: |$)/.test(value)) return loopCommand(value);
-  if (/^\/verify(?: |$)/.test(value)) {
-    // Internal line breaks matter: the standard is a checklist the verifier reads verbatim.
-    const criteria = value.slice('/verify'.length).replace(/^\s+/, '').replace(/\s+$/, '');
-    if (!criteria) return { kind: 'verify' };
-    return criteria === 'off' ? { kind: 'verify', clear: true } : { kind: 'verify', criteria };
-  }
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };
   if (value === '/deny') return { kind: 'approval', allowed: false };

@@ -1,6 +1,9 @@
 /** The local `!` runner streams lines, bounds a runaway line and kills the whole process group. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runShell } from '../../src/shell/runner.ts';
 
 /** Collect one run's lines and how it ended. */
@@ -50,9 +53,13 @@ test('cancelling kills the whole process group and resolves', async () => {
   assert.equal(typeof exit.code === 'number' ? exit.code !== 0 : true, true, 'the command did not exit cleanly');
 });
 
-test('an aborted signal kills the command instead of running it', async () => {
+test('an aborted signal never starts the command', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-runner-'));
   const abort = new AbortController();
   abort.abort();
-  const { exit } = await run('sleep 30', abort.signal);
-  assert.notEqual(exit.code, 0);
+  const { exit } = await run(`: > ${join(directory, 'ran')}; sleep 30`, abort.signal);
+  // Nothing was spawned, so the command cannot have produced its side effect.
+  await assert.rejects(readFile(join(directory, 'ran'), 'utf8'));
+  assert.equal(exit.signal, 'SIGTERM');
+  await rm(directory, { recursive: true, force: true });
 });

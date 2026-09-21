@@ -3,10 +3,10 @@
 本文档记录 `tui/` 目录（npm 包 `@itookit/dsht`，可执行文件 `dsht`）的架构设计、对外接口、内部事件流，以及项目协作与维护所需的事实。
 
 **读者**：维护 `tui/` 的改动者（含在本仓库工作的 agent），以及需要判断某个子系统边界与接口的评审者。只想了解怎么使用 `dsht` 的读者请读 `README.md`／`README.zh.md`。
-**本文记录**：项目定位与包事实（§1）、模块划分与依赖方向、对外接口与导出符号、内部事件流、本地存储格式、成本口径、协作与验证清单，以及术语与不变量（附录 B）。
+**本文记录**：项目定位与包事实（§1）、模块划分与依赖方向、对外接口与导出符号、内部事件流、本地存储格式、成本口径、协作与验证清单，以及术语表（附录 B；不变量清单在 4.7）。
 **本文不记录**：① 宿主 `dsh web` 的协议规范——协议定义在父仓库 `packages/api/gateway/src/stream-protocol.ts`，本文只记录客户端实际消费与校验的部分（见 3.1）；② 面向用户的操作说明——见 `README.md`／`README.zh.md`；③ 单次变更的决策理由——见 `.agents/notes/implemented/`；④ 实施期方案与进度——见 `tui-refactor-plan.md`；⑤ 计费方案评审——见 `cost.md`；⑥ 未被 `src/`／`tests/` 支撑的规划项——7.6 是限制清单，不是承诺。
 
-**事实基线**：`tui/` 目录内容，以核实时点的 `git HEAD` 与 `package.json` 为准（本文核对时 HEAD `b7c0230`、版本 `0.4.0`）。模块化重构及其后续提交序列 `e3a921e`…`0b837d7`（2026-09-11）只是历史切片，见 7.8。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md`、`tui/.agents/notes/implemented/` 与本文明确引用的父仓库文件（如 `packages/api/gateway/src/stream-protocol.ts`、`CONTRIBUTING.md`）读出，未使用其他来源。本文是记录与索引，不是规范：模块边界、接口签名与文件清单的权威定义始终在 `src/`，与本文件冲突处以源码为准。
+**事实基线**：`tui/` 目录内容，以核实时点的 `git HEAD` 与 `package.json` 为准（本文核对时 HEAD `6f67f87`、版本以 `package.json` 为准）。模块化重构及其后续提交序列 `e3a921e`…`0b837d7`（2026-09-11）只是历史切片，见 7.8。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md`、`tui/.agents/notes/implemented/` 与本文明确引用的父仓库文件（如 `packages/api/gateway/src/stream-protocol.ts`、`CONTRIBUTING.md`）读出，未使用其他来源。本文是记录与索引，不是规范：模块边界、接口签名与文件清单的权威定义始终在 `src/`，与本文件冲突处以源码为准。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
 **维护要求**：`src/` 的模块划分、导出符号、宿主端点或帧结构、本地文件路径与格式、命令行选项或 slash 命令发生变化时，同步更新本文件对应小节。
 
@@ -20,7 +20,7 @@
 - [6. 成本模型](#6-成本模型)
 - [7. 项目协作与维护](#7-项目协作与维护)
 - [附录 A 源码索引](#附录-a-源码索引)
-- [附录 B 术语与不变量](#附录-b-术语与不变量)
+- [附录 B 术语表](#附录-b-术语表)
 
 ### 按子系统找入口
 
@@ -54,7 +54,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 包名 / 版本 | `@itookit/dsht` `0.4.0` |
+| 包名 | `@itookit/dsht`（版本以 `package.json` 为准，`dsht --version` 从该文件读出） |
 | 可执行文件 | `dsht`（`dist/cli/index.js`），可直接 `npx @itookit/dsht` |
 | 模块格式 / 引擎 | ESM（`"type": "module"`），Node.js `>=22.19` |
 | 库入口 | `.` → `dist/index.js`；`./auth` → `dist/transport/auth.js`；均带 `.d.ts` |
@@ -201,7 +201,7 @@ C4Component
   Component(session, "session/", "纯 TypeScript", "对话投影、排版、遥测、导航、引用、提示词索引、导出与 SessionController")
   Component(cost, "cost/", "纯 TypeScript", "价格、记录折叠、账本文件、账本、扫描器与 CostController")
   Component(catalog, "catalog/", "纯 TypeScript", "模型路由与 agent preset")
-  Component(controller, "controller/", "纯 TypeScript", "Controller 门面、命令策略、评分循环（/loop、/design-review、/designdoc-review）、ConnectionController、内存日志与快捷提示词")
+  Component(controller, "controller/", "纯 TypeScript", "Controller 门面、命令策略、评分循环（`/loop <name>` 及其 `loop.yaml` 记录）、ConnectionController、内存日志与快捷提示词")
   Component(ui, "ui/", "React + Ink", "commands、chat、dialogs、input、status、theme 与唯一的 Ink 渲染入口")
   Component(cli, "cli/", "Node.js 入口", "参数、目录准备与进程生命周期")
   Component(shell, "shell/", "node:child_process", "本地 ! 命令的执行、有界输出与进程组终止")
@@ -252,12 +252,18 @@ C4Component
 
 1. **宿主事件层**：`session/follow` 的 `snapshot` / `event` / `chunks` / `assistant-stream` 帧，以及 `session/control` 的 `baseline` / `projection` / `queue` / `jobs` 帧。
 2. **语义消息层**（`Transcript`）：只保留可显示事件（`user/message`、`assistant/message`、`tool/result`）的裁剪副本；未完成的 assistant 流保存在独立的 `blocks` 中，永不写入持久历史。
-3. **投影视图层**（`historyLayout` / `LayoutIndex`）：把语义消息按当前终端宽度包装成行，缓存每段的行数与起始偏移，只物化可见视口；最多缓存 2,048 行且单条消息不超过 256 KiB。文本部分先经 `markdown.ts` 解析成纯文本行加局部样式区间（表格按终端列宽分配、Mermaid 闭图渲染为字符网格、TeX 经 MathJax 编译为 Unicode 公式），样式由 Ink 在排版后应用，因此行几何与索引保持一致。未完成的实时部分按稳定 `key` 增量换行：文本只会增长，因此最后一个非空行之前的行不再重排，每帧只重排该行残余与新到的增量。
+3. **投影视图层**（`historyLayout` / `LayoutIndex`）：把语义消息按当前终端宽度包装成行，缓存每段的行数与起始偏移，只物化可见视口；最多缓存 2,048 行且单条消息不超过 256 KiB。文本部分先经 `markdown.ts` 解析成纯文本行加局部样式区间（表格按终端列宽分配、Mermaid 闭图渲染为字符网格、TeX 经 MathJax 编译为 Unicode 公式），样式由 Ink 在排版后应用，因此行几何与索引保持一致。未完成的实时尾部按稳定 `key` 增量换行：文本只会增长，因此最后一个非空行之前的行不再重排，每帧只重排该行残余与新到的增量。
 4. **渲染层**（Ink）：仅可见行成为 React 节点，远端文本先经 `safeText` 清洗再着色。
 
 `Controller` 是唯一的状态发布者：`State` 通过 `update(patch)` 整体替换并递增 `version`，React 的 `useSyncExternalStore(controller.subscribe, controller.snapshot)` 读取它。`State` 契约位于 `src/state.ts`：它**只组合**，装 `operation`（应用自己的 busy/error 信封）、各 feature 的快照与 `session`；每个 feature 自己持有可变状态并出 `snapshot()`，写入前先由 `transport/events.ts` 把 wire 帧归一化。`pending`（待答问题/审批）由 `SessionController` 的 `interactions` 映射在每次 `update` 时按当前会话推导并返回 `PendingInteraction` 判别联合，因此**可见对话框与帧到达顺序无关**。选择器世代同样由 store 持有，会话与 catalog 域据此丢弃跨越切换的在途响应。
 
-**事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；输入框、`@` 菜单高亮、面板可见性与阅读视图（滚动、折叠、实时折叠模式）都是 `ui/app.tsx` 的组件状态，切换会话由一处 effect 清理；`pinned` 是 `SessionController` 的私有标志。**UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。**扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回纯表现的 `CommandIntent`（打开哪个面板、显示什么提示、回到实时、折叠哪条、是否进入 copy mode…），`ui/app.tsx` 只用一个 reducer 解释这些动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (submission.kind)`。UI 侧的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、保留键与关闭方式，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
+**事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。
+
+**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；输入框、`@` 菜单高亮、面板可见性与阅读视图（滚动、折叠、实时折叠模式）都是 `ui/app.tsx` 的组件状态，切换会话由一处 effect 清理；`pinned` 是 `SessionController` 的私有标志。
+
+**UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。
+
+**扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。UI 侧的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、保留键与关闭方式，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
 阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话；状态另用 `statusPaused = copyMode || (screen === 'chat' && dialogOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 对话框与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
@@ -269,7 +275,7 @@ C4Component
 | 单一复用 WebSocket | 所有流共用 `/api/remote.mux`，以 `streamId` 多路复用 | 一个物理连接、一处生命周期、便于整体关闭 |
 | 宿主是持久层的唯一所有者 | 客户端只保存可重载的内存副本；工具结果正文只在宿主日志中 | 不产生第二份真相，切换会话可整段释放 |
 | 投影与渲染分离 | 语义块、折叠状态、行索引、着色互不写入 | 折叠变化不修改内容，搜索与 `/think` 始终可用完整文本 |
-| 实时尾部增量换行 | 每个布局按实时部分的稳定 `key` 保存已定稿行与最后一行残余来源，只重排残余与新增量 | 逐帧整段换行的时间随累计长度乘帧数增长，而历史行不可能因新增文本重排 |
+| 实时尾部增量换行 | 每个布局按实时尾部的稳定 `key` 保存已定稿行与最后一行残余来源，只重排残余与新增量 | 逐帧整段换行的时间随累计长度乘帧数增长，而历史行不可能因新增文本重排 |
 | 不自动重试写操作 | 所有 `session/*`、`workspace/*`、`commands/execute` 只尝试一次 | 丢失的响应无法判定宿主是否已执行，重试可能重复投递 |
 | 世代化重连 | 每次断线重建 `Telemetry`、清空 `runningUpdates` 与 `interactions`，以新基线替换 | 宿主基线是重连后的权威状态，旧世代数据不得回灌 |
 | 未知 waterfall 必须委托 | 未识别的 `waterfall` 事件一律用 `{kind:'next'}` 回应 | 否则会阻塞宿主的 Cordis 事件链 |
@@ -712,9 +718,10 @@ dsht [options] [list workspaces|list sessions]
 | `--history-mb <n>` | 历史软上限 MiB，默认 16，必须为正整数 |
 | `--json` | `list` 输出 `{ "items": [...] }` |
 | `--memory-log <path>` | 运行时内存日志路径，默认 `<state>/memory.log`；空值报错 |
+| `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 先建好 `.diagnostics/` 再以 `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics` 启动，可在平台期用 `kill -USR2 <pid>` 把堆快照写进该目录（快照目录必须先存在，否则信号会让进程崩溃） |
 | `--trace <path>` | 状态迁移日志路径，默认 `<state>/trace.log`；记录连接代际、选择器请求、本地工作区采用、会话解析与屏幕／选中项变化；空值报错 |
 | `--no-trace` | 关闭状态迁移日志（默认开启） |
-| `--no-memory-log` | 关闭运行时内存日志（默认开启）；`npm run start:profile` 先建好 `.diagnostics/` 再以 `--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics` 启动，可在平台期用 `kill -USR2 <pid>` 把堆快照写进该目录（快照目录必须先存在，否则信号会让进程崩溃） |
+| `--version` | 打印 `package.json` 的 `version` 后退出；版本号不在代码或文档里重复，路径相对入口解析，源码树与 `dist/` 都可用 |
 | `--help` | 打印帮助 |
 
 约束与行为：
@@ -763,10 +770,7 @@ dsht [options] [list workspaces|list sessions]
 | `/permission` | `[preset]` | 查看或切换宿主权限预设 |
 | `/feedback` | `text` | 记录会话反馈 |
 | `/handoff` | — | 先删除客户端运行目录下的 `HANDOFF.md`，再向 agent 发送一个请求，让它在工作区根目录写出新的会话交接（起因、目标、各任务状态：已完成／仍未完成／无法完成及原因、决策与改动文件、验证方式、下一步） |
-| `/verify` | `<criteria|off>` | 设置／查看／清除当前会话的验证标准；下一次 loop 会把标准注入提示词，交给独立 verifier 子代理对照打分 |
-| `/loop` | `<score> <tries> <prompt>`（可前置 `[--from N] [--to N]`） | 把任意 prompt 包成同一评分循环的协议：prompt 即目标，默认单步、`tries` 每步上限 10；`--to` 可跑多轮 |
-| `/design-review` | `[--from N] [--to N] [--score X] [--tries N]` | 运行通用评分循环（`controller/loop.ts`）的十轮收敛审查协议：首步发完整 Brief，之后发短跟进；每步读回复结尾的 `dsht-loop` JSON 分数，达标进下一步，否则消耗一次尝试，`--tries` 用尽即停止 |
-| `/designdoc-review` | `[--from N] [--to N] [--score X] [--tries N]` | 同一评分循环的设计文档审查协议（`controller/designdoc-review.ts`）：十轮把 `tui-design.md` 与代码对照，每轮把结论写入工作区文件 `DESIGN-DOC-REVIEW.md` |
+| `/loop` | `<name> [score] [tries]`（可加 `[--from N] [--to N] [--score X] [--tries N] [--deadline MIN]`） | 运行 `loop.yaml` 里名为 `<name>` 的记录：记录自带轮次、每轮 rubric、附加标准、固定输入（如被评审文档路径）与默认分/次数。优先级为 命令行 > 记录 `defaults` > 全局 `defaults`；`--deadline` 也可以用 `DSHT_LOOP_DEADLINE` 给出（正整数分钟）；未知名字会报错并列出可用记录（`design-review`、`designdoc-review`） |
 | `/export` | `[local.zip]` | 把会话日志 ZIP 保存为新文件 |
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
 | `/coredump` | `[tag]` | 在客户端当前工作目录写出 V8 堆快照（`<tag>-<Date.now()>.heapsnapshot`，`tag` 默认 `snapshot`），供 Chrome DevTools 分析内存增长；写入同步执行，期间客户端暂停 |
@@ -780,9 +784,17 @@ dsht [options] [list workspaces|list sessions]
 
 补全规则：仅当草稿以 `/` 开头且不含空格时生效；唯一匹配补全为 `命令 + 空格`，多匹配则扩展到公共前缀。执行规则：`parseCommand` 先用 `resolveCommand` 解析首词——完整命令名保持原样；唯一前缀解析为该命令（参数保留），因此 `/pro Add tests` 就是 `/prompt Add tests`；无匹配或匹配多条时保留原草稿，并由 `unresolved` 返回错误：恰好一条匹配说明它是 `exactOnly` 命令（`/quit`、`/allow`、`/deny`），提示"Type the full command"；2–6 条匹配列出候选（`Ambiguous command. Matches: …`）；其余（含裸 `/`）维持 `Unknown command. Use /help.`。
 
-路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `chatOnly` 与 `blockedByPending`，`ui/routing.ts` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。命令的执行策略集中在 `controller/commands.ts`：`runCommand(controller, command, port)` 调用应用动作并返回 `CommandIntent`，其中 `port.run` 借出 UI 的"可取消操作 + 加载标签"机制；UI 只解释意图，因此新增命令不需要改动 `ui/`，除非它引入新的表现层动词或新面板。
+路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `requiresSession`／`requiresNoInteraction`／`control`／`duringTurn`／`duringLoop`，`slash/pipeline.ts` 的 `authorize` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。命令的执行策略集中在 `controller/commands.ts`：`runCommand(controller, command, port)` 调用应用动作并返回 `CommandResult`，其中 `port.run` 借出 UI 的"可取消操作 + 加载标签"机制；UI 只解释意图，因此新增命令不需要改动 `ui/`，除非它引入新的表现层动词或新面板。
 
-**带评分的分步循环是通用机制，协议只是数据**：`controller/loop.ts` 提供 `LoopProtocol`（`marker`/`kind`/`title`/`steps`/默认分/默认次数/`brief`/`followUp`）、`ScoredLoop`（无 I/O 的 step／attempt／best／phase 状态机）、`resolveLoop`（套用协议默认值并校验 `to >= from`）与 `parseLoopResult`（按 `marker` + `kind` 读正文最后一个块）；`Controller` 负责发送、在 `agent-status running:false` 时推进、以及在任何会打断循环的事件上停止（用户发送普通消息、`/cancel`、Esc/Ctrl+C、切换会话、断线）。`controller/design-review.ts` 现在只是一个协议（十轮标题/检查要点 + 两个提示词构造函数），**新增同类命令只需再加一个协议文件、一条 slash 语法与一条 `COMMAND_POLICY`，不必碰循环与 UI**。状态只存在于内存并绑定当前会话，不持久化；UI 只读 `Queries.loop` 的只读快照，由叶子组件 `ui/chat/loop-status.tsx` 渲染一行 `title · step · attempt · best/target`，不做判断；该组件只吃 `LoopProgress`，不认识任何协议。分数必须出现在 assistant **正文**的最后一块（正文不裁剪，reasoning 会被折行），缺失、越界或 `kind` 不符都按一次失败尝试计入 `--tries`。契约文本集中在 `controller/loop-contract.ts`（`resultContract`/`followUpContract`），要求回复以 `dsht-loop` 块结尾，块内至少含 `score`、`status`（`done|retry|blocked`）与 `evidence`；`status=blocked` 立即结束循环（`ScoredLoop` 的 `blocked` 终态），不再消耗尝试预算。契约还要求把产出物落到工作区，并由**全新 verifier 子代理**独立打分——`/verify <criteria>` 提供该验证者对照的标准（控制器内存、属于当前会话；`/verify` 查看、`/verify off` 清除），协议在启动时读取并注入，标题追加 `(verified)` 标记。`resultContract` 接收 `VerificationBrief`（`standard`/`artifact`/`focus`），因此协议可以自带 rubric：`/design-review` 与 `/designdoc-review` 都用**本轮检查要点**作为标准、把 `/verify` 的标准叠加在其上，要求每轮写入工作区文件（分别是 `DESIGN-REVIEW.md` 与 `DESIGN-DOC-REVIEW.md`；验证者在全新上下文里只能读文件），并通过可选的 `LoopProtocol.stepLabel` 在进度行显示轮次主题。
+**带评分的分步循环是通用机制，协议只是数据**：`controller/loop.ts` 提供 `LoopProtocol`（`marker`/`kind`/`title`/`steps`/`starts`/`artifact`/`stepLabel`/默认分/默认次数/`brief`/`followUp`/`verify`）、`ScoredLoop`（无 I/O 的 step／attempt／best／noProgress／phase 状态机）、`resolveLoop`（套用协议默认值并校验 `to >= from`）与 `parseLoopResult`（按 `marker` + `kind` 读正文最后一个块）；`Controller` 负责发送、在 `agent-status running:false` 时推进、以及在任何会打断循环的事件上停止（用户发送普通消息、`/cancel`、Esc/Ctrl+C、切换会话、断线）。终态有 `passed`/`exhausted`/`stalled`/`blocked`/`unavailable`/`cancelled`/`needs-human`/`deadline`，`--deadline`（或 `DSHT_LOOP_DEADLINE`，单位分钟）把整轮 run 的墙钟时间也纳入预算。
+
+**协议是 `loop.yaml` 的记录，不是代码**：`controller/loop-protocols.ts` 把一条记录（标题/轮次/rubric/附加标准/固定 `vars`/默认分与次数）装配成 `LoopProtocol`，`/loop <name>` 只按名字取用。**新增一个审查协议只需往 `loop.yaml` 加一条记录并 `npm run build:prompts`，不必碰循环、slash 与 UI**；`kind` 就是记录名。状态只存在于内存并绑定当前会话，不持久化；UI 只读 `Queries.loop` 的只读快照，由叶子组件 `ui/chat/loop-status.tsx` 渲染一行 `title · step · attempt · best/target`（终态再带 `phase`；验证者提前停下时带它给的 `exit.reason`，等人时带 `interaction`），不做判断；该组件只吃 `LoopProgress`，不认识任何协议。
+
+分数必须出现在 assistant **正文**的最后一块（正文不裁剪，reasoning 会被折行），缺失、越界或 `kind` 不符都按一次失败尝试计入 `--tries`。契约文本集中在 `controller/loop-contract.ts`（`resultContract`/`followUpContract`/`verdictBrief`/`earlyStopLines`）；每轮的目标、清单与模板文本在仓库根的 `loop.yaml`，由 `controller/loop-prompts.ts` 渲染、并内联为提交进仓库的 `controller/loop-prompts.generated.ts`（`npm run build:prompts` 重新生成，`npm test` 校验二者一致）。要求回复以 `dsht-loop` 块结尾，块内至少含 `score`、`status`（`done|retry|blocked|abstained`）与 `evidence`。
+
+**提前停下只有两种**，都必须给 `reason`、都不许带 `score`：`status=blocked`（可选 `exit_reason=cannot-fix`）表示任务在当前约束下被证明无法完成，立即以 `blocked` 结束并不再消耗尝试预算；`status=abstained`（可选 `exit_reason=needs-human`，另可带 `needs`）表示必须由人决定——一期没有 `/loop answer`，所以它同样是终态（`needs-human`，headless 退出码 3，进度行显示 `interaction`）。缺 `reason`、两种判断同时给出、`exit_reason` 与 `status` 不一致、或带着 `score`，整个块都按"没有可用判断"处理：独立验证报 `unavailable`（重试 `VERIFIER_RETRIES` 次后结束），**绝不静默当成提前停下**。`explanation` 只是说明（例如"本轮无需改动"），不改变评分，也不跳过任何未验证的范围——`passed` 只表示所选范围通过。
+
+契约还要求把产出物落到工作区，并交给 **fork 出的独立验证进程**打分（自己的 session、自己的上下文，见 `loop.md`）——记录可自带 `standard`（取代已删除的会话级 `/verify`），`loop-protocols.ts` 在装配时把它叠加在每轮 rubric 之上。`resultContract` 接收 `VerificationBrief`（`standard`/`artifact`/`focus`），因此协议可以自带 rubric：`/loop design-review` 与 `/loop designdoc-review` 都用**本轮检查要点**作为标准，要求每轮写入工作区文件（分别是 `DESIGN-REVIEW.md` 与 `DESIGN-DOC-REVIEW.md`；验证者在全新上下文里只能读文件），并通过可选的 `LoopProtocol.stepLabel` 在进度行显示轮次主题。两条记录都声明了 `starts: verify`：每轮先让独立验证者检查产物现状，通过了就不花工作 turn，失败才按要求修改。**`passed` 只声称本次 run 覆盖的轮次**：`LoopProgress` 带 `total` 与 `scope`（`rounds 1–10/10`、`rounds 1–3/10 · selected range`），进度行与 headless 输出在 `passed` 时都打印它；当 `coversWholeProtocol(from, to, steps)` 为真时最后一轮是**收尾轮**，工作 brief 要求不得破坏前序要求，verdict brief 收到前面每一轮的 rubric 全文并被要求逐轮复核——因此「整份产出物通过」只可能由一次覆盖全部轮次的 run 得出。**产出物的归属是显式的**：`VerifierRequest` 携带被评审 workspace（`Controller.localDirectory`）与 artifact，验证前后在该 workspace 上比对 SHA-256 指纹，变化即作废该轮结论并重新验证；`ProcessVerifier` 不再从自己的进程目录推断路径，验证在飞时 loop 也不发送任何写入（`flushLoop` 门禁）。这仍是**检测**而非阻止：独立进程以同一 OS 用户运行，真正的只读需要 OS 级隔离。**验收不是只看分数**：记录可以声明 `artifactMarker`，客户端在采纳一次判定前自己读 `join(localDirectory, artifact)` 核对本轮小节是否存在（`Controller.settleChecked`），缺小节就置空 `score`、按一次失败尝试处理并把缺失项回灌——高分不能覆盖这个硬条件；产出物对本机不可读时不做该检查。
 
 面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由 `surfaces` 的 `keepFor` 决定）。
 
@@ -793,8 +805,8 @@ dsht [options] [list workspaces|list sessions]
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 |
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sessionHash>-<cut>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，原子重命名 |
-| 状态迁移日志 | `<state>/trace.log` | `--trace`、`DSHT_TRACE`、`DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，追加 + 每 2,000 行原子重写 |
 | 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG`、`DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，追加 + 每 1,000 行原子重写 |
+| 状态迁移日志 | `<state>/trace.log` | `--trace`、`DSHT_TRACE`、`DSHT_STATE_DIR`、`XDG_STATE_HOME` | 文件 0600，追加 + 每 2,000 行原子重写 |
 | 快捷 Prompt | `<state>/prompts.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600，原子重命名 |
 
 Cookie 文件为 `{ version: 1, origin, cookie, expiresAt }`；POSIX 下读写都会校验属主与权限（目录不得有 group/other 位、文件为 0600），并拒绝符号链接。成本文件同样在加载时校验版本、字段类型与价格合法性，并保留每个会话最大的 `cut`。`prompts.json` 为 `{ version: 1, prompts: [{ id, text }] }`，逐条校验 `id`/`text` 并跳过不可用的行；写入用 0600 临时文件加原子重命名，写失败时内存列表回滚到写入前的状态；所有增删改都在一条串行队列里"计算＋落盘"，因此连续命令不会交错写盘、文件始终与内存一致。单条上限 8 KiB、最多 500 条、按保存顺序排列、相同文本不重复保存。该列表由客户端拥有，**跨工作区与跨 host 共用**（与按 origin 分目录的成本缓存不同），保存与列出都不需要连接宿主；文件损坏只记录错误并在 `/prompt` 面板中显示，不阻止客户端启动。
@@ -917,11 +929,19 @@ C4Dynamic
 
 投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。终端**不维护第二份队列**，排队项全部来自 `session/control`；`/queue` 的删除动作调用 `session/updateQueue`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。
 
-交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如自由输入模式下用 `/cancel` 终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。提问与审批的退出语义不同：Esc 在选项模式下**放弃整组问题**——与 Web 客户端关闭按钮同一语义，以 `{ kind: 'rejected', error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } }` 结算该 waterfall，因此本地已收集的部分答案一并作废，宿主记为取消而不是回答；在 `Other answer` 里 Esc 仍先回到选项，再按一次才放弃。审批没有"取消"这个动作（与 Web 端的拒绝／允许两个按钮一致），Esc 仍只清除高亮；Ctrl+C 在两个对话框上都只清空草稿、保留待答交互。只有显式回答（审批的 1/2/3、提问的选项或自由文本）或提问上的 Esc 才终结它。
+交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。
+
+**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如自由输入模式下用 `/cancel` 终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。
+
+提问与审批的退出语义不同：Esc 在选项模式下**放弃整组问题**——与 Web 客户端关闭按钮同一语义，以 `{ kind: 'rejected', error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } }` 结算该 waterfall，因此本地已收集的部分答案一并作废，宿主记为取消而不是回答；在 `Other answer` 里 Esc 仍先回到选项，再按一次才放弃。审批没有"取消"这个动作（与 Web 端的拒绝／允许两个按钮一致），Esc 仍只清除高亮；Ctrl+C 在两个对话框上都只清空草稿、保留待答交互。只有显式回答（审批的 1/2/3、提问的选项或自由文本）或提问上的 Esc 才终结它。
 
 输入框的多行几何：composer 是"绝不吞掉对话区"的一段固定预算，而不是随内容增长的区域。`app.tsx` 由终端行数算出 body 高度（扣除根框、页眉、状态栏与一行瞬时提示），内容窗口取 `clamp(floor(body/3), 2, 5)` 再受 `body - 7` 约束，剩余行永远留给对话；列数不参与高度计算，因此横屏或宽终端只减少折行。输入内容本身保留用户粘贴的换行与制表符：`editInput` 只把 `CRLF`/`CR` 归一为 `LF` 并剥离其他控制字符，制表符在**显示**时按制表位展开、发送时保持原字节。显示行、光标行与折叠块都由 `src/ui/input/viewport.ts` 在每次渲染时从文本推导，不保存 span，因此任何编辑都无需重定位区间——这与"投影与渲染分离"的既有决策一致。多行草稿的**未折叠**视觉行数超过窗口时，仅折叠中间行（`[N lines · X KB]`），首行与末行保持可见，光标所在行因此始终可见；判定读取未折叠高度，折叠不会反过来触发自身。折叠区间对编辑是一个对象：`←`/`→` 一次跨越，区间两端的 Backspace/Delete 一次删除整块，而 Ctrl+K/Ctrl+U 等显式剪除仍按字符工作（区间随后重新推导）。一期不检测粘贴来源、不引入 bracketed paste，也不新增任何按键；↑/↓ 仍归历史回填。
 
-输入回填的覆盖范围：回填由会话级的 `PromptIndex`（`src/session/info.ts`）承担，由 `SessionController` 持有，随 `selectSession` 创建、随 `releaseTranscript` 重置。它在每次 `session/follow` 帧后增量折叠：`Transcript.promptsSince(through)` 只按序号读出比上次折进更新的原始记录并抽取 User 消息，既不重建行投影也不看窗口大小；开屏快照只覆盖最新的一小段，因此 `selectSession` 随后启动**后台回填**（`backfillPrompts`），把窗口之前的 `session/page` 逐页读进临时 `Transcript`、只提取提示词并 `prepend`，走到宿主报告没有更早记录为止（上限 200 页，切换会话即取消，且只保留提示词，所以实时记录、它的内存窗口与行缓存都不增长）。回填完成后 `markComplete()` 让索引知道自己已穷尽，此后边界按键不再发起无谓的翻页；被 200 页上限截断时会话仍可按需惰性补页。于是索引里是**会话开始至今的全部 user prompt**（连续重复合并、超大输入跳过，超出 2,000 条 / 512 KiB 的最旧一段仍可按需取回），而不是某次加载恰好覆盖的窗口；本地提交的 slash 命令不会成为持久记录，因此单独记入同一索引并标记为非持久，持久回声到达时把那一条升级为带序号而不是插入第二份。预算（默认 2,000 条 / 512 KiB）只约束内存、不决定可达性：`↑`/`Ctrl+P` 停在索引最旧一条（或索引为空）时，先由 `refillRecall()` 用读者滚动历史时的**同一份已加载窗口**补回被淘汰的提示词（`Transcript.promptsBefore`），这一步不发请求、不失焦、不显示加载提示；只有窗口本身也用尽时才走 `SessionController.older` 取回窗口之前的一页，整页没有 User 消息时在同一次有界循环里继续向前翻（每次最多 5 页，`historyPaging` 保证同时只有一次请求在飞），不会因为一页只有工具调用而卡住；`controller.perform` 期间输入框失焦，重复按键不会排队。翻到的页照旧进入实时 transcript，所以回填读过的内容也能在输入框上方滚到，历史回收在读者回到实时末端时恢复。被淘汰的条目要么仍在窗口内（回填补回）、要么在窗口之前（分页取回），所以"淘汰线"与"翻页边界"不再互相错位；`InputHistory` 时代的缺口（见 5.7.2）由此消除。
+输入回填的覆盖范围：回填由会话级的 `PromptIndex`（`src/session/info.ts`）承担，由 `SessionController` 持有，随 `selectSession` 创建、随 `releaseTranscript` 重置。它在每次 `session/follow` 帧后增量折叠：`Transcript.promptsSince(through)` 只按序号读出比上次折进更新的原始记录并抽取 User 消息，既不重建行投影也不看窗口大小；开屏快照只覆盖最新的一小段，因此 `selectSession` 随后启动**后台回填**（`backfillPrompts`），把窗口之前的 `session/page` 逐页读进临时 `Transcript`、只提取提示词并 `prepend`，走到宿主报告没有更早记录为止（上限 200 页，切换会话即取消，且只保留提示词，所以实时记录、它的内存窗口与行缓存都不增长）。回填完成后 `markComplete()` 让索引知道自己已穷尽，此后边界按键不再发起无谓的翻页；被 200 页上限截断时会话仍可按需惰性补页。于是索引里是**会话开始至今的全部 user prompt**（连续重复合并、超大输入跳过，超出 2,000 条 / 512 KiB 的最旧一段仍可按需取回），而不是某次加载恰好覆盖的窗口；本地提交的 slash 命令不会成为持久记录，因此单独记入同一索引并标记为非持久，持久回声到达时把那一条升级为带序号而不是插入第二份。
+
+预算（默认 2,000 条 / 512 KiB）只约束内存、不决定可达性：`↑`/`Ctrl+P` 停在索引最旧一条（或索引为空）时，先由 `refillRecall()` 用读者滚动历史时的**同一份已加载窗口**补回被淘汰的提示词（`Transcript.promptsBefore`），这一步不发请求、不失焦、不显示加载提示；只有窗口本身也用尽时才走 `SessionController.older` 取回窗口之前的一页，整页没有 User 消息时在同一次有界循环里继续向前翻（每次最多 5 页，`historyPaging` 保证同时只有一次请求在飞），不会因为一页只有工具调用而卡住；`controller.perform` 期间输入框失焦，重复按键不会排队。
+
+翻到的页照旧进入实时 transcript，所以回填读过的内容也能在输入框上方滚到，历史回收在读者回到实时末端时恢复。被淘汰的条目要么仍在窗口内（回填补回）、要么在窗口之前（分页取回），所以"淘汰线"与"翻页边界"不再互相错位；`InputHistory` 时代的缺口（见 5.7.2）由此消除。
 
 ```mermaid
 sequenceDiagram
@@ -1121,8 +1141,8 @@ C4Component
 | 认证 Cookie | `~/.local/state/dsht/auth/<sha256(origin)>.json` | `DSHT_AUTH_DIR`、`XDG_STATE_HOME` | 目录 0700，文件 0600 | 认证成功且服务端下发持久 Cookie 时 |
 | 价格配置 | `~/.config/dsht/prices.json` | `DSHT_CONFIG_DIR`、`XDG_CONFIG_HOME` | 目录 0700，文件 0600 | 仅首次交互启动创建；之后由用户维护 |
 | 成本缓存 | `~/.local/state/dsht/cost/<sha256(origin)>/<sha256(sessionId)>.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600 | 每个会话一个文件，写入较新 cut 时替换 |
-| 状态迁移日志 | `<state>/trace.log` | `--trace`、`DSHT_TRACE` | 0600，追加 | 每次连接代际（`begin`/`ready`/`ended`/`settled`）、选择器请求、本地工作区采用、会话解析，以及 `screen`/`session`/`workspace`/`online` 变化各一行 JSON；满 2,000 行重写。只含标识与屏幕名，不含 prompt／工具／会话正文 |
 | 内存日志 | `<state>/memory.log` | `--memory-log`、`DSHT_MEMORY_LOG` | 0600，追加 | 每 30 秒一条样本（含布局与渲染缓存计数、React 渲染 measure 计数与本次清理数、扫描工作量；带 `--expose-gc` 时另有回收后堆），满 1,000 行重写 |
+| 状态迁移日志 | `<state>/trace.log` | `--trace`、`DSHT_TRACE` | 0600，追加 | 每次连接代际（`begin`/`ready`/`ended`/`settled`）、选择器请求、本地工作区采用、会话解析，以及 `screen`/`session`/`workspace`/`online` 变化各一行 JSON；满 2,000 行重写。只含标识与屏幕名，不含 prompt／工具／会话正文 |
 | 快捷提示词 | `<state>/prompts.json` | `DSHT_STATE_DIR`、`XDG_STATE_HOME` | 0600，临时文件加原子重命名 | 启动时读取一次；`/prompt TEXT` 新增、`e` 编辑、`d` 删除时整表写回（串行队列，写失败回滚） |
 | 导出归档 | 用户指定，或 `<cwd>/session-<sanitized-id>-<Date.now()>.zip` | — | 0600，`wx` 独占 | `/export` 成功时 |
 
@@ -1179,11 +1199,21 @@ C4Component
 
 粘贴与状态面板：终端把整段粘贴作为一次输入投递，输入框把换行与制表符折叠为空格并丢弃控制字符，因此多行片段会安全地变成单行且不会误发送。展开的 `/status` 持有行偏移而非页号：`↑`/`↓` 逐行、`PgUp`/`PgDn` 翻屏、滚轮在面板打开时滚动面板本身；页脚报出可见区间并在越界时由面板通过 `onScroll` 回报收敛后的偏移；面板通过 `onOverflow` 报告自己是否需要滚动，只有需要滚动时方向键与滚轮才归它；选择器与需要滚动的状态面板接管方向键，`/help`、`/cost` 与一屏放得下的状态面板不从输入框夺走它们，`Ctrl+P`/`Ctrl+N` 在任何界面下都能召回（`tests/ui/key-routing.test.tsx` 固定整张矩阵）。
 
-选择器状态：`/ws` 与 `/resume` 的每一行都从 `session/list` 摘要读状态，不加载会话历史。用户可见状态收敛为三种，按**用户注意力**排序，并在工作区汇总、会话列表与状态栏使用同一套标记：`?` needs you（本客户端持有未回答的审批或提问，最需要处理）、`◐` working（宿主报告运行中）、`●` ready（空闲，随时可继续）。会话行前缀是标记加最近活动时间（`now`／分／时／天）；工作区行是同样标记的计数，`blank`（从未发过消息的会话）既不是状态也不进汇总，只在会话列表中保留 `○` 标记，留待后续折叠成 `+ New session`。`?` 不需要宿主新增列表投影：`$events` 的审批／提问 waterfall 本就按会话到达，且 `SessionController.waterfall()` 不按会话过滤地全部保留，`pendingCounts()` 只是把已有事实按会话计数；它属于当前连接世代，重连后要等宿主重放这些 waterfall 才会恢复。工作区汇总随宽度分档：宽屏写 `? 1 needs you · ◐ 2 working · ● 6 ready`，标题占固定左列、状态列紧随其后、路径右对齐（`workspaceDetail()` 在标题已命名最后一段时只留下父目录，路径按显示宽度从**左侧**截断）；窄屏只留 `?1 ◐2 ●6`，并在标题下给出一行 `● ready · ◐ working · ? needs you`（`ROLLUP_LEGEND`）作为图例。所有计数为零的状态都不显示，`Picker` 的表格列宽按可用列数（`PickerScreen` 传入的 composer 内宽）计算，长行不再折行。状态只取 `running`、`blank` 与本客户端的未答计数，仍不从沉默推断停滞。
+选择器状态：`/ws` 与 `/resume` 的每一行都从 `session/list` 摘要读状态，不加载会话历史。用户可见状态收敛为三种，按**用户注意力**排序，并在工作区汇总、会话列表与状态栏使用同一套标记：`?` needs you（本客户端持有未回答的审批或提问，最需要处理）、`◐` working（宿主报告运行中）、`●` ready（空闲，随时可继续）。会话行前缀是标记加最近活动时间（`now`／分／时／天）；工作区行是同样标记的计数，`blank`（从未发过消息的会话）既不是状态也不进汇总，只在会话列表中保留 `○` 标记，留待后续折叠成 `+ New session`。
+
+`?` 不需要宿主新增列表投影：`$events` 的审批／提问 waterfall 本就按会话到达，且 `SessionController.waterfall()` 不按会话过滤地全部保留，`pendingCounts()` 只是把已有事实按会话计数；它属于当前连接世代，重连后要等宿主重放这些 waterfall 才会恢复。
+
+工作区汇总随宽度分档：宽屏写 `? 1 needs you · ◐ 2 working · ● 6 ready`，标题占固定左列、状态列紧随其后、路径右对齐（`workspaceDetail()` 在标题已命名最后一段时只留下父目录，路径按显示宽度从**左侧**截断）；窄屏只留 `?1 ◐2 ●6`，并在标题下给出一行 `● ready · ◐ working · ? needs you`（`ROLLUP_LEGEND`）作为图例。所有计数为零的状态都不显示，`Picker` 的表格列宽按可用列数（`PickerScreen` 传入的 composer 内宽）计算，长行不再折行。状态只取 `running`、`blank` 与本客户端的未答计数，仍不从静默推断停滞。
 
 工作区选择器最后两项都是注册入口：`+ Add workspace (this directory)` 直接用 `Controller.localDirectory`（进程启动目录，默认为 `process.cwd()`）注册 `dsht` 自身所在目录，并且只在服务端没有同路径工作区时出现——常见的同机场景因此不必手输路径；`+ Add workspace (host directory)` 进入输入界面，输入的服务端绝对路径可以与本机文件系统不同。输入界面是独立 screen（`state.screen === 'path'`），因此 Esc 通过 `showPicker('workspaces')` 退回选择器并清空草稿：选择器的按键在草稿非空时被禁用，留下草稿会让它再也无法操作。
 
-单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`? Needs you`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。本客户端还欠一个回答时（`state.pending` 非空）`? Needs you` 优先于 `⏸ <原因>`：暂停原因只说明时钟为何不动，欠下的回答才是用户必须处理的事，展开面板的 activity 行同样改报 `? Needs you · answer the request above to continue`。阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。阶段是**当前事件**的名字与年龄，只在下一段工作开始或回合关闭时改变：工具回答之后、下一次增量到达之前它仍显示上一个工具，因此命令行之后的静默期仍被算作这个回合的工作时间，而 `● Ready` 不显示阶段——只有宿主知道回合已经结束。暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都从不从静默推断· `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00(13.00)` · 回合 · token · 缓存命中率（`hit 92%`）。命中率是缓存读取占三个互斥提示侧桶（未命中输入、缓存读取、缓存写入）之和的比例；部分命中不得四舍五入成 `100%`，先增加小数位，仍显示不出就报 `<100%`。ctx 与费用各带两种读法：ctx 只在整行仍放得下时画条状，否则退回 `ctx 30%`；费用是**一个分组里的两个作用域**——`¥: 3.00(13.00)` 的 `3.00` 是本会话，括号内的 `13.00` 是今日合计；账本还没扫到本会话时第一个数如实写 `?`。两者互不替代：用一个槽位让当日总额顶替本会话费用，会让新开的会话报出当天别处的花费。宽度不足时按命中率、token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
+单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`? Needs you`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。本客户端还欠一个回答时（`state.pending` 非空）`? Needs you` 优先于 `⏸ <原因>`：暂停原因只说明时钟为何不动，欠下的回答才是用户必须处理的事，展开面板的 activity 行同样改报 `? Needs you · answer the request above to continue`。
+
+阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。阶段是**当前事件**的名字与年龄，只在下一段工作开始或回合关闭时改变：工具回答之后、下一次增量到达之前它仍显示上一个工具，因此命令行之后的静默期仍被算作这个回合的工作时间，而 `● Ready` 不显示阶段——只有宿主知道回合已经结束。
+
+暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都不从静默推断停滞——状态栏其余部分是 `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00(13.00)` · 回合 · token · 缓存命中率（`hit 92%`）。
+
+命中率是缓存读取占三个互斥提示侧桶（未命中输入、缓存读取、缓存写入）之和的比例；部分命中不得四舍五入成 `100%`，先增加小数位，仍显示不出就报 `<100%`。ctx 与费用各带两种读法：ctx 只在整行仍放得下时画条状，否则退回 `ctx 30%`；费用是**一个分组里的两个作用域**——`¥: 3.00(13.00)` 的 `3.00` 是本会话，括号内的 `13.00` 是今日合计；账本还没扫到本会话时第一个数如实写 `?`。两者互不替代：用一个槽位让当日总额顶替本会话费用，会让新开的会话报出当天别处的花费。宽度不足时按命中率、token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
 
 展开的 `/status` 面板把相关值合并成行并采用短标签（连接／活动、会话与模式、工作区、三行指标、费用与回合、排队与任务各一行），计数采用与单行状态栏相同的紧凑单位（`400.6K/1M`、`229.7M tok`），因此 46 列下常见 11 行、24 行终端一屏可显示；错误各自占行。换行与滚动仍作为小终端的兜底。
 
@@ -1259,7 +1289,7 @@ C4Component
 
 ### 5.6 生命周期、回收与隐私边界
 
-- **回收顺序**：切会话、归档当前会话或断线时依次 `releaseHistoryLayout` → `Transcript.dispose()` → 清理行缓存与投影；`pinHistory(true)` 在阅读、搜索或展开历史期间暂停回收，`/latest` 或回到实时尾部后恢复。
+- **回收顺序**：切会话、归档当前会话或断线时依次 `releaseHistoryLayout` → `Transcript.dispose()` → 清理行缓存与投影；`pinHistory(true)` 在阅读、搜索或展开历史期间暂停回收，`/latest` 或回到实时末端后恢复。
 - **软预算**：会话窗口默认 2,000 条或 16 MiB（`--history-records`、`--history-mb` 可调），回收目标为预算的 75%，至少保留最近 `min(32, max(1, maxRecords / 4))` 条，并保护未完成的历史流与离线历史。
 - **落盘内容限制**：Cookie、价格、成本汇总与内存日志之外不写任何内容；内存日志只有计数与大小，不含提示词、工具或会话正文。成本汇总只包含会话 ID、金额与计数、当天分桶、cut、规则版本、价目表摘要与未计价原因；提示词、工具正文、回答文本、凭据与 Cookie 值都不进入成本文件。取消或失败的导出会删除不完整 ZIP。
 - **一致性**：认证 Cookie 与成本汇总文件都以“临时文件 + `rename`”原子替换；`prices.json` 只在首次启动以 `wx` 创建，之后由用户维护。成本文件内容携带 opening cursor 与规则版本，使并发或陈旧的扫描无法顶替更新的结果。
@@ -1397,9 +1427,9 @@ export interface SessionInfo {
 | 会话级面板的可见性（`thoughtList`／`queueOpen`／`models`／`historyQuery`／`searchResults`） | `SessionInfo.panels`（`session/info.ts`） | 是（已实现） | 只决定面板是否显示，但面板本身属于一个会话；行光标仍留在 `Picker`，由 `key={identity}` 重置 |
 | 待答选择器的键盘状态（`optionState`、`approvalSelection`） | App 级 `useState` | 是 | 与列表光标相反：它们必须在 `pending` 事件变化期间保留已作答内容，不能随组件卸载丢失 |
 | 引用菜单查询缓存（`lookup`） | App 级 `useState` | 否 | 按当前 draft 重新查询的宿主结果，菜单关闭即失效；只有 `reference` 的导航状态需要保留 |
-| 在途标记与派生引用（`historyPaging`、`historyLoading`、`loadingPage`、`scrollIntent`、`historyAbort`、`previousView`、`scrollPosition`、`mounted`、`displayRef`、`conversationBox`） | App 级 ref／state | 否 | 在途或派生；切换会话必须丢弃，不能当作可恢复状态 |
+| 在途标记与派生引用（`historyPaging`、`loadingPage`、`scrollIntent`、`previousView`、`scrollPosition`、`mounted`、`displayRef`、`conversationBox`） | App 级 ref／state | 否 | 在途或派生；切换会话必须丢弃，不能当作可恢复状态 |
 | help／cost／status 面板、`notice`、`removal` | App 级 | 否 | 与应用而非会话绑定；`removal` 的目标还可以是工作区（`RemovalTarget.kind === 'workspace'`），在会话存在之前就能打开 |
-| 几何、复制模式与在途标记（`conversationRows`／`statusBarRows`、`copyMode`、`historyAbort`／`loadingPage`／`scrollIntent`／`mounted`） | App 级 | 否 | 进程级或纯瞬时；切换会话必须丢弃，而不是当作状态恢复 |
+| 几何、复制模式与在途标记（`conversationRows`／`statusBarRows`、`copyMode`、`loadingPage`／`scrollIntent`／`mounted`） | App 级 | 否 | 进程级或纯瞬时；切换会话必须丢弃，而不是当作状态恢复 |
 
 这条判据也解释了"当前等待执行的 input"为什么不复制进 `SessionInfo`：它已经是按 `sessionId` 键的宿主镜像（`Telemetry.queues`，`ui/app.tsx` 读 `controller.telemetry.pending(state.sessionId)`）。要统一的是它的**访问方式**，不是它的存储位置；把镜像搬进会话容器只会得到两份会在重连时分叉的队列。同理，"当前渲染窗口"里属于会话的只有**显示哪份记录、滚到哪、哪些块展开**（`view`），而记录内容本身仍由 `Transcript` 拥有。
 
@@ -1429,7 +1459,7 @@ export interface SessionInfo {
 | `Transcript` 的事件、游标、`ready`／`hasMore`、`promptBeforeWindow`、thought index | 由 `record` 强引用持有，不复制字段 |
 | `history.ts` 的 `indexes`（`WeakMap<Transcript, LayoutIndex>`）、`liveRows`／`liveWraps`／`liveMarkdown` | 不进入（弱引用缓存） |
 | `lookup` | 不进入（按当前 draft 重算） |
-| `historyPaging`／`historyLoading`／`loadingPage`／`scrollIntent`／`historyAbort`／`previousView`／`scrollPosition`／`mounted`／`displayRef`／`conversationBox` | 不进入（在途或派生） |
+| `historyPaging`／`loadingPage`／`scrollIntent`／`previousView`／`scrollPosition`／`mounted`／`displayRef`／`conversationBox` | 不进入（在途或派生；在前台槽位里的是 `controller.foreground`，不是 UI 状态） |
 | `conversationRows`／`statusBarRows`／`statusOverflow`／`statusScroll`／`helpPage` | 不进入（几何与应用级面板） |
 | `copyMode`／`help`／`costExpanded`／`statusExpanded`／`notice`／`removal` | 不进入（应用级） |
 
@@ -1474,7 +1504,7 @@ export interface SessionInfo {
 
 ### 7.2 决策记录（Agent Notes）
 
-设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（32 篇）、`bug-fix/`（5 篇）与 `feature/`（18 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences；英文、中文与 `.i18n.yaml` 三项配对目前有一处缺口——`architecture/2026-09-15-session-interactions-and-prompt-recall` 只有英文，缺中文与配对文件（本文核对时）。变更非平凡行为时应新增同目录的 note，并按 7.7 补齐三项配对。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
+设计决策记录在 `tui/.agents/notes/implemented/`，分为 `architecture/`（32 篇）、`bug-fix/`（5 篇）与 `feature/`（19 篇），每篇包含 Problem / Decision / Alternatives considered / Consequences；英文、中文与 `.i18n.yaml` 三项配对目前有一处缺口——`architecture/2026-09-15-session-interactions-and-prompt-recall` 只有英文，缺中文与配对文件（本文核对时）。变更非平凡行为时应新增同目录的 note，并按 7.7 补齐三项配对。`.gitignore` 忽略整个 `.agents/`，但已实现的 note 已被跟踪，因此新增 note 必须用 `git add -f` 显式加入，否则只留在本地工作区。
 
 下表是影响面较大的决策选摘，不是全量清单；完整列表见该目录本身。
 
@@ -1497,8 +1527,8 @@ export interface SessionInfo {
 | `architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` | 九条无豁免禁边、wire 归一化（`HostEvent`/`ControlFrame`）、`SessionRuntime`、状态就近持有、`slash/` 纯语法、Controller 拆生命周期/Actions/Queries、朴素 UI 契约 |
 | `architecture/2026-09-11-terminal-approval-options` | 审批编号选择器、未选中起始、Esc 与重放重置 |
 | `architecture/2026-09-11-terminal-storage-unit` | 文件操作统一归属 `src/storage/`，由依赖门禁强制 |
-| `architecture/2026-09-19-terminal-transition-trace` | 默认启用的有界状态迁移日志（连接代际、选择器、工作区采用、会话解析、屏幕／选中项变化），回答"屏幕为什么自己动了" |
 | `architecture/2026-09-11-terminal-memory-log` | 默认启用的有界运行时内存日志，区分真实保留与 V8 高水位 |
+| `architecture/2026-09-19-terminal-transition-trace` | 默认启用的有界状态迁移日志（连接代际、选择器、工作区采用、会话解析、屏幕／选中项变化），回答"屏幕为什么自己动了" |
 | `feature/2026-09-12-terminal-question-dismiss` | 提问的 Esc 放弃整组问题，以 `ASK_CANCELLED` 结算 |
 | `feature/2026-09-12-terminal-recall-full-history` | 回填在窗口边界处向前翻页，覆盖客户端连接之前的提示词 |
 | `feature/2026-09-14-terminal-prompt-index` | 回填改由会话提示词索引承担；预算淘汰可重载，消除旧缓冲在提交后的可达性缺口 |
@@ -1511,19 +1541,20 @@ export interface SessionInfo {
 | `feature/2026-09-14-terminal-shared-history-read` | 计费扫描把已读页面交给进程级 `PromptCache`；扫描之后打开会话 0 请求 |
 | `feature/2026-09-14-terminal-local-shell-commands` | `!` 在客户端机器上执行并把命令与输出内联进对话；新增 `shell/` 领域与进程执行门禁 |
 | `feature/2026-09-14-terminal-local-workspace-adoption` | 在已注册工作区目录里启动时直接采用该工作区，跳过工作区选择器 |
+| `feature/2026-09-19-terminal-version-flag` | 版本号只写在 `package.json`：`dsht --version` 读出它，README 与设计文档不再重复字面量，一次发布只改两个文件 |
 | `bug-fix/2026-09-14-terminal-reclaim-pin-and-cache-bounds` | 移除无清除边的回收保护；缓存与索引在超预算时截断且不再声称穷尽 |
 
 ### 7.3 文档配对
 
 `README.md` 与 `README.zh.md` 是逐行对齐的双语对：每个标题、段落、列表项、表格行与代码块在两侧占同一物理行；`README.i18n.yaml` 记录评审过的 git blob 哈希。修订任一侧都必须在同一位置改另一侧，并重新记录哈希。表格行之间不得有空行，否则 GitHub 与 npm 不再渲染为表格。
 
-内容分工：`README.md`／`README.zh.md` 面向使用者与贡献者的操作说明；本文件是**维护者**的架构与接口基线，`README` 中的同批事实若与本文件冲突，以本文件为准。`tui-refactor-plan.md` 是已实施的分层重构方案记录（状态见其文件头），`cost.md` 是计费方案的评审稿，两者的架构结论都以本文件为准。`tui/` 没有独立的 `CONTRIBUTING.md`：贡献与验证流程的事实源是本文件的 7.4（提交、版本与发布）、7.5（测试与验证）与 7.7（变更检查清单）。`loop.md` 是 `/design-review`、`/designdoc-review`、`/loop`、`/verify` 这条验证路径的设计记录：该路径的机制、verdict 文件契约与失败语义以它为准，本文 3.2／3.4 只记它与门面、UI 相接的接口面；`tui/` 架构分层、贡献与发布流程、计费与宿主协议字段仍以本文及各自文档为准。
+内容分工：`README.md`／`README.zh.md` 面向使用者与贡献者的操作说明；本文件是**维护者**的架构与接口基线，`README` 中的同批事实若与本文件冲突，以本文件为准。`tui-refactor-plan.md` 是已实施的分层重构方案记录（状态见其文件头），`cost.md` 是计费方案的评审稿，两者的架构结论都以本文件为准。`tui/` 没有独立的 `CONTRIBUTING.md`：贡献与验证流程的事实源是本文件的 7.4（提交、版本与发布）、7.5（测试与验证）与 7.7（变更检查清单）。`loop.md` 是 `/loop <name>`（含 `design-review` 与 `designdoc-review` 两条记录）这条验证路径的设计记录：该路径的机制、verdict 文件契约与失败语义以它为准，本文 3.2／3.4 只记它与门面、UI 相接的接口面；`tui/` 架构分层、贡献与发布流程、计费与宿主协议字段仍以本文及各自文档为准。
 
 本文件（`tui/tui-design.md`）位于 `tui` 仓库根目录，与源码同仓，但不在父仓库文档门禁（翻译配对、`verify-mermaid`、`verify-md-links`、`verify-md-wrap`）的扫描范围内，也不进入 `tui` 包的发布集合（`package.json` 的 `files`）。它是单语技术文档，因此不参与 README 的双语配对。
 
 ### 7.4 提交、版本与发布
 
-提交信息使用 Conventional 前缀：`feat`、`fix`、`docs`、`refactor`、`test`、`release`、`ci`。版本号在 `package.json` 中手工提升，发布由标签驱动。
+提交信息使用 Conventional 前缀：`feat`、`fix`、`docs`、`refactor`、`test`、`release`、`ci`。版本号只在 `package.json` 中手工提升（`npm version <v> --no-git-tag-version` 会连同 `package-lock.json` 一起改），发布由标签驱动；README、设计文档与源码都不重复版本字面量，用户用 `dsht --version` 查看，因此一次发布只改 `package.json` 与 `package-lock.json` 两个文件，`README.i18n.yaml` 只在 README 正文变化时重录。
 
 本地校验与发布命令：
 
@@ -1586,7 +1617,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 ### 7.8 提交序列（重构与后续）
 
-模块化重构拆成五个可独立校验的提交，顺序为机械移动 → 语义变更 → 状态机 → 界面 → 边界，便于 review 与 bisect；每一步都在该提交上运行 `npm run typecheck` 与 `npm test`。下表从这五个提交开始，继续按时间记录其后的提交序列。
+模块化重构拆成五个可独立校验的提交，顺序为机械移动 → 语义变更 → 状态机 → 界面 → 边界，便于 review 与 bisect；每一步都在该提交上运行 `npm run typecheck` 与 `npm test`。下表从这五个提交开始，记录 2026-09-11 这一批提交序列（`e3a921e`…`0b837d7`，共 30 条）；此后的提交属于新的历史切片，不在本表续记。
 
 | 提交 | 范围 | 该提交的验证 |
 | --- | --- | --- |
@@ -1606,7 +1637,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `74b9bf9` `docs: record the memory-log commit in the design document` | 在 7.8 记录内存日志提交（2 增 1 删） | 文档改动 |
 | `fc378de` `fix: write the memory-log header when the file is created` | 新文件首次写入即带格式表头；新增测试固定该行为 | typecheck + 137 项测试 |
 | `5a60a7e` `docs: mark the memory-log commits as verified` | 在 7.8 中记录内存日志提交的验证结论 | 文档改动 |
-| `e9ea13b` `perf: wrap the growing live tail incrementally` | 实时部分带稳定 `key`，布局保存已定稿行与最后一行残余来源；折叠推理同样限制输入来源 | typecheck + 140 项测试 + `test:terminal` |
+| `e9ea13b` `perf: wrap the growing live tail incrementally` | 实时尾部带稳定 `key`，布局保存已定稿行与最后一行残余来源；折叠推理同样限制输入来源 | typecheck + 140 项测试 + `test:terminal` |
 | `11e04ca` `docs: refresh the source index and describe the incremental live wrap` | 附录 A 逐行重新核对行数并补上缺失文件；2.5／2.6／3.2.3／4.2／5.3／6 描述增量换行 | 14 个 Mermaid 块解析通过；附录合计 5,245 行与源码一致 |
 | `0aea3aa` `test: measure whole-text and incremental live wrapping` | `bench:history` 增加长单段流的整段换行与增量布局对比 | `npm run bench:history` |
 | `b634d4f` `docs: cite the wrapping benchmark in the live-wrap note` | Agent Note 引用已提交的基准数据并刷新配对哈希 | 配对哈希一致 |
@@ -1669,7 +1700,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 
 | 文件 | 关键导出 |
 | --- | --- |
-| `contracts.ts` | `SavedPrompt`、`PanelName`、`LoopProgress`、`CommandIntent`，以及供 `ui/` 使用的只读类型再导出 |
+| `contracts.ts` | `SavedPrompt`、`PanelName`、`LoopProgress`、`CommandResult`／`ViewEffect`、`ForegroundSnapshot`，以及供 `ui/` 使用的只读类型再导出 |
 
 **storage**
 
@@ -1702,12 +1733,10 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/history.ts` | `Reasoning`、`RowKind`、`HistoryRow`、`releaseHistoryLayout`、`layoutStats`、`SessionRender`、`historyLayout` |
 | `session/index.ts` | `SessionController`、`contentText`、`Transcript`、`toolLine`、`historyLayout`、`layoutStats`、`releaseHistoryLayout`、`markdownCacheStats`、`Telemetry`、`DEFAULT_HISTORY_LIMITS`、`historyLimits`、`DEFAULT_PROMPT_LIMITS` |
 | `session/info.ts` | `PromptRecord`、`PromptEntry`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText`、`ModelState`、`PanelState`、`OptionState`、`InteractionState`、`SessionInfo`、`PromptIndex`、`DEFAULT_PROMPT_CACHE_BYTES` |
-| `session/interactions.ts` | `PendingInteractions` |
 | `session/markdown.ts` | `MarkdownSpan`、`MarkdownRow`、`markdownCacheStats`、`hasMarkdown`、`markdownRows`、`markdownHtml` |
 | `session/math.ts` | `renderMath` |
 | `session/memory.ts` | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
 | `session/navigation.ts` | `resolveTarget` |
-| `session/prompts.ts` | `PromptRecall` |
 | `session/references.ts` | `fileReferences` |
 | `session/runtime.ts` | `SessionRuntime` |
 | `session/telemetry.ts` | `Telemetry` |
@@ -1758,17 +1787,18 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `controller/connection.ts` | `ConnectionOptions`、`ConnectionListener`、`ConnectionController` |
 | `controller/controller.ts` | `Actions`、`Queries`、`Controller` |
 | `controller/commands.ts` | `RunnableCommand`、`CommandPort`、`runCommand`、`removalIntent` |
-| `controller/index.ts` | `Controller`、`ConnectionController`、`runCommand`、`removalIntent`、`resolveLoop`、`parseLoopResult`、`ScoredLoop`、`designReviewProtocol`、`designdocReviewProtocol`、`promptLoopProtocol`、`resultContract`、`followUpContract`、`PromptStore` |
-| `controller/loop.ts` | `LoopLimits`、`LoopProtocol`、`LoopResult`、`LoopStepResult`、`resolveLoop`、`parseLoopResult`、`latestAssistantText`、`ScoredLoop` |
-| `controller/design-review.ts` | `DESIGN_REVIEW_ROUNDS`、`DESIGN_REVIEW_ARTIFACT`、`designReviewProtocol` |
-| `controller/designdoc-review.ts` | `DESIGNDOC_REVIEW_ROUNDS`、`DESIGNDOC_REVIEW_ARTIFACT`、`designdocReviewProtocol` |
-| `controller/loop-contract.ts` | `LOOP_MARKER`、`LOOP_STATUSES`、`VerificationBrief`、`resultContract`、`followUpContract` |
-| `controller/loop-prompt.ts` | `promptLoopProtocol` |
-| `controller/trace-log.ts` | `TraceLog`、`readTrace` |
+| `controller/index.ts` | `Controller`、`ConnectionController`、`runCommand`、`removalIntent`、`resolveLoop`、`parseLoopResult`、`ScoredLoop`、`loopProtocolFor`、`loopProtocolNames`、`roundStandard`、`resultContract`、`followUpContract`、`LOOP_MARKER`、`LOOP_STATUSES`、`PromptStore` |
+| `controller/loop.ts` | `LoopLimits`、`LoopProtocol`、`LoopResult`、`VerifyTarget`、`PriorVerdict`、`LoopStepResult`、`resolveLoop`、`coversWholeProtocol`、`parseLoopResult`、`readResultFields`、`latestAssistantText`、`ScoredLoop` |
+| `controller/loop-contract.ts` | `LOOP_MARKER`、`LOOP_STATUSES`、`earlyStopLines`、`VerificationBrief`、`VerdictBrief`、`resultContract`、`followUpContract`、`findingsLines`、`verdictBrief`、`parseVerdict` |
+| `controller/loop-protocols.ts` | `loopProtocolFor`、`loopProtocolNames`、`roundStandard` |
+| `controller/loop-prompts.ts` | `loopPrompts`、`LoopPrompts`、`LoopPromptText`、`LoopPromptValues`（并再导出 schema 的类型） |
+| `controller/loop-prompts-schema.ts` | `validateLoopPrompts`、`LOOP_PLACEHOLDERS`、`RESERVED_PROTOCOL_NAMES`、`LoopPromptSource`、`LoopProtocolText`、`LoopRoundText` |
+| `controller/loop-prompts.generated.ts` | `LOOP_PROMPTS`（由 `loop.yaml` 生成，不手改） |
 | `controller/memory-log.ts` | `MemoryLog` |
+| `controller/trace-log.ts` | `TraceLog`、`readTrace` |
 | `controller/perf-measures.ts` | `reactMeasureNames`、`clearReactMeasures`、`measureCount` |
 | `controller/prompts.ts` | `SavedPrompt`、`MAX_PROMPT_CHARS`、`MAX_SAVED_PROMPTS`、`PromptStore` |
-| `controller/verifier.ts` | `verificationId`、`verdictDirectory`、`verdictFile`、`VerifierRequest`、`VerifierOutcome`、`VerifierPort` |
+| `controller/verifier.ts` | `verificationId`、`verdictDirectory`、`verdictFile`、`VerifierRequest`、`VerificationHumanRequest`、`NEEDS_HUMAN_MARKER`、`needsHumanLine`、`parseNeedsHumanLine`、`VerifierOutcome`、`VerifierPort` |
 
 **ui**
 
@@ -1792,7 +1822,6 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/input/references.tsx` | `ReferenceMenu` |
 | `ui/input/viewport.ts` | `TAB_WIDTH`、`FoldRegion`、`DraftRow`、`CursorPlace`、`DraftPlan`、`tabStop`、`byteLength`、`formatBytes`、`wrapDraft`、`cursorPlace`、`windowRows`、`planDraft` |
 | `ui/mount.tsx` | `mount` |
-| `ui/routing.ts` | `Routed`、`RouteFacts`、`routeEnter` |
 | `ui/status/model.ts` | `costText` |
 | `ui/theme/index.ts` | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
 
@@ -1815,7 +1844,7 @@ C4Component
   Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, interactions, prompts, index", "记录、投影、提示词索引与回填")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "价格、账本与扫描")
   Component(catalog, "catalog/", "controller, index", "模型路由与 preset")
-  Component(controller, "controller/", "controller, commands, loop, loop-contract, loop-prompt, design-review, designdoc-review, verifier, connection, memory-log, perf-measures, prompts, index", "门面、命令策略与评分循环")
+  Component(controller, "controller/", "controller, commands, loop, loop-contract, loop-protocols, loop-prompts, loop-prompts-schema, loop-prompts.generated, verifier, connection, memory-log, trace-log, perf-measures, prompts, index", "门面、命令策略与评分循环")
   Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "Ink 渲染与交互")
   Component(cli, "cli/", "index, dsht, startup, verifier", "参数、启动与进程生命周期")
   Component(shell, "shell/", "controller, runner, index", "本地 ! 命令")
@@ -1830,7 +1859,9 @@ C4Component
   Rel(ui, cli, "被依赖")
 ```
 
-## 附录 B 术语与不变量
+## 附录 B 术语表
+
+本表只登记**术语**与规范用词；状态机与必须保持的不变量清单在 4.7（状态表上方的「必须保持的不变量」列表）。同一概念只用一个词：实时区域写「实时尾部」，实时位置写「实时末端」，不写「实时部分」；一律写「静默」，不写「沉默」。
 
 | 术语 | 含义 |
 | --- | --- |
@@ -1851,3 +1882,12 @@ C4Component
 | 域边界（domain boundary） | 目录与其允许导入集合；由 `tests/architecture/dependencies.test.ts` 机械检查 |
 | `SessionInfo`（设计，见 5.7） | 一个被选中会话的客户端状态容器，持有其 `Transcript` 引用；与记录同寿命创建与释放 |
 | 提示词索引 `prompts`（设计，见 5.7.4） | 会话开始至今的全部 user prompt，按 `seq` 升序、只追加、不合并重复、不以牺牲可达性为代价淘汰 |
+| 投影（projection） | 把宿主事件折叠成终端可读的语义表示（消息、阶段、行）；`Transcript` 与 `historyLayout` 负责，见 2.5 |
+| 记录（record） | 宿主持久会话历史的本地副本；权威在宿主，副本可随时丢弃重载，见 5.3／5.6 |
+| 回填（backfill） | 打开会话时后台分页遍历整段历史，把全部 user prompt 折入 `PromptIndex` 并标记穷尽，见 4.3 |
+| 扫描（scan） | `CostController` 按页读取会话记录、折叠用量样本并更新账本切片，见 4.5／6 |
+| 折叠（fold） | 按规则把多条样本或事件归并成一条表示（账本总额、transcript 消息行），不改变被折叠内容，见 2.5／6 |
+| 账本（ledger） | 按会话的成本汇总（金额、计数、当天分桶、cut、规则与价目表版本）及其覆盖度，见 5.2.3／6 |
+| 视口（viewport） | 当前渲染窗口（终端可见行区间）及其滚动与回收状态，见 2.5／5.3 |
+| 实时尾部（live tail） | 仍在追加、尚未定稿的助手流所在的尾部区域；按稳定 `key` 增量重排，见 2.5／4.2 |
+| 实时末端（live end） | 实时尾部的最末位置；`setScroll(0)` 即回到该位置，见 5.2.5 |

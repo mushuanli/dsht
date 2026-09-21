@@ -1,0 +1,208 @@
+# Loop protocol text: one record per scored loop, named by its key. `/loop <name>` runs one.
+#
+# This file is the source of truth for what an agent and its verifier are told. The mechanical
+# contract (result block, verdict brief, retry clause) stays in src/controller/loop-contract.ts;
+# this file holds the objective, the rubric, the templates and the fixed inputs of one record.
+# Placeholders are written {{like_this}} and are filled by src/controller/loop-prompts.ts from the
+# runtime values plus the record's own `vars`:
+#   {{from}} {{to}} {{score}} {{tries}} {{step}} {{attempt}} {{title}} {{artifact}} {{checks}}
+# `{{checks}}` must appear on a line of its own and expands to the round's rubric.
+#
+# A record may declare:
+#   title / steps / artifact / artifactMarker / fallbackLabel / verifyFocus / rounds / brief / followUp
+#   starts:   verify (check the existing artifact first) or work (default: ask for work first)
+#   artifactMarker: a template for the line the artifact must contain once a round is done (e.g. its
+#             section heading). The client checks it itself before accepting a round, so a high score
+#             cannot pass a round whose output never reached the file. Needs `artifact`.
+#   standard: extra requirements folded on top of every round's rubric (replaces `/verify`)
+#   vars:     the record's inputs and their defaults, e.g. the document a review targets. `/loop`
+#             shows one editable row per name, so a run retargets the record without editing this file
+#   defaults: score / tries for this record, overriding the global ones below
+#
+# The LAST round must be the consolidation round that covers the whole goal: a run over the whole
+# record (rounds 1 through `steps`) marks that round as the final one, hands its verifier every
+# earlier round's rubric to re-check, and only then may "passed" mean the whole artifact rather than
+# just the rounds that happened to run.
+#
+# After editing, run `npm run build:prompts` to regenerate src/controller/loop-prompts.generated.ts;
+# `npm test` fails when the generated file is stale. A record named `answer` or `abort` is refused,
+# because those are `/loop` subcommands rather than protocols.
+
+version: 1
+
+# Defaults used when a record declares none and the command omits them.
+defaults:
+  score: 8
+  tries: 10
+
+protocols:
+
+  # /loop design-review: architecture and module-design review, ten rounds.
+  design-review:
+    title: "Design review"
+    steps: 10
+    # A review of something that already exists verifies first; work only happens if a round fails.
+    starts: verify
+    artifact: "DESIGN-REVIEW.md"
+    # The section the round's conclusion must land in; the client checks it, the verifier does not.
+    artifactMarker: "## 第 {{step}} 轮 · {{title}}"
+    defaults:
+      score: 8
+      tries: 10
+    # Label a step outside the rounds gets; the checks fall back to the last round's.
+    fallbackLabel: "收敛审查"
+    verifyFocus: "第 {{step}} 轮 · {{title}}"
+    rounds:
+      - title: "职责与归属"
+        checks: >-
+          逐个模块/类/服务/Store/Controller/组件：它为什么存在？核心职责能否一句话说明？是否只有一个变化原因？是否混合了不同生命周期的职责？是否因"方便统一管理"承担了不属于自己的职责？状态与行为真正属于谁？是否有
+          God Object/God Module 趋势？重点找：表现层状态进入业务层、基础设施细节进入业务模型、一个模块同时承担数据/控制/格式化/网络/持久化、顶层协调器做了本应模块自己做的事、通用模块变成所有功能的中心。
+      - title: "依赖关系"
+        checks: >-
+          按真实 import/调用/类型引用画依赖图，不看目录名。逐条检查：不必要依赖？同层横向依赖？隐藏的 type-only 依赖？上层直接依赖底层实现？底层反向理解上层业务？表现层直接依赖业务服务或基础设施？是否用
+          common/shared/types/barrel/facade/helper 隐藏真实耦合？特别警惕"只是 import type""只是 getter""只是 facade""只是 barrel""只是公共
+          helper"。
+      - title: "接口审查"
+        checks: >-
+          逐个检查 public API、参数、返回值、props 与跨模块数据：调用者真的需要整个对象吗？只用到几个字段吗？是否获得了超出需要的能力？是否暴露内部实现类型或 mutable
+          state？能否换成更小、更稳定、更语义化的数据结构？参数表达的是业务意图还是实现方式？优先 plain object、readonly array、判别联合、最小 callback、语义化
+          DTO/Snapshot/Result；避免跨边界传 Controller/Service 实例、数据库/Client/Connection、内部状态容器、mutable
+          collection、原始协议对象、Json/any/unknown 逃生口、巨大 Context/Actions/Manager。遵循最小能力原则。
+      - title: "状态审查"
+        checks: >-
+          对每个状态问：谁拥有、谁修改、谁读取、生命周期是什么、是否需要持久化、是否需要跨模块共享、能否由其他状态计算得到？状态应靠近真正使用者：组件能持有就不上提模块 Store，模块能持有就不上提全局
+          Store，能派生就不重复存储。重点检查 source state 与 derived state 是否被同时长期保存，避免多个事实源。
+      - title: "变化传播测试"
+        checks: >-
+          不要只看"能工作"，要测变化传播多远。A 外部协议/API/数据格式变化：理想只影响 infrastructure/adapter/mapper，若业务与 UI 大面积修改说明协议泄漏。B
+          UI/表现形式变化（布局、CLI→Web、状态栏字段、颜色/排序/折叠）：理想只影响表现层，若业务逻辑随之改动说明表现语义泄漏。C 核心业务规则变化（算法、计费、校验、状态机）：理想只影响对应功能模块。D
+          新增一个功能：需要改多少旧模块？是否必须改巨大中央 Controller 或 shared/common/core？是否要在多处加同一个 case？理想是新增代码多、修改旧代码少。
+      - title: "删除式审查"
+        checks: >-
+          假设当前方案"基本正确"，专门寻找可以删除的东西：哪个目录/interface/abstraction 没有独立语义？哪个 facade 只是原样转发？哪个 barrel 只隐藏真实路径？哪个 Store
+          abstraction 只是重复 get/set/update？哪个 ViewModel/read-model/adapter 是不必要的中间层？哪个 Controller 方法应该消失？哪个 DTO
+          只为满足架构形式而存在？哪个公共类型只为绕开依赖规则？哪些只为"看起来更分层"？原则：若 A→B→C 而 B 只原样转发/返回、无独立策略与稳定语义、不隔离变化，优先 A→C。
+      - title: "反证当前方案"
+        checks: >-
+          假设当前方案是错的，主动寻找它未来最可能坏掉的方式：哪个新模块会成为下一代 God Object？哪个 Store 会成为所有状态的垃圾场？哪个 Controller 会重新变成所有功能入口？哪个
+          shared/common/types 会变成公共垃圾场？哪个 read-model 会成为所有数据的中央聚合器？哪个 UI root 会重新成为巨型状态机？哪个 Snapshot
+          暴露过多内部信息？哪个"解耦层"只是把依赖搬到了别处？是否为了禁止依赖制造大量
+          DTO/Adapter/Port？是否为了低耦合增加过多中间层？是否为了满足模式提高理解与修改成本？对每个发现继续问：能否通过删除而不是新增架构来解决？
+      - title: "一致性检查"
+        checks: >-
+          把设计文档、接口定义、依赖规则与状态归属交叉检查，列出所有矛盾：原则说 A 不能依赖 B 但代码或依赖表允许；声称边界是 plain data 但接口仍暴露内部对象；声称 Query
+          无副作用但实际写操作；声称某层不知道某模块但通过 types/barrel 间接引用；同一状态在不同章节归属不同；同一概念有多个事实源；架构图与实际 import 方向不一致；命名表达的职责与真实职责不一致。
+      - title: "过度设计检查"
+        checks: >-
+          单独检查是否超过实际问题所需复杂度：当前规模真的需要这些层吗？这个 abstraction
+          今天解决了什么具体问题？删除它真正会失去什么？是否只为未来"可能"的需求？能否等第二个真实用例出现再抽象？是否为了测试而制造生产代码复杂度？是否为了依赖倒置创建大量同形接口？是否为了目录整齐增加无语义的层？遵循 Rule
+          of Three：第一次直接实现，第二次允许少量重复，第三次模式稳定后再抽象。
+      - title: "最终收敛"
+        checks: >-
+          完成前面所有检查后重新整体审查一次，禁止再引入新的架构模式。只判断：当前设计是否已经足够简单？哪些是 P0 必须修改？哪些是 P1
+          值得修改？哪些只是理论洁癖应保持现状？哪些抽象应该删除？哪些状态应该移动？哪些接口应该缩小？哪些依赖应该禁止？最终推荐的依赖关系是什么？是否已到"停止设计、开始实施"的阶段？
+    brief:
+      - "你是一名资深软件架构师。请对下面的软件架构、模块设计、代码组织或重构方案进行系统审查。"
+      - ""
+      - "审查范围：第 {{from}} 轮到第 {{to}} 轮；每轮及格线 {{score}} 分（0–10，允许小数）；每轮最多 {{tries}} 次尝试。"
+      - "本次只执行第 {{step}} 轮的第 {{attempt}} 次尝试。完成这一轮后立即停止，不要自行进入后续轮次或重复尝试。"
+      - "本轮通过只代表本轮达标，不代表整个目标通过；尚未运行的轮次仍然必须运行。"
+      - ""
+      - "你的目标不是套用 MVC、DDD、Clean Architecture、Hexagonal、CQRS、DI 等架构模式，而是寻找最简单、最稳定、最容易长期维护的边界。"
+      - ""
+      - "优先目标（冲突时按此顺序决策）："
+      - "1 高内聚 > 模式完整；2 低耦合 > 目录漂亮；3 最小接口 > 通用接口；4 明确归属 > 全局统一；"
+      - "5 局部状态 > 全局状态；6 单一事实源 > 同步多个副本；7 删除抽象 > 新增抽象；8 真实需求 > 未来假设；"
+      - "9 可维护性 > 理论纯洁；10 简单直接 > 架构炫技。"
+      - "不要因为模式名词本身而引入复杂度；只有某个模式确实解决已存在的问题时才使用。"
+      - ""
+      - "本轮主题：第 {{step}} 轮 · {{title}}"
+      - "本轮检查要点："
+      - "{{checks}}"
+      - ""
+      - "输出要求：不要输出冗长的内部思维过程，只输出——"
+      - "- 发现的问题"
+      - "- 判断依据"
+      - "- 修改建议"
+      - "- 修改后减少了什么耦合或复杂度"
+      - "- 本轮收敛结论"
+      - ""
+      - >-
+        每轮结论必须写入工作区文件 {{artifact}} 的 “## 第 {{step}} 轮 · {{title}}”
+        小节：不存在则创建，已存在则替换该小节，不要覆盖其它轮次。验证者会直接读这个文件。若工作区不可写，则在正文给出完整内容并在 evidence 中说明。
+      - "若本轮确实没有可改进项，请如实在 status 中给 done 并说明无需改进，不要为了触发重试而压低分数。"
+    followUp:
+      - "现在是第 {{step}} 轮、第 {{attempt}}/{{tries}} 次尝试（及格线 {{score}}）。"
+      - "阅读上面的结果、意见与建议，按第 {{step}} 轮（{{title}}）的要求继续改进；"
+      - "上一版未解决、未回应的 blocking 问题必须逐条处理，并更新工作区文件 {{artifact}} 中本轮的小节。"
+
+  # /loop designdoc-review: review one design document against the code it describes.
+  designdoc-review:
+    title: "Designdoc review · {{path}}"
+    steps: 10
+    starts: verify
+    artifact: "DESIGN-DOC-REVIEW.md"
+    artifactMarker: "## 第 {{step}} 轮 · {{title}}"
+    # The document under review, relative to the reviewed workspace. A different document means
+    # editing this one line, not adding a command back.
+    vars:
+      path: "tui-design.md"
+    defaults:
+      score: 8
+      tries: 10
+    fallbackLabel: "收敛结论"
+    verifyFocus: "第 {{step}} 轮 · {{title}}"
+    rounds:
+      - title: "定位与范围"
+        checks: >-
+          这份文档为谁写、承诺记录什么/不记录什么、覆盖哪些模块与边界？是否有明确的边界声明（本文不是规范/不覆盖什么）？与 README、CONTRIBUTING 的分工是否说清？若读者只关心一个子系统，能否从目录直接找到入口？
+      - title: "结构与导航"
+        checks: "章节层级是否可预期、能否只读一节就完成一项任务？术语是否统一并有定义或术语表？交叉引用是否指向存在的锚点/章节？篇幅与信息密度是否匹配，是否有大段可压缩的叙述？"
+      - title: "与代码一致性"
+        checks: >-
+          把文档里的每条结构性声明与实际代码对照：目录依赖规则与 import 边界、导出符号与文件清单、状态归属与生命周期、命令表与 CLI 选项、宿主端点与帧结构。逐条列出「文档说 A、代码做
+          B」的差异，并给出代码侧证据（文件:符号）。
+      - title: "完整性与悬空引用"
+        checks: >-
+          文档引用的文件、符号、章节、命令、参数是否存在？关键决策是否记录了原因与取舍，而不只是结论？反过来看：代码里重要的机制（谁拥有状态、谁负责回收、失败如何传播）是否在文档中有位置？列出悬空引用与缺失章节。
+      - title: "准确性"
+        checks: "具体数字（行数、文件数、条数、上限、默认值）、路径、命令、参数、时序（谁在何时写、何时释放）是否与实现一致？示例命令能否直接运行？表格里的计数是否与当前 HEAD 相符？逐条给出实测值与文档值。"
+      - title: "单一事实源"
+        checks: "同一概念是否在多处重复定义、可能互相漂移（例如同一状态在不同章节归属不同、同一默认值写了两遍、同一路径出现三种写法）？是否有一处权威定义、其它处只引用？指出所有多事实源并建议唯一的归属位置。"
+      - title: "可维护性"
+        checks: "文档是否写明「什么变化必须同步更新本文」？易腐内容（行数、文件计数、依赖表、截图）是否有维护约定或生成方式？更新一次的成本是否被控制（能否只改一处）？哪些内容应当改为指向代码/生成物而不是复制？"
+      - title: "可执行性"
+        checks: "一个新人能否照着文档跑起来、定位代码、完成一次改动？是否给出验证方式（命令、测试、断言）？是否存在只有作者才懂的隐含前提（环境变量、前置步骤、未写明的约定）？把最小可执行路径写出来并指出缺口。"
+      - title: "删减与过时"
+        checks: "与当前 HEAD 漂移的历史章节、已被取代的决策、重复段落、失去意义的例子分别是什么？哪些内容删除后不损失信息？哪些\"未来计划\"只是假设、应当删除或标注状态？给出可删除清单与理由。"
+      - title: "收敛结论"
+        checks: >-
+          完成前面所有检查后重新整体判断，不要引入新的文档结构：P0 必须修改（会导致错误理解或错误实现）、P1
+          值得修改、保持现状（继续改属于过度设计）、可以删除的章节/段落/表格。最后回答：这份文档是否已经足够支撑维护，还是仍需要补充设计？
+    brief:
+      - "你是一名资深软件架构师兼技术文档维护者。请对工作区中的设计文档 `{{path}}` 做系统审查，判断它是否准确、完整、可维护，并与当前代码一致。"
+      - ""
+      - "审查范围：第 {{from}} 轮到第 {{to}} 轮；每轮及格线 {{score}} 分（0–10，允许小数）；每轮最多 {{tries}} 次尝试。"
+      - "本次只执行第 {{step}} 轮的第 {{attempt}} 次尝试。完成这一轮后立即停止，不要自行进入后续轮次或重复尝试。"
+      - "本轮通过只代表本轮达标，不代表整个目标通过；尚未运行的轮次仍然必须运行。"
+      - ""
+      - "判断原则（冲突时按此顺序）：准确 > 完整 > 简洁；与代码一致 > 文采；单一事实源 > 多处重复；可维护 > 面面俱到；能删除 > 新增章节。不要为了\"看起来更完整\"而增加无人维护的内容。"
+      - ""
+      - "本轮主题：第 {{step}} 轮 · {{title}}"
+      - "本轮检查要点："
+      - "{{checks}}"
+      - ""
+      - "输出要求：不要输出冗长的内部思维过程，只输出——"
+      - "- 发现的问题（逐条，附文档位置与代码/实测证据）"
+      - "- 判断依据"
+      - "- 修改建议（具体到章节与改法）"
+      - "- 修改后减少了什么维护风险"
+      - "- 本轮收敛结论"
+      - ""
+      - >-
+        每轮结论必须写入工作区文件 {{artifact}} 的 “## 第 {{step}} 轮 · {{title}}”
+        小节：不存在则创建，已存在则替换该小节，不要覆盖其它轮次。验证者会直接读这个文件。若工作区不可写，则在正文给出完整内容并在 evidence 中说明。
+      - "若本轮确实没有可改进项，请如实在 status 中给 done 并说明无需改进，不要为了触发重试而压低分数。"
+    followUp:
+      - "现在是第 {{step}} 轮、第 {{attempt}}/{{tries}} 次尝试（及格线 {{score}}）。"
+      - "以 {{path}} 为准，按第 {{step}} 轮（{{title}}）的要求处理上一版未解决的问题，并更新工作区文件 {{artifact}} 中本轮的小节。"

@@ -10,6 +10,7 @@ import { render } from 'ink-testing-library';
 import { App } from '../../src/ui/app.tsx';
 import { COMMAND_HINTS, commonPrefix } from '../../src/slash/registry.ts';
 import { Controller } from '../../src/controller/controller.ts';
+import type { VerifierPort } from '../../src/controller/verifier.ts';
 import { CostLedger } from '../../src/cost/ledger.ts';
 import { array, object, type ObjectValue } from '../../src/transport/wire.ts';
 import { controlFrame } from '../../src/transport/events.ts';
@@ -17,6 +18,7 @@ import { host, snapshot, until } from '../support/host.ts';
 import { renderAt } from '../support/tty.ts';
 import { StatusBar } from '../../src/ui/chat/status.tsx';
 import { statusSource } from '../support/status-source.ts';
+import { readTrace } from '../../src/controller/trace-log.ts';
 
 function assertInsideComposer(frame: string, label: string) {
   const lines = frame.split('\n');
@@ -64,6 +66,42 @@ test('startup status refreshes after connection and reconnect while copy mode re
     await until(() => controller.state.workspaces !== workspaces);
     await until(() => controller.state.screen === (screen === 'path' ? 'workspaces' : screen));
   }
+});
+
+test('Esc leaves a picker opened over a conversation and returns to it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // `/resume` is a detour over the conversation, so Esc must cancel it and come back.
+  await pressKey(ui, '/resume'); await pressKey(ui, '\r');
+  await until(() => controller.state.screen === 'sessions' && ui.lastFrame()?.includes('Choose session') === true);
+  await pressKey(ui, '\u001b');
+  await until(() => controller.state.screen === 'chat' && ui.lastFrame()?.includes('你好') === true);
+  // Returning does not reload or re-select: the same conversation is shown.
+  assert.equal(controller.state.sessionId, 's1');
+  // The workspace list opened with `/ws` behaves the same way.
+  await pressKey(ui, '/ws'); await pressKey(ui, '\r');
+  await until(() => controller.state.screen === 'workspaces' && ui.lastFrame()?.includes('Choose workspace') === true);
+  await pressKey(ui, '\u001b');
+  await until(() => controller.state.screen === 'chat' && ui.lastFrame()?.includes('你好') === true);
+  assert.equal(controller.state.sessionId, 's1');
+});
+
+test('with nothing selected, Esc on the session list steps back to the workspace list', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && ui.lastFrame()?.includes('Project α') === true);
+  // Picking a workspace opens its sessions; there is no conversation to return to yet.
+  await pressKey(ui, '\r');
+  await until(() => controller.state.screen === 'sessions' && ui.lastFrame()?.includes('Choose session') === true);
+  await pressKey(ui, '\u001b');
+  await until(() => controller.state.screen === 'workspaces' && ui.lastFrame()?.includes('Choose workspace') === true);
 });
 
 test('the workspace picker offers this client directory, and Esc leaves the typed-path screen', async t => {
@@ -728,6 +766,25 @@ test('/think lists prompt summaries, expands the selected thought, and supports 
   await until(() => ui.lastFrame()?.includes('closing detail') === false);
   assert.equal(ui.lastFrame()?.includes('closing detail'), false);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('a rejected line keeps its draft while an accepted one clears the composer', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // An unknown command is a result, not a thrown fault: the reason is shown and the line stays, which
+  // is the `retain` half of the result contract.
+  await pressKey(ui, '/nope'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Unknown command. Use /help.') === true);
+  assert.match(ui.lastFrame()!, /❯ \/nope/);
+  // A line the application used up clears the composer: `consume`.
+  await pressKey(ui, '\u0015');
+  await pressKey(ui, '/loop stop'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('No loop is running') === true);
+  assert.match(ui.lastFrame()!, /❯ Message, @host-file, or \/help/);
 });
 
 test('a slash-command panel stays open for reading and closes on another command', async t => {
@@ -1745,6 +1802,35 @@ test('left click freezes the display for native selection until explicit resume'
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
+test('a line in flight refuses a second line, slash command or prompt alike', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.record.ready);
+  // Hold a real effectful line open: `/compact` owns the execution slot until the host answers.
+  let complete!: (value: ObjectValue) => void;
+  fixture.onCommand = () => new Promise(resolve => { complete = resolve; });
+  await pressKey(ui, '/compact'); await pressKey(ui, '\r');
+  await until(() => controller.state.operation.busy && !!complete);
+  // D1 keeps the composer editable, so each attempt is written and then refused on Enter; the draft
+  // survives the refusal, which is why the operator clears it before writing the next one.
+  await pressKey(ui, '\u0015');
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  assert.equal(ui.lastFrame()?.includes('/ws [name or ID]'), false);
+  assert.match(ui.lastFrame()!, /❯ \/help/);
+  await pressKey(ui, '\u0015');
+  await pressKey(ui, 'hello there'); await pressKey(ui, '\r');
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+  assert.match(ui.lastFrame()!, /❯ hello there/);
+  await pressKey(ui, '\u0015');
+  // Finishing the first line frees the slot, and the same command now runs.
+  complete({ commandId: 'c1', result: { kind: 'success', text: 'Compacted 8 history items.' } });
+  await until(() => !controller.state.operation.busy);
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('/ws [name or ID]') === true);
+});
+
 test('/compact displays host progress and outcomes without sending a prompt', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
@@ -1783,6 +1869,33 @@ test('Esc cancels the compact request and retains the command draft', async t =>
   assert.match(ui.lastFrame()!, /❯ \/compact/);
   assert.doesNotMatch(ui.lastFrame()!, /Compacting history…/);
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
+});
+
+test('the composer stays editable during a long operation and never sends on its own', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  let complete!: (value: ObjectValue) => void;
+  fixture.onCommand = () => new Promise(resolve => { complete = resolve; });
+  t.after(async () => { complete?.({ commandId: 'c1', result: { kind: 'success', text: 'Compacted.' } }); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.record.ready);
+  await pressKey(ui, '/compact'); await pressKey(ui, '\r');
+  await until(() => !!complete && controller.state.operation.busy);
+  // D1: the next line can be written while the operation runs, and Enter refuses to send it. The
+  // finished line's own draft is still there, so the operator clears it and writes the next one.
+  await pressKey(ui, '\u0015');
+  await pressKey(ui, 'next question while busy');
+  await until(() => ui.lastFrame()?.includes('next question while busy') === true);
+  await pressKey(ui, '\r');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+  assert.match(ui.lastFrame()!, /❯ next question while busy/);
+  // Finishing the operation does not submit the draft either: only the operator can.
+  complete({ commandId: 'c1', result: { kind: 'success', text: 'Compacted.' } });
+  await until(() => !controller.state.operation.busy);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+  assert.match(ui.lastFrame()!, /❯ next question while busy/);
 });
 
 test('narrow terminals fold streaming reasoning until /think live opens it', async t => {
@@ -2072,4 +2185,178 @@ test('questions, approvals and model dialogs retain recent context above the com
   await pressKey(ui, '/model'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Choose model') === true);
   assert.match(ui.lastFrame()!, /Recent decision context/);
+});
+
+test('the status bar reports a verifying loop instead of claiming Ready', async t => {
+  const fixture = await host();
+  // A verifier that never answers holds the run in its verify-first step, which is the state that used
+  // to leave the bar saying Ready while the client was plainly working.
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const verifier: VerifierPort = { verify: async () => { await gate; return { type: 'cancelled' }; } };
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { release?.(); ui.unmount(); ui.cleanup(); await controller.stop(); fixture.close(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await pressKey(ui, '/loop');
+  await until(() => ui.lastFrame()?.includes('Loop records') === true);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Run loop record · designdoc-review') === true);
+  await pressKey(ui, '\r');
+  // The sub-state comes from the controller, so the assertion follows the field rather than the frame.
+  await until(() => controller.queries.loop?.activity === 'verify');
+  // The selected session has no host turn, so the bar must take its state from the loop itself.
+  assert.match(ui.lastFrame()!, /◐/);
+  assert.match(ui.lastFrame()!, /verify 1\/10/);
+  assert.doesNotMatch(ui.lastFrame()!, /● Ready/);
+});
+
+test('/loop runs the highlighted record with its defaults after two Enters', async t => {
+  const fixture = await host();
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-loop-ui-trace-'));
+  const tracePath = join(directory, 'trace.log');
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', tracePath });
+  const ui = render(<App controller={controller} />);
+  // One hook in the right order: the controller drains its trace before the directory goes away.
+  t.after(async () => {
+    ui.unmount(); ui.cleanup();
+    await controller.stop();
+    fixture.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // The shortest path a reader takes: `/loop`, Enter on the list, Enter on Start.
+  await pressKey(ui, '/loop');
+  await until(() => ui.lastFrame()?.includes('Loop records') === true);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Run loop record · design-review') === true);
+  await pressKey(ui, '\r');
+  await until(() => controller.queries.loop !== undefined);
+  assert.equal(controller.queries.loop?.title, 'Design review');
+  assert.deepEqual({ from: controller.queries.loop?.from, to: controller.queries.loop?.to, score: controller.queries.loop?.score, tries: controller.queries.loop?.tries },
+    { from: 1, to: 10, score: 8, tries: 10 });
+  // The trace tells the whole story of this start, so a run that never happens has a written reason.
+  await controller.trace?.settle();
+  const events = (await readTrace(tracePath)).filter(line => !line.startsWith('#'))
+    .map(line => JSON.parse(line) as { event: string; phase?: string });
+  assert.deepEqual(events.filter(entry => entry.event === 'loop-ui').map(entry => entry.phase), ['choose', 'open', 'start']);
+  // `sent` follows the prompt's round trip, so it is waited for rather than assumed.
+  let loopEvents: (string | undefined)[] = [];
+  for (let attempt = 0; attempt < 50 && !loopEvents.includes('sent'); attempt += 1) {
+    await controller.trace?.settle();
+    loopEvents = (await readTrace(tracePath)).filter(line => !line.startsWith('#'))
+      .map(line => JSON.parse(line) as { event: string; phase?: string })
+      .filter(entry => entry.event === 'loop').map(entry => entry.phase);
+    if (!loopEvents.includes('sent')) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  // Two executed lines, both traced: the menu's pick asks the application for the form, and Start
+  // then runs it. Nothing about the choice is decided in the UI.
+  assert.deepEqual(loopEvents, ['command', 'form', 'command', 'begin', 'sent']);
+});
+
+test('/loop form Start authorizes again, so a turn that started meanwhile is refused', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // Open the form while the client is idle: the record is known and nothing is running.
+  await pressKey(ui, '/loop design-review'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Run loop record · design-review') === true);
+  // A turn starts in the background while the form is being filled in. Start is a second submission,
+  // so it must be authorized again instead of trusting the facts from when the form opened.
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.queries.running);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Wait for the running turn to finish') === true);
+  assert.equal(controller.queries.loop, undefined);
+  assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+  // The form stays on screen, so the values can be retried once the turn is done.
+  assert.match(ui.lastFrame()!, /Run loop record · design-review/);
+});
+
+test('/loop stop ends the run from the composer instead of offering it as a record', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // `stop` is `/loop`'s own subcommand, so it never filters the record list and runs on Enter.
+  await pressKey(ui, '/loop stop');
+  assert.doesNotMatch(ui.lastFrame()!, /Loop records/);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('No loop is running') === true);
+  // Start one, then end it the same way: the terminal line stays, the run is no longer active.
+  await pressKey(ui, '/loop design-review 9'); await pressKey(ui, '\r');
+  // The start itself holds the controller's busy envelope; the run then owns the session while the
+  // composer is free again, which is the state the operator stops it from (D1 brings editing during
+  // the envelope itself).
+  await until(() => controller.queries.loop?.active === true && controller.state.operation.busy === false);
+  await pressKey(ui, '/loop stop'); await pressKey(ui, '\r');
+  await until(() => controller.queries.loop?.active === false);
+  assert.equal(controller.queries.loop?.terminalReason, 'user-cancelled');
+  await until(() => ui.lastFrame()?.includes('Loop stopped') === true);
+});
+
+test('/loop lists its records, opens the chosen inputs and runs exactly those values', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // `/loop` alone stops being a syntax error and offers the records with their defaults.
+  await pressKey(ui, '/loop');
+  await until(() => ui.lastFrame()?.includes('Loop records') === true);
+  assert.match(ui.lastFrame()!, /❯ design-review · Design review · 10 rounds · pass 8 · ≤10 tries · DESIGN-REVIEW\.md/);
+  await pressKey(ui, '\u001b[B');
+  await until(() => ui.lastFrame()?.includes('❯ designdoc-review') === true);
+  // Enter confirms the highlighted record and opens its defaults instead of running blind.
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Run loop record · designdoc-review') === true);
+  // The record's own input is the first editable row, so another document can be reviewed here.
+  assert.match(ui.lastFrame()!, /path\s+tui-design\.md/);
+  const beforeStart = controller.queries.loop;
+  assert.equal(beforeStart, undefined);
+  await pressKey(ui, '\u001b[B'); // path
+  await pressKey(ui, 'docs/other.md');
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('docs/other.md') === true);
+  // Then over the passing score, so one form confirms both a variable and a limit.
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B'); // Pass
+  await pressKey(ui, '\x7f'); await pressKey(ui, '9');
+  await pressKey(ui, '\r');
+  await pressKey(ui, '\u001b[A'); await pressKey(ui, '\u001b[A'); await pressKey(ui, '\u001b[A');
+  await pressKey(ui, '\u001b[A'); await pressKey(ui, '\u001b[A'); // back to Start
+  await pressKey(ui, '\r');
+  await until(() => controller.queries.loop !== undefined);
+  assert.equal(controller.queries.loop?.title, 'Designdoc review · docs/other.md');
+  assert.deepEqual({ from: controller.queries.loop?.from, to: controller.queries.loop?.to, score: controller.queries.loop?.score, tries: controller.queries.loop?.tries },
+    { from: 1, to: 10, score: 9, tries: 10 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  const sent = fixture.calls.filter(call => call.method === 'session/prompt').at(-1)!;
+  const text = String(object(array(object(object(object(sent.payload).args).request).content)[0]).text);
+  assert.match(text, /docs\/other\.md/);
+  assert.doesNotMatch(text, /tui-design\.md/);
+});
+
+test('a command with arguments shows what it takes once the name is settled', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await pressKey(ui, '/think ');
+  await until(() => ui.lastFrame()?.includes('/think [seq or live]') === true);
+  assert.match(ui.lastFrame()!, /\/think \[seq or live\] · Inspect reasoning with user prompt summaries/);
+  // `/loop` has a more specific list, so the generic usage line gives way to it instead of stacking.
+  await pressKey(ui, '\u0015');
+  await pressKey(ui, '/loop ');
+  await until(() => ui.lastFrame()?.includes('Loop records') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /List loop\.yaml records/);
 });

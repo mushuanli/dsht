@@ -1,8 +1,9 @@
 /** Application facade: composes the connection, session, catalog and cost domains. */
 import { join } from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { Client } from '../transport/client.ts';
-import { removeFile, writeHeapSnapshot } from '../storage/index.ts';
+import { readText, removeFile, writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { HostEvent } from '../transport/events.ts';
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from '../session/memory.ts';
@@ -20,8 +21,9 @@ import { TraceLog } from './trace-log.ts';
 import { PromptStore } from './prompts.ts';
 import { latestAssistantText, parseLoopResult, ScoredLoop, type LoopLimits, type LoopProtocol, type LoopResult, type PriorVerdict } from './loop.ts';
 import { findingsLines } from './loop-contract.ts';
+import { loopRecords as listLoopRecords } from './loop-protocols.ts';
 import { verificationId, verdictFile, type VerifierOutcome, type VerifierPort } from './verifier.ts';
-import type { LoopProgress } from '../contracts.ts';
+import type { ClientActivity, ForegroundKind, ForegroundSnapshot, LoopProgress, LoopRecord, LoopTerminalReason } from '../contracts.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import { ShellController } from '../shell/index.ts';
@@ -75,8 +77,20 @@ const HANDOFF_PROMPT = [
   'Base it only on this session; never invent work that did not happen.',
 ].join(' ');
 
-/** Mutating operations the UI drives; each owns its busy/error envelope. */
+/** The foreground slot's own record: what is running, since when, and what cancels it. */
+interface ForegroundOperation extends ForegroundSnapshot { readonly abort: AbortController }
+
+/** Mutating operations the UI drives; each runs in the client's single foreground slot. */
 export interface Actions {
+  /** Claim the single foreground slot for work the front end orchestrates itself (paging, loading).
+   *
+   * The controller owns the slot, the abort controller and the identity; the front end only supplies
+   * the work and renders `queries.foreground`. Returns undefined when the client is busy with another
+   * operation or when this one was cancelled.
+   */
+  foreground<T>(kind: ForegroundKind, label: string, work: (signal: AbortSignal) => Promise<T>): Promise<T | undefined>;
+  /** Cancel the operation that owns the slot; false when none is running. */
+  cancelForeground(): boolean;
   switchWorkspace(workspaceId?: string): Promise<boolean>;
   switchSession(query?: string): Promise<boolean>;
   selectSession(sessionId: string): Promise<boolean>;
@@ -99,10 +113,10 @@ export interface Actions {
   startLoop(protocol: LoopProtocol, limits: LoopLimits): Promise<boolean>;
   /** Stop a running loop; the terminal progress stays visible for the reader. */
   stopLoop(): void;
-  /** Set or clear the session's verification standard read by the next loop. */
-  setVerification(criteria?: string): void;
   cancelTurn(): Promise<boolean>;
   answer(value: AnswerValue): Promise<boolean>;
+  /** Answer the current sub-question of the pending set, advancing the waterfall or sending it. */
+  answerQuestion(input?: { selected?: readonly string[]; custom?: string }): Promise<boolean>;
   approve(allowed: boolean): Promise<boolean>;
   dismissQuestion(): Promise<boolean>;
   /** Repeated keys share one cancellation; it reports exit eligibility itself. */
@@ -122,8 +136,12 @@ export interface Actions {
   refreshCosts(signal?: AbortSignal): Promise<boolean>;
   /** Local, immediate setters: no request, so they keep the synchronous contract. */
   loadPresetNames(): void;
+  /** Drop the action envelope's last failure, once the fact has been reported elsewhere. */
+  clearOperationError(): void;
   enterPath(): void;
   pickWorkspace(workspaceId?: string): void;
+  /** Leave a picker and return to the selected conversation; false when none is selected. */
+  showChat(): boolean;
   setViewWindow(window?: Transcript): void;
   pinHistory(pinned: boolean): void;
   setAnswers(answers: Record<string, AnswerValue['answers']>): void;
@@ -159,8 +177,12 @@ export interface Queries {
   readonly prompts: readonly SavedPrompt[];
   /** Live progress of the selected session's design review, when one has run. */
   readonly loop: LoopProgress | undefined;
-  /** Standard the next loop must be verified against, when the operator set one. */
-  readonly verification: string | undefined;
+  /** What the client is working on now, already merged across the host turn and any running loop. */
+  readonly activity: ClientActivity | undefined;
+  /** The one operation that owns the client, when one does; the view renders its label and clock. */
+  readonly foreground: ForegroundSnapshot | undefined;
+  /** Every `loop.yaml` record, so the picker can offer names and their defaults without a lookup. */
+  readonly loopRecords: readonly LoopRecord[];
   /** Why the saved prompts could not be read, when the file was malformed. */
   readonly promptsError: string | undefined;
   pendingCounts(): ReadonlyMap<string, number>;
@@ -193,9 +215,9 @@ export interface ControllerOptions {
   /** History retention budgets. */
   historyLimits?: HistoryLimits;
   /** Runtime memory log path; absent disables the log. */
+  memoryLogPath?: string;
   /** Connection, screen and selection trace path; absent disables the log. */
   tracePath?: string;
-  memoryLogPath?: string;
   /** Directory this client runs in, offered as a workspace the host has not registered. */
   localDirectory?: string;
   /** Whether `!` may run local commands; the CLI disables it with `--no-shell`. */
@@ -208,6 +230,8 @@ export interface ControllerOptions {
   allowSelfFallback?: boolean;
   /** Client-side root for verdict files; defaults to the workspace this client runs in. */
   verdictRoot?: string;
+  /** Whole-run budget in milliseconds; when it expires the run stops as `deadline`. */
+  deadlineMs?: number;
 }
 
 /** Application facade over the domain controllers; the UI owns only this object.
@@ -226,17 +250,15 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Background billing scan; present only when a ledger was supplied. */
   readonly cost: CostController | undefined;
   /** Bounded runtime memory samples; present only when a log path was supplied. */
+  readonly memoryLog: MemoryLog | undefined;
   /** Bounded connection, screen and selection trace; present only when a path was supplied. */
   readonly trace: TraceLog | undefined;
-  readonly memoryLog: MemoryLog | undefined;
   /** Shortcut prompts the operator saved; in memory for this run when no path was supplied. */
   readonly promptStore: PromptStore;
   /** Running agent loop, if any; the loop lives here, not in the UI. */
   private loop?: ScoredLoop;
   /** Prompt the loop still has to send, when it could not be sent immediately. */
   private loopPrompt?: string;
-  /** Verification standard for this session, read when a loop starts. */
-  private verification?: string;
   /** Finished turns of the selected session, so a waiter never has to sample a cached flag. */
   private completedTurns = 0;
   /** Sessions the host reported busy, so a lone idle frame cannot claim a finished turn. */
@@ -247,12 +269,28 @@ export class Controller implements ControllerStore, ConnectionListener {
   private loopSettleTimer?: NodeJS.Timeout;
   /** Whether an attempt is currently being judged by an independent verifier. */
   private loopVerifying = false;
+  /** A verdict is being consumed right now.
+   *
+   * Consuming one reads the artifact, so it is asynchronous; without this gate a replayed idle edge
+   * could start a second verification of an attempt whose verdict is already being applied.
+   */
+  private loopSettling = false;
   /** Cancels that verification when the loop is stopped or replaced. */
   private loopVerifyAbort?: AbortController;
   /** Verdict of the previous attempt on the current step, for the retry and the next verifier. */
   private loopPrevious?: PriorVerdict;
   /** Identity of the run in flight, so its verdicts are isolated from every other run's. */
   private loopRunId?: string;
+  /** Whether the run in flight already wrote its `loop end`; one end per begin (I9). */
+  private loopEndTraced = false;
+  /** Sequence of the verification task in flight, so a retry never reuses the old task's identity. */
+  private loopVerifySeq = 0;
+  /** Identity of the verification task whose result may still decide the attempt in flight. */
+  private loopVerifyIdentity?: string;
+  /** Timer that stops the whole run when its budget expires. */
+  private loopDeadlineTimer?: NodeJS.Timeout;
+  /** Whole-run budget, when the operator set one. */
+  private readonly deadlineMs?: number;
   /** Consecutive verifier outages in this attempt, so a broken verifier is retried then reported. */
   private loopVerifierMisses = 0;
   /** Whether a reply block may stand in for a missing verdict; off unless asked for. */
@@ -282,6 +320,13 @@ export class Controller implements ControllerStore, ConnectionListener {
   private readonly observers = new Set<() => void>();
   private selector = 0;
   private connectionSettled = false;
+  /** Counter behind `commandId`, so every executed line has one identifier in begin and end. */
+  private commandSeq = 0;
+  /** The operation that owns the client right now, when one does; the single foreground slot. */
+  private foreground?: ForegroundOperation;
+  private foregroundSeq = 0;
+  /** Which operation the current async continuation belongs to, so a nested call never re-claims. */
+  private readonly foregroundOwner = new AsyncLocalStorage<number>();
 
   constructor(options: ControllerOptions) {
     const { base, token, initialSession, costs } = options;
@@ -295,9 +340,13 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.verifier = options.verifier;
     this.allowSelfFallback = options.allowSelfFallback === true;
     this.verdictRoot = options.verdictRoot ?? this.localDirectory;
+    this.deadlineMs = options.deadlineMs;
     const connectionOptions: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
     this.connection = new ConnectionController(this, connectionOptions, this);
-    this.session = new SessionController(this, this.connection, this.connection, historyLimits);
+    // Every session write is admitted in order; the trace records that order, which is what answers
+    // "who dispatched first" when two mutations of one session compete.
+    this.session = new SessionController(this, this.connection, this.connection, historyLimits,
+      admission => this.traceEvent('mutation', { session: admission.sessionId, lane: admission.lane, waited: admission.waited }));
     this.shell = new ShellController({
       publish: () => this.update({}),
       cwd: () => this.localDirectory,
@@ -315,8 +364,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       scanPage: (sessionId, records) => this.session.rememberScanPage(sessionId, records),
       scanDone: sessionId => this.session.rememberScanDone(sessionId),
     });
-    if (options.tracePath !== undefined) this.trace = new TraceLog(options.tracePath);
     if (this.memoryLogPath !== undefined) this.memoryLog = new MemoryLog(this.memoryLogPath, () => this.memorySample());
+    if (options.tracePath !== undefined) this.trace = new TraceLog(options.tracePath);
     this.promptStore = new PromptStore(options.promptsPath);
     this.actions = this.buildActions();
     this.queries = this.buildQueries();
@@ -353,24 +402,46 @@ export class Controller implements ControllerStore, ConnectionListener {
       ? this.session.pendingFor(next) : [];
     // The shell service owns its blocks; state carries only the plain snapshot the UI renders.
     if (this.shell) next.shell = this.shell.snapshot();
-    // A loop and its verification standard belong to one session: selecting a different session ends
-    // them, but a reconnect — which transiently clears the selection — must not, or a long review
-    // could never finish.
+    // A loop belongs to one session: selecting a different session ends it, but a reconnect — which
+    // transiently clears the selection — must not, or a long review could never finish.
     if (next.sessionId !== undefined && next.sessionId !== this.state.sessionId && this.loop?.sessionId !== next.sessionId) {
       this.forgetLoop();
-      this.verification = undefined;
     }
-    this.traceTransition(previous, next);
     this.state = next;
+    this.traceTransition(previous, next);
     for (const observer of this.observers) observer();
     // A prompt the loop could not send yet (offline, busy or answering) goes out as soon as it can.
     if (this.loopPrompt !== undefined) void this.flushLoop();
     // A finished attempt whose reply is still committing gets another look on every publish.
     if (this.loopEndedAt !== undefined) this.trySettleLoop();
   }
+
   /** Record one diagnostic event; a no-op when no trace path was configured. */
   private traceEvent(event: string, detail: ObjectValue = {}): void {
     this.trace?.record({ event, ...detail });
+  }
+
+  /** Record one diagnostic event from outside the controller, such as a UI-only decision.
+   *
+   * The composition root knows things this class cannot see — which record the operator highlighted,
+   * that a form was refused a name — and a start that never reaches `startLoop` is otherwise invisible
+   * in every log. Same no-op contract as the internal call.
+   * @param event - Event name, e.g. `loop-ui`.
+   * @param detail - Identifiers only; never prompt or session text.
+   */
+  traceNote(event: string, detail: ObjectValue = {}): void {
+    this.traceEvent(event, detail);
+  }
+
+  /** Mint the identifier one executed line carries through its `begin` and `end` events.
+   *
+   * Short and process-local on purpose: it exists to pair two lines of one file, not to identify a
+   * line across runs, so a monotonic counter beats a random id a reader would have to match by eye.
+   * @returns The next command id, such as `C17`.
+   */
+  nextCommandId(): string {
+    this.commandSeq += 1;
+    return `C${this.commandSeq}`;
   }
 
   /** Record the state fields that decide which screen the reader is looking at.
@@ -390,55 +461,66 @@ export class Controller implements ControllerStore, ConnectionListener {
     if (Object.keys(changed).length > 0) this.traceEvent('state', changed);
   }
 
-  /** Bind every mutating entry point to its private implementation. */
+  /** Bind every mutating entry point to its private implementation.
+   *
+   * Each one names the kind and label of the operation it performs, because that is now the single
+   * answer to "what owns the client right now" (§6.2): the front end renders it and cancels it, and
+   * nothing else has to know which layer started the work.
+   */
   private buildActions(): Actions {
     return {
-      switchWorkspace: id => this.runAction(() => this.switchWorkspace(id)),
-      switchSession: query => this.runAction(() => this.switchSession(query)),
-      selectSession: id => this.runAction(() => this.selectSession(id)),
-      createWorkspace: path => this.runAction(() => this.createWorkspace(path)),
-      createSession: () => this.runAction(() => this.createSession()),
-      createVerifierSession: title => this.runActionValue(() => this.session.createNamedSession(title)),
-      cancelVerifierSession: sessionId => this.runAction(() => this.session.cancelNamedSession(sessionId)),
-      showPicker: screen => this.runAction(() => this.showPicker(screen)),
-      removeTarget: target => this.runAction(() => this.removeTarget(target)),
-      removalTarget: (kind, query) => this.runActionValue(() => this.removalTarget(kind, query)),
-      waitForHistory: signal => this.runAction(() => this.waitForHistory(signal)),
-      searchSessions: (query, workspaceOnly, signal) => this.runActionValue(() => this.searchSessions(query, workspaceOnly, signal)),
-      searchHistory: (query, signal) => this.runActionValue(() => this.searchHistory(query, signal)),
-      prompt: text => this.runAction(() => this.prompt(text)),
-      handoff: () => this.runAction(() => this.handoff()),
-      startLoop: (protocol, limits) => this.runAction(() => this.startLoop(protocol, limits)),
+      foreground: (kind, label, work) => this.claimForeground(kind, label, work),
+      cancelForeground: () => this.cancelForeground(),
+      switchWorkspace: id => this.runAction('navigation', 'Switching workspace…', () => this.switchWorkspace(id)),
+      switchSession: query => this.runAction('navigation', 'Switching session…', () => this.switchSession(query)),
+      selectSession: id => this.runAction('navigation', 'Loading session…', () => this.selectSession(id)),
+      createWorkspace: path => this.runAction('navigation', 'Registering workspace…', () => this.createWorkspace(path)),
+      createSession: () => this.runAction('navigation', 'Creating session…', () => this.createSession()),
+      createVerifierSession: title => this.runActionValue('verifier', 'Creating verifier session…', () => this.session.createNamedSession(title)),
+      cancelVerifierSession: sessionId => this.runAction('verifier', 'Stopping verifier…', () => this.session.cancelNamedSession(sessionId)),
+      showPicker: screen => this.runAction('picker', 'Listing…', () => this.showPicker(screen)),
+      removeTarget: target => this.runAction('removal', 'Removing…', () => this.removeTarget(target)),
+      removalTarget: (kind, query) => this.runActionValue('removal', 'Reading target…', () => this.removalTarget(kind, query)),
+      waitForHistory: signal => this.runAction('history', 'Loading history…', () => this.waitForHistory(signal)),
+      searchSessions: (query, workspaceOnly, signal) => this.runActionValue('search', 'Searching sessions…', () => this.searchSessions(query, workspaceOnly, signal)),
+      searchHistory: (query, signal) => this.runActionValue('search', 'Searching history…', () => this.searchHistory(query, signal)),
+      prompt: text => this.runAction('prompt', 'Sending…', () => this.prompt(text)),
+      handoff: () => this.runAction('handoff', 'Requesting handoff…', () => this.handoff()),
+      startLoop: (protocol, limits) => this.runAction('loop', 'Starting loop…', () => this.startLoop(protocol, limits)),
       stopLoop: () => this.stopLoop(),
-      setVerification: criteria => this.setVerification(criteria),
-      cancelTurn: () => this.runAction(() => this.cancelTurn()),
-      answer: value => this.runAction(() => this.answer(value)),
-      approve: allowed => this.runAction(() => this.approve(allowed)),
-      dismissQuestion: () => this.runAction(() => this.dismissQuestion()),
+      cancelTurn: () => this.runAction('interaction', 'Cancelling…', () => this.cancelTurn()),
+      answer: value => this.runAction('interaction', 'Answering…', () => this.answer(value)),
+      answerQuestion: input => this.runAction('interaction', 'Answering…', async () => {
+        if (!await this.answerQuestion(input)) throw new Error('The answer could not be sent');
+      }),
+      approve: allowed => this.runAction('interaction', 'Answering…', () => this.approve(allowed)),
+      dismissQuestion: () => this.runAction('interaction', 'Dismissing…', () => this.dismissQuestion()),
       interrupt: force => this.interrupt(force),
-      older: (signal, transcript) => this.runAction(() => this.older(signal, transcript)),
-      historyThrough: (target, signal) => this.runAction(() => this.historyThrough(target, signal)),
-      removeQueued: itemId => this.runAction(() => this.removeQueued(itemId)),
-      savePrompt: text => this.runLocalAction(async () => {
+      older: (signal, transcript) => this.runAction('history', 'Loading history…', () => this.older(signal, transcript)),
+      historyThrough: (target, signal) => this.runAction('history', 'Loading history…', () => this.historyThrough(target, signal)),
+      removeQueued: itemId => this.runAction('command', 'Removing queued input…', () => this.removeQueued(itemId)),
+      savePrompt: text => this.runAction('local', 'Saving prompt…', async () => {
         await this.promptStore.save(text); this.update({ operation: { ...this.state.operation, error: '' } });
       }),
-      updatePrompt: (id, text) => this.runLocalAction(async () => {
+      updatePrompt: (id, text) => this.runAction('local', 'Saving prompt…', async () => {
         if (!await this.promptStore.update(id, text)) throw new Error('That saved prompt no longer exists');
         this.update({ operation: { ...this.state.operation, error: '' } });
       }),
-      deletePrompt: id => this.runLocalAction(async () => {
+      deletePrompt: id => this.runAction('local', 'Deleting prompt…', async () => {
         if (!await this.promptStore.remove(id)) throw new Error('That saved prompt no longer exists');
         this.update({ operation: { ...this.state.operation, error: '' } });
       }),
-      command: (line, signal) => this.runActionValue(() => this.command(line, signal)),
-      exportLog: (path, signal) => this.runActionValue(() => this.exportLog(path, signal)),
-      exportHtml: (path, signal) => this.runActionValue(() => this.exportHtml(path, signal)),
-      selectModel: (provider, model, effort) => this.runAction(() => this.selectModel(provider, model, effort)),
-      modelCatalog: () => this.runActionValue(() => this.modelCatalog()),
-      refreshCosts: signal => this.runAction(() => this.refreshCosts(signal)),
+      command: (line, signal) => this.runActionValue('command', 'Running command…', () => this.command(line, signal)),
+      exportLog: (path, signal) => this.runActionValue('export', 'Exporting session log…', () => this.exportLog(path, signal)),
+      exportHtml: (path, signal) => this.runActionValue('export', 'Exporting conversation…', () => this.exportHtml(path, signal)),
+      selectModel: (provider, model, effort) => this.runAction('model', 'Selecting model…', () => this.selectModel(provider, model, effort)),
+      modelCatalog: () => this.runActionValue('model', 'Loading models…', () => this.modelCatalog()),
+      refreshCosts: signal => this.runAction('cost', 'Refreshing costs…', () => this.refreshCosts(signal)),
       loadPresetNames: () => this.loadPresetNames(),
+      clearOperationError: () => this.clearOperationError(),
       enterPath: () => this.enterPath(),
       pickWorkspace: id => this.pickWorkspace(id),
+      showChat: () => this.showChat(),
       setViewWindow: window => this.setViewWindow(window),
       pinHistory: pinned => this.pinHistory(pinned),
       setAnswers: answers => this.setAnswers(answers),
@@ -473,7 +555,9 @@ export class Controller implements ControllerStore, ConnectionListener {
       get prompts() { return controller.promptStore.list; },
       get promptsError() { return controller.promptStore.error; },
       get loop() { return controller.loop?.progress; },
-      get verification() { return controller.verification; },
+      get foreground() { return controller.foreground; },
+      get activity() { return controller.activity; },
+      get loopRecords() { return listLoopRecords(); },
       pendingCounts: () => controller.pendingCounts(),
       recall: (direction, current) => controller.recall(direction, current),
       references: (query, signal) => controller.references(query, signal),
@@ -499,8 +583,8 @@ export class Controller implements ControllerStore, ConnectionListener {
     await this.session.settle();
     await this.catalog.settle();
     await this.cost?.stop();
-    await this.trace?.settle();
     await this.memoryLog?.stop();
+    await this.trace?.settle();
     this.session.release();
   }
 
@@ -512,28 +596,84 @@ export class Controller implements ControllerStore, ConnectionListener {
     await this.stop();
   }
 
-  /** Run one mutating operation inside the busy/error envelope the UI reports.
+  /** Run one mutating operation inside the client's single foreground slot.
    *
-   * Private on purpose: the application owns the envelope, so a caller never hands the controller a
-   * closure to orchestrate. Every entry of `actions` uses it.
+   * Private on purpose: the application owns the slot, so a caller never hands the controller a
+   * closure to orchestrate. Every entry of `actions` uses it, and `actions.foreground` is the one
+   * door left open for work the front end orchestrates itself.
+   * @param kind - What the operation is, for the label and the trace.
+   * @param label - Human label shown while it runs.
    * @param operation - Operation to run while the client is busy.
    * @returns Whether the operation ran to completion.
    */
-  private async runAction(operation: () => Promise<void>): Promise<boolean> {
-    if (this.state.operation.busy || !this.state.online) return false;
-    this.update({ operation: { busy: true, error: '' } });
-    try { await operation(); return true; }
-    catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return false; }
-    finally { this.update({ operation: { ...this.state.operation, busy: false } }); }
+  private async runAction(kind: ForegroundKind, label: string, operation: () => Promise<void>): Promise<boolean> {
+    if (!this.state.online) return false;
+    if (!this.ownsForeground() && this.state.operation.busy) return false;
+    return await this.claimForeground(kind, label, async () => {
+      try { await operation(); return true; }
+      catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return false; }
+    }) === true;
   }
 
-  /** Same envelope, for an operation that produces a value the caller needs. */
-  private async runActionValue<T>(operation: () => Promise<T>): Promise<T | undefined> {
-    if (this.state.operation.busy || !this.state.online) return undefined;
+  /** Same slot, for an operation that produces a value the caller needs. */
+  private async runActionValue<T>(kind: ForegroundKind, label: string, operation: () => Promise<T>): Promise<T | undefined> {
+    if (!this.state.online) return undefined;
+    if (!this.ownsForeground() && this.state.operation.busy) return undefined;
+    return await this.claimForeground(kind, label, async () => {
+      try { return await operation(); }
+      catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return undefined; }
+    });
+  }
+
+  /** Whether the current async continuation is already inside the foreground operation.
+   *
+   * An action invoked *by* a running operation (a paging loop calling `older`, a command's policy
+   * calling an action) belongs to that operation: refusing it for being busy would deadlock the very
+   * work that owns the slot. An async-local owner answers that exactly, where a plain flag could not
+   * tell a nested call from a second, unrelated one.
+   * @returns True when this call runs inside the operation that owns the slot.
+   */
+  private ownsForeground(): boolean { return this.foregroundOwner.getStore() !== undefined; }
+
+  /** Run one operation in the foreground slot, claiming it when the caller does not already own it.
+   *
+   * The slot serializes what the operator is doing — one thing at a time — which is a different
+   * question from the session write order (§6.3): a read takes this slot too. The controller owns the
+   * slot, the abort controller and the identity, so the front end only renders `queries.foreground`
+   * and cancels it in one call.
+   * @param kind - What the operation is.
+   * @param label - Human label shown while it runs.
+   * @param work - The work, handed the signal that `cancelForeground` aborts.
+   * @returns What the work returned, or undefined when the slot was taken or the work was cancelled.
+   */
+  private async claimForeground<T>(kind: ForegroundKind, label: string, work: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> {
+    const owner = this.foreground;
+    // Nested: the operation that owns the slot supplies the signal and keeps the identity.
+    if (owner !== undefined && this.ownsForeground()) return await work(owner.abort.signal);
+    if (owner !== undefined) return undefined;
+    const operation: ForegroundOperation = { id: ++this.foregroundSeq, kind, label, startedAt: Date.now(), abort: new AbortController() };
+    this.foreground = operation;
     this.update({ operation: { busy: true, error: '' } });
-    try { return await operation(); }
-    catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return undefined; }
-    finally { this.update({ operation: { ...this.state.operation, busy: false } }); }
+    this.traceEvent('foreground', { phase: 'begin', id: operation.id, kind, label });
+    try {
+      return await this.foregroundOwner.run(operation.id, () => work(operation.abort.signal));
+    } finally {
+      // Only the owner releases the slot; a nested claim never reaches this branch.
+      if (this.foreground === operation) {
+        this.foreground = undefined;
+        this.update({ operation: { ...this.state.operation, busy: false } });
+        this.traceEvent('foreground', { phase: 'end', id: operation.id, kind, cancelled: operation.abort.signal.aborted });
+      }
+    }
+  }
+
+  /** Cancel the operation that owns the foreground slot; false when none is running.
+   * @returns Whether an operation was there to cancel.
+   */
+  private cancelForeground(): boolean {
+    if (this.foreground === undefined) return false;
+    this.foreground.abort.abort();
+    return true;
   }
 
   /** Run one local operation that needs no connection, reporting failure the way `runAction` does.
@@ -706,6 +846,22 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** @returns Epoch start of the active turn, when known. */
   private get workingSince(): number | undefined { return this.session.workingSince; }
 
+  /** What the client is doing right now, merged across the host turn and any running loop.
+   *
+   * This is the controller's answer, not a view's guess: a turn speaks for the session while it runs,
+   * otherwise a live loop speaks for itself with its own sub-state and clock, and neither means idle.
+   * @returns The activity, or undefined when nothing is in flight.
+   */
+  private get activity(): ClientActivity | undefined {
+    if (this.running) {
+      return { kind: 'turn', ...(this.workingSince === undefined ? {} : { since: this.workingSince }) };
+    }
+    const progress = this.loop?.progress;
+    if (progress === undefined || !progress.active || progress.activity === undefined) return undefined;
+    return { kind: 'loop', activity: progress.activity, title: progress.title,
+      step: progress.step, total: progress.total, startedAt: progress.startedAt };
+  }
+
   /** @returns Sessions accounted to the selected workspace, minus archived identities. */
   private get visibleSessions(): ObjectValue[] { return this.session.visibleSessions; }
 
@@ -788,6 +944,11 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private setAnswers(answers: Record<string, AnswerValue['answers']>): void { this.session.setAnswers(answers); }
 
+  /** Clear the action envelope's last failure; a no-op when there is none. */
+  private clearOperationError(): void {
+    if (this.state.operation.error !== '') this.update({ operation: { ...this.state.operation, error: '' } });
+  }
+
   /** Replace the pending question's option keyboard state.
    * @param option - Highlighted option, toggled labels and free-text mode; undefined clears it.
    */
@@ -832,6 +993,15 @@ export class Controller implements ControllerStore, ConnectionListener {
   private pickWorkspace(workspaceId?: string): void {
     this.traceEvent('action', { action: 'pickWorkspace', workspace: workspaceId ?? 'none' });
     this.session.pickWorkspace(workspaceId);
+  }
+
+  /** Leave a picker and return to the selected conversation, without reloading it.
+   * @returns Whether there was a selected conversation to return to.
+   */
+  private showChat(): boolean {
+    const shown = this.session.showChat();
+    this.traceEvent('action', { action: 'showChat', shown });
+    return shown;
   }
 
   /** Open a workspace picker, or resolve a workspace target.
@@ -960,40 +1130,138 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private async startLoop(protocol: LoopProtocol, limits: LoopLimits): Promise<void> {
     const sessionId = this.state.sessionId;
-    if (sessionId === undefined) throw new Error('Select a session first');
-    this.forgetLoop();
-    const loop = new ScoredLoop(sessionId, protocol, limits);
+    // Every branch that can leave a start invisible is traced with its reason, so "it did nothing"
+    // is answerable from the trace instead of guessed at.
+    if (sessionId === undefined) {
+      this.traceEvent('loop', { phase: 'refused', kind: protocol.kind, reason: 'no-session' });
+      throw new Error('Select a session first');
+    }
+    // A new run replaces whatever was there; the old one is closed before the new identity exists.
+    this.forgetLoop('replaced');
+    const runId = randomUUID();
+    this.loopRunId = runId;
+    this.loopEndTraced = false;
+    this.traceEvent('loop', { phase: 'begin', runId, kind: protocol.kind, session: sessionId,
+      from: limits.from, to: limits.to, score: limits.score, tries: limits.tries, forked: this.verifier !== undefined });
+    const loop = new ScoredLoop(runId, sessionId, protocol, limits);
+    this.loop = loop;
+    // A protocol that reviews something already on disk verifies first: a round that passes costs no
+    // work turn at all, and only a failing verdict asks the agent to change anything.
+    if (this.startsByVerifying(loop)) {
+      this.update({});
+      this.armLoopDeadline();
+      this.traceEvent('loop', { phase: 'verify-first', runId, kind: protocol.kind, step: limits.from });
+      this.verifyStep(loop);
+      return;
+    }
     const prompt = loop.start();
     loop.sent();
-    this.loop = loop;
     this.update({});
-    try { await this.session.promptInternal(prompt); }
-    catch (error) { this.forgetLoop(); this.update({}); throw error; }
+    this.armLoopDeadline();
+    try {
+      await this.session.promptInternal(prompt);
+      this.traceEvent('loop', { phase: 'sent', runId, kind: protocol.kind, step: limits.from, attempt: 1 });
+    } catch (error) {
+      // The run never got its first turn. It ends needing a person rather than silently vanishing:
+      // the reason says the send was rejected, and the snapshot stays readable.
+      this.rejectLoopSend(loop, error);
+      throw error;
+    }
   }
 
-  /** Stop a running review; the terminal progress stays visible for the reader. */
-  private stopLoop(): void {
+  /** End a run whose next prompt could not be sent, keeping the reason visible.
+   *
+   * A rejected send is not a verdict and not an operator cancellation, so the phase is `needs-human`
+   * and `terminalReason` says why — this is what keeps `phase=cancelled` meaning "a person stopped it".
+   * @param loop - Run that could not send.
+   * @param error - What the host or the session layer rejected with.
+   */
+  private rejectLoopSend(loop: ScoredLoop, error: unknown): void {
+    const text = errorText(error).slice(0, 200);
+    this.forgetSettleTimer();
+    this.clearLoopDeadline();
+    this.abortVerification();
+    loop.human({ kind: 'send', text }, 'send-rejected');
+    this.traceLoopEnd(loop);
+    this.loopPrompt = undefined;
+    this.update({ operation: { ...this.state.operation, error: text } });
+  }
+
+  /** Record the end of one run once, with the phase it stopped in and why.
+   *
+   * I9 needs every `begin` to be paired inside the trace window; this is the only writer of `loop end`.
+   * @param loop - Run whose terminal phase was just published.
+   */
+  private traceLoopEnd(loop: ScoredLoop): void {
+    if (this.loopEndTraced) return;
+    this.loopEndTraced = true;
+    const progress = loop.progress;
+    this.traceEvent('loop', { phase: 'end', runId: progress.runId, kind: loop.protocol.kind,
+      result: progress.phase, step: progress.step, attempt: progress.attempt,
+      reason: progress.terminalReason ?? 'unknown' });
+  }
+
+  /** Whether a step begins with verification rather than with a work prompt.
+   *
+   * Needs all three: the record asks for it, the record has a verifier prompt, and this client was
+   * given a verifier. Otherwise there is nobody to verify first, and the step asks for work.
+   * @param loop - Loop about to start a step.
+   * @returns True when the step starts by verifying.
+   */
+  private startsByVerifying(loop: ScoredLoop): boolean {
+    return loop.protocol.starts === 'verify' && loop.protocol.verify !== undefined && this.verifier !== undefined;
+  }
+
+  /** Verify the step in flight without a work turn before it.
+   *
+   * The activity is set inside `verifyRound`, so the first verification, a work-turn verdict and a
+   * retry all publish the same state without this caller having to remember it.
+   * @param loop - Loop whose step and attempt are already set.
+   */
+  private verifyStep(loop: ScoredLoop): void {
+    void this.verifyRound(loop);
+  }
+
+  /** Arm the whole-run budget, when the operator set one. */
+  private armLoopDeadline(): void {
+    if (this.deadlineMs === undefined) return;
+    this.loopDeadlineTimer = setTimeout(() => this.expireLoopDeadline(), this.deadlineMs);
+    this.loopDeadlineTimer.unref();
+  }
+
+  /** Stop a running review; the terminal progress stays visible for the reader.
+   * @param reason - Why it stopped; the default is an operator action.
+   */
+  private stopLoop(reason: LoopTerminalReason = 'user-cancelled'): void {
     if (this.loop === undefined) return;
     this.forgetSettleTimer();
+    this.clearLoopDeadline();
     this.abortVerification();
     this.loopEndedAt = undefined;
-    this.loop.cancel();
+    this.loop.cancel(reason);
+    this.traceLoopEnd(this.loop);
     this.loopPrompt = undefined;
     this.update({});
   }
 
-  /** Replace this session's verification standard; the next loop reads it at start. */
-  private setVerification(criteria?: string): void {
-    this.verification = criteria;
-    this.update({});
-  }
-
-  /** Drop the loop entirely, without publishing a cancelled phase. */
-  private forgetLoop(): void {
+  /** Drop the loop entirely, without publishing a cancelled phase.
+   * @param reason - Why it was dropped, recorded when it never reached a terminal phase itself.
+   */
+  private forgetLoop(reason: LoopTerminalReason = 'replaced'): void {
+    // A run that is dropped while still active never published a terminal phase: close its trace span
+    // here so one begin still has one end, then let the snapshot go.
+    if (this.loop !== undefined && this.loop.active) {
+      this.loop.cancel(reason);
+      this.traceLoopEnd(this.loop);
+    }
     this.forgetSettleTimer();
+    this.clearLoopDeadline();
     this.abortVerification();
     this.loopPrevious = undefined;
     this.loopRunId = undefined;
+    this.loopEndTraced = false;
+    this.loopVerifySeq = 0;
+    this.loopVerifyIdentity = undefined;
     this.loopVerifierMisses = 0;
     this.loop = undefined;
     this.loopPrompt = undefined;
@@ -1022,11 +1290,14 @@ export class Controller implements ControllerStore, ConnectionListener {
     // settled must not decide the attempt that replaced it.
     const endedAt = this.loopEndedAt;
     if (endedAt === undefined) { this.forgetSettleTimer(); return; }
-    // An independent verifier decides the round; the reply block below stays as its fallback.
+    // An independent verifier decides the round; the reply block below stays as its fallback. Its
+    // branch keeps its own `verify` sub-state, so this must not announce settling over it.
     if (loop.protocol.verify !== undefined && this.verifier !== undefined) {
-      if (!this.loopVerifying) void this.verifyRound(loop);
+      if (!this.loopVerifying && !this.loopSettling) void this.verifyRound(loop);
       return;
     }
+    // No forked verifier: reading the reply block, including the grace wait for it, is settling.
+    loop.settling();
     const result = parseLoopResult(latestAssistantText(this.state.session.record.messages), loop.protocol);
     if (result === undefined && Date.now() - endedAt < LOOP_SETTLE_GRACE_MS) {
       if (this.loopSettleTimer === undefined) {
@@ -1037,7 +1308,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     }
     this.forgetSettleTimer();
     this.loopEndedAt = undefined;
-    this.settleWith(loop, result);
+    void this.settleChecked(loop, result);
   }
 
   /** Score one finished round out of band, in a process of its own.
@@ -1052,15 +1323,27 @@ export class Controller implements ControllerStore, ConnectionListener {
     const { step, attempt } = loop.progress;
     const { kind } = loop.protocol;
     const runId = this.loopRunId ?? (this.loopRunId = randomUUID());
-    const file = verdictFile(this.verdictRoot, runId, kind, step, attempt);
-    const identity = verificationId(runId, kind, step, attempt);
+    // Every started verification is its own task: a failure retry or an operator answer must not
+    // reuse the identity or the file of the task it replaced, or a late verdict could decide it.
+    const seq = this.loopVerifySeq += 1;
+    const file = verdictFile(this.verdictRoot, runId, kind, step, attempt, seq);
+    const identity = verificationId(runId, kind, step, attempt, seq);
     const prompt = loop.protocol.verify!(loop.progress, step, attempt, { file, verificationId: identity }, this.loopPrevious);
     this.loopVerifying = true;
+    this.loopVerifyIdentity = identity;
+    // The sub-state is a fact on the loop, not a note: the progress line and the status bar both read
+    // it, and a retry's warning note stays beside it instead of being overwritten by a string.
+    loop.verifying();
+    this.update({});
+    this.traceEvent('verify', { runId, phase: 'begin', kind, step, attempt, seq, file });
     const abort = new AbortController();
     this.loopVerifyAbort = abort;
     let outcome: VerifierOutcome;
     try {
+      // The reviewed workspace is declared here, where it is known, so the verifier's artifact check
+      // never has to infer it from whatever directory the process happens to run in.
       outcome = await verifier.verify({ verificationId: identity, kind, step, attempt, prompt, file,
+        workspace: this.localDirectory,
         ...(loop.protocol.artifact === undefined ? {} : { artifact: loop.protocol.artifact }),
         title: `[dsht-verify] ${loop.protocol.title} · ${step}/${attempt}` }, abort.signal);
     } catch (error) {
@@ -1069,18 +1352,46 @@ export class Controller implements ControllerStore, ConnectionListener {
       if (this.loopVerifyAbort === abort) this.loopVerifyAbort = undefined;
       this.loopVerifying = false;
     }
+    // A newer verification task owns this attempt now: this task's verdict is stale by definition.
+    if (this.loopVerifyIdentity !== identity) { this.traceEvent('verify', { runId, phase: 'stale', kind, step, attempt, seq }); return; }
     // Verification outlives nothing: a cancelled or replaced loop must not be settled by its result.
-    if (this.loop !== loop || !loop.active || !loop.settled) return;
+    if (this.loop !== loop || !loop.active || !loop.settled) { this.traceEvent('verify', { runId, phase: 'abandoned', kind, step, attempt, seq }); return; }
     this.forgetSettleTimer();
     this.loopEndedAt = undefined;
     // The review was cancelled: nothing to decide, and nothing to report as a verdict.
-    if (outcome.type === 'cancelled') return;
-    if (outcome.type === 'verified') { this.loopVerifierMisses = 0; this.settleWith(loop, outcome.result); return; }
+    if (outcome.type === 'cancelled') { this.traceEvent('verify', { runId, phase: 'cancelled', kind, step, attempt, seq }); return; }
+    // The host is waiting for a human the verifier cannot answer: stop with the request attached.
+    // The verifier is blocked, not broken, so retrying would only hit the same wall three times.
+    if (outcome.type === 'needs-human') {
+      this.traceEvent('verify', { runId, phase: 'needs-human', kind, step, attempt, seq, request: outcome.request.kind });
+      this.clearLoopDeadline();
+      loop.human(outcome.request);
+      this.traceLoopEnd(loop);
+      this.update({});
+      return;
+    }
+    if (outcome.type === 'verified') {
+      this.traceEvent('verify', { runId, phase: 'verified', kind, step, attempt, seq,
+        score: outcome.result.score ?? -1, blocked: outcome.result.blocked === true, status: outcome.result.status ?? 'none' });
+      this.loopVerifierMisses = 0; await this.settleChecked(loop, outcome.result); return;
+    }
 
     // Unavailable is not a verdict, so it never consumes the attempt: retry the verifier, and only
     // then stop the run. Self-scoring is opt-in and is always visible in the progress line.
+    // A failure that says it is not retryable (an unconfirmed remote cancel, a bad configuration)
+    // would only repeat itself, so it is reported instead of spending the retry budget.
+    if (outcome.retryable === false) {
+      this.traceEvent('verify', { runId, phase: 'unavailable', kind, step, attempt, seq, retryable: false, reason: outcome.reason.slice(0, 200) });
+      loop.note(`⚠ verification unavailable · ${outcome.reason}`);
+      this.clearLoopDeadline();
+      loop.unavailable();
+      this.traceLoopEnd(loop);
+      this.update({});
+      return;
+    }
     this.loopVerifierMisses += 1;
     if (this.loopVerifierMisses <= VERIFIER_RETRIES) {
+      this.traceEvent('verify', { runId, phase: 'retry', kind, step, attempt, seq, misses: this.loopVerifierMisses, reason: outcome.reason.slice(0, 200) });
       loop.note(`⚠ verification unavailable · retrying (${outcome.reason})`);
       this.update({});
       void this.verifyRound(loop);
@@ -1088,14 +1399,49 @@ export class Controller implements ControllerStore, ConnectionListener {
     }
     if (this.allowSelfFallback) {
       const fallback = parseLoopResult(latestAssistantText(this.state.session.record.messages), loop.protocol);
-      this.settleWith(loop, fallback, fallback === undefined
+      this.traceEvent('verify', { runId, phase: 'fallback', kind, step, attempt, seq, block: fallback !== undefined });
+      await this.settleChecked(loop, fallback, fallback === undefined
         ? `⚠ verification fallback · self-reported (and no reply block: ${outcome.reason})`
         : '⚠ verification fallback · self-reported');
       return;
     }
+    this.traceEvent('verify', { runId, phase: 'unavailable', kind, step, attempt, seq, retryable: true, misses: this.loopVerifierMisses, reason: outcome.reason.slice(0, 200) });
     loop.note(`⚠ verification unavailable · ${outcome.reason}`);
+    this.clearLoopDeadline();
     loop.unavailable();
+    this.traceLoopEnd(loop);
     this.update({});
+  }
+
+  /** Apply a protocol's own artifact requirement, then settle the attempt.
+   *
+   * The score is the verifier's judgement; whether the round's conclusion actually reached the
+   * artifact is a fact this client checks itself. A hard condition may not be overridden by a score:
+   * a round whose section is missing fails even at 10/10, and the missing line is fed back to the
+   * next attempt like any other finding. An artifact this client cannot read cannot be checked, so
+   * the verdict stands rather than being failed on a boundary.
+   * @param loop - The run whose attempt just finished.
+   * @param result - Verdict to consume.
+   * @param note - Note to show instead, when the check accepted the verdict unchanged.
+   */
+  private async settleChecked(loop: ScoredLoop, result: LoopResult | undefined, note = ''): Promise<void> {
+    if (this.loopSettling) return;
+    this.loopSettling = true;
+    try {
+      const marker = result === undefined || result.blocked === true || result.abstained === true
+        ? undefined : loop.protocol.artifactMarker?.(loop.progress.step);
+      const artifact = loop.protocol.artifact;
+      if (marker === undefined || artifact === undefined || result === undefined) { this.settleWith(loop, result, note); return; }
+      const text = await readText(join(this.localDirectory, artifact));
+      // Reading the artifact is I/O, so the run may have moved on before it came back.
+      if (this.loop !== loop || !loop.active || !loop.settled) return;
+      if (text === undefined || text.includes(marker)) { this.settleWith(loop, result, note); return; }
+      this.traceEvent('artifact', { phase: 'missing', artifact, step: loop.progress.step, score: result.score ?? -1 });
+      const reported = result.score === undefined ? '没有分数' : `${result.score} 分`;
+      this.settleWith(loop, { ...result, score: undefined,
+        findings: [...(result.findings ?? []), `工作区文件 ${artifact} 缺少本轮小节「${marker}」`] },
+      `⚠ artifact check · ${artifact} 缺少本轮小节「${marker}」（验证者给了 ${reported}，本轮不通过）`);
+    } finally { this.loopSettling = false; }
   }
 
   /** Apply one attempt's verdict, and continue the run when it has a next step.
@@ -1105,12 +1451,24 @@ export class Controller implements ControllerStore, ConnectionListener {
   private settleWith(loop: ScoredLoop, result: LoopResult | undefined, note = ''): void {
     const before = loop.progress;
     const step = loop.settle(result);
+    if (step.kind !== 'continue') {
+      this.clearLoopDeadline();
+      // A decision ended the run: close its trace span with the phase and reason it stopped in.
+      this.traceLoopEnd(loop);
+    }
     // The note describes the attempt just decided, so it is applied after the state moved on.
     loop.note(note);
     if (step.kind === 'continue') {
       // A retry on the same step carries the verdict that caused it; a new step starts clean.
       this.loopPrevious = before.step === loop.progress.step && result !== undefined
         ? { step: before.step, attempt: before.attempt, result } : undefined;
+      // A passing verdict advanced the step. When the record verifies first, the new round is
+      // verified against the artifact as it stands before anyone is asked to change it.
+      if (loop.progress.step !== before.step && this.startsByVerifying(loop)) {
+        this.update({});
+        this.verifyStep(loop);
+        return;
+      }
       const findings = result === undefined ? [] : findingsLines(result);
       this.loopPrompt = [step.prompt, ...findings].join('\n');
     }
@@ -1125,6 +1483,31 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.loopVerifying = false;
   }
 
+  /** Stop the run because the whole-run budget expired; a budget stop, not a verdict.
+   *
+   * Any verification in flight is cancelled (bounded, as everywhere else) and its late result can
+   * no longer decide anything, because the loop is no longer active.
+   */
+  private expireLoopDeadline(): void {
+    this.loopDeadlineTimer = undefined;
+    const loop = this.loop;
+    if (loop === undefined || !loop.active) return;
+    this.forgetSettleTimer();
+    this.abortVerification();
+    this.loopEndedAt = undefined;
+    loop.note('⚠ deadline reached');
+    loop.deadline();
+    this.traceLoopEnd(loop);
+    this.update({});
+  }
+
+  /** Drop the run deadline, if one is armed. */
+  private clearLoopDeadline(): void {
+    if (this.loopDeadlineTimer === undefined) return;
+    clearTimeout(this.loopDeadlineTimer);
+    this.loopDeadlineTimer = undefined;
+  }
+
   /** Drop a pending settle timer, if any. */
   private forgetSettleTimer(): void {
     if (this.loopSettleTimer === undefined) return;
@@ -1137,6 +1520,10 @@ export class Controller implements ControllerStore, ConnectionListener {
     const loop = this.loop;
     const prompt = this.loopPrompt;
     if (loop === undefined || prompt === undefined || !loop.active) return;
+    // Nothing of this loop writes while an independent verifier is judging it: the round under
+    // verification must be the round that was scored. A prompt that appears meanwhile is sent when
+    // the verdict lands (or dropped with the run), never interleaved with the verification.
+    if (this.loopVerifying) return;
     if (this.state.sessionId !== loop.sessionId) return;
     if (!this.state.online || this.state.operation.busy || this.state.pending.length) return;
     // Consume before awaiting, so a re-entrant update cannot send the same prompt twice.
@@ -1145,8 +1532,9 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.update({});
     try { await this.session.promptInternal(prompt); }
     catch (error) {
-      this.forgetLoop();
-      this.update({ operation: { ...this.state.operation, error: errorText(error) } });
+      // The next prompt was rejected (a waiting interaction, a lost snapshot, offline): the run ends
+      // with that reason recorded instead of vanishing without a trace.
+      this.rejectLoopSend(loop, error);
     }
   }
 
@@ -1191,6 +1579,43 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param value - Structured answer collected by the UI.
    */
   private async answer(value: AnswerValue): Promise<void> { await this.session.answer(value); }
+
+  /** Answer the current sub-question of the pending set, advancing the waterfall or sending it.
+   *
+   * The waterfall is interaction state of the session — which sub-question is current follows from the
+   * answers collected so far, and the ticked labels live in the option state — so it belongs here
+   * rather than in a front end. Both entry points then complete a question the same way: a line the
+   * operator typed as an answer, and the option keys.
+   * @param input - Labels chosen for this sub-question, or free text the operator typed.
+   * @returns True once the answer was recorded or sent; a host refusal throws, leaving the collected
+   *   answers in place so the same submission can be retried.
+   */
+  private async answerQuestion(input: { selected?: readonly string[]; custom?: string } = {}): Promise<boolean> {
+    const pending = this.state.pending[0];
+    if (pending?.kind !== 'question') throw new Error('No pending question');
+    const interaction = this.state.session.interaction;
+    const answers = interaction.answers[pending.eventId] ?? [];
+    const question = pending.questions[answers.length];
+    if (question === undefined) throw new Error('The pending question has changed');
+    // A typed answer keeps whatever is ticked for a multi-select question; a picked option is explicit.
+    const selected = input.selected ?? (question.multiSelect === true ? interaction.option?.selected ?? [] : []);
+    const answer = { id: question.id, selected: [...selected], ...(input.custom ? { custom: input.custom } : {}) };
+    const next = [...answers, answer];
+    if (next.length < pending.questions.length) {
+      this.setAnswers({ ...interaction.answers, [pending.eventId]: next });
+      this.setOption(undefined);
+      return true;
+    }
+    // A rejected submission keeps the collected answers and the keyboard state, so the reader can
+    // retry the same answer instead of rebuilding it: a refusal throws out of here before the
+    // collected answers are dropped.
+    await this.answer({ answers: next });
+    const rest = { ...interaction.answers };
+    delete rest[pending.eventId];
+    this.setAnswers(rest);
+    this.setOption(undefined);
+    return true;
+  }
 
   /** Approve or reject the pending approval request.
    * @param allowed - Whether the request is approved once.

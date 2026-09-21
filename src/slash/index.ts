@@ -2,7 +2,9 @@
  *
  * A pure leaf: it imports nothing from the application, the features or the UI.
  */
-export { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH, COMMANDS, COMMAND_POLICY, commandMatches, commonPrefix, completeCommand, resolveCommand, suggestedCommands } from './registry.ts';
+export { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH, COMMANDS, COMMAND_POLICY, argumentHint, commandMatches, commonPrefix, completeCommand, isControlCommand, resolveCommand, suggestedCommands } from './registry.ts';
 export type { CommandHint, CommandPolicy } from './registry.ts';
-export { parseCommand, parseLoopOptions, DESIGN_REVIEW_USAGE, DESIGNDOC_REVIEW_USAGE, LOOP_USAGE } from './parse.ts';
+export { parseCommand, loopNameQuery, validLoopOption, LOOP_STOP_USAGE, LOOP_USAGE } from './parse.ts';
 export type { Command, LoopOptions } from './parse.ts';
+export { interpret, normalize, authorize } from './pipeline.ts';
+export type { AuthorizeFacts, ExecutableSubmission, InterpretFacts, LineCommand, NormalizeFacts, Submission, UiAction, Verdict } from './pipeline.ts';

@@ -7,7 +7,7 @@ import stringWidth from 'string-width';
 import type { CostTotal } from '../../contracts.ts';
 import { costText } from '../status/model.ts';
 import { toolLine } from '../../text.ts';
-import type { Coverage, LivePhase } from '../../contracts.ts';
+import type { ClientActivity, Coverage, LivePhase } from '../../contracts.ts';
 
 /** One formatted cost scope, with the raw totals the money column needs. */
 export interface StatusCostLine { text: string; amount: number; unknown: number }
@@ -19,8 +19,12 @@ export interface StatusSource {
   online: boolean;
   status: string;
   running: boolean;
-  /** Epoch start of the active turn, when known. */
-  since?: number;
+  /** What the client is working on now, merged by the controller: a host turn or a running loop.
+   *
+   * The bar renders this and never merges sources itself, so "busy", its clock and the loop's
+   * sub-state all come from one controller-owned answer.
+   */
+  activity?: ClientActivity;
   sessionId?: string;
   sessionMode?: string;
   workspaceLabel: string;
@@ -302,15 +306,18 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
   const [now, setNow] = useState(Date.now);
   const [reported, setReported] = useState(1);
   const running = source.running;
-  const since = source.since;
+  const activity = source.activity;
+  // The controller already merged a turn and a loop into one answer; the bar only draws it.
+  const busy = activity !== undefined;
+  const since = activity?.kind === 'turn' ? activity.since : activity?.kind === 'loop' ? activity.startedAt : undefined;
   useEffect(() => {
     setNow(Date.now());
     if (paused) return;
     // An idle bar still re-reads the clock, so a day rollover reaches the cost it reports without
-    // waiting for an unrelated render; a running bar keeps its per-second clock.
-    const timer = setInterval(() => setNow(Date.now()), running ? 1000 : 60_000);
+    // waiting for an unrelated render; a busy bar keeps its per-second clock.
+    const timer = setInterval(() => setNow(Date.now()), busy ? 1000 : 60_000);
     return () => clearInterval(timer);
-  }, [running, since, paused]);
+  }, [busy, since, paused]);
   const state = source;
   const view = { values: source.values, queued: source.queued, jobs: source.jobs };
   const costs = source.cost;
@@ -336,10 +343,16 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
     const hit = cacheHitText(buckets[2], billed);
     const compactCount = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
     const phase = source.livePhase;
-    const clock = running && since !== undefined ? ` ${clockText(now - since)}` : '';
+    const clock = busy && since !== undefined ? ` ${clockText(now - since)}` : '';
     const phaseLabel = phase === undefined ? undefined
       : phase.kind === 'tool' ? `${phase.name ?? 'tool'} ${phaseText(now - phase.startedAt)}`
       : `${phase.kind === 'thinking' ? 'think' : 'write'} ${phaseText(now - phase.startedAt)}`;
+    // A host turn's phase wins; without one, the controller's loop activity names what the client is
+    // doing, so the bar never reports an idle session while a review is in flight.
+    const phaseSegment: StatusSegment | undefined = !busy ? undefined
+      : phaseLabel !== undefined ? { text: phaseLabel }
+      : activity?.kind === 'loop' ? { text: `${activity.activity} ${activity.step}/${activity.total}` }
+      : undefined;
     // The state token reports a fact and never guesses: a paused clock is named, offline and errors
     // take the token over, and an unknown phase simply leaves the phase group empty. An answer this
     // client still owes outranks the paused reason, because that reason is only why the clock stopped.
@@ -351,7 +364,7 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
           ? { text: '? Needs you', color: theme.status.critical }
           : pauseReason !== undefined
             ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
-            : running ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
+            : busy ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
     // One marker covers both scopes, because either an unpriceable record or a scan that has not
     // covered every session makes the pair inexact as a reading.
     const inexact = coverage !== 'complete';
@@ -367,10 +380,11 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
     const groups: StatusGroups = {
       state: stateToken,
       // A paused bar keeps the phase: the reason already says why the clock stopped, and dropping the
-      // running tool would leave the one question this bar exists to answer unanswered. A ready bar
-      // has none: the transcript keeps the last event it saw, and only the host knows the turn ended.
-      ...(phaseLabel === undefined || !running ? {} : { phase: { text: phaseLabel } }),
-      ...(running && pauseReason === undefined ? { stop: { text: '^C' } } : {}),
+      // running tool would leave the one question this bar exists to answer unanswered. A bar with no
+      // work of its own has none: the transcript keeps the last event it saw, and only the host knows
+      // the turn ended.
+      ...(phaseSegment === undefined ? {} : { phase: phaseSegment }),
+      ...(busy && pauseReason === undefined ? { stop: { text: '^C' } } : {}),
       ...(todayTotal === undefined ? {} : { cost: { text: money(sessionTotal, todayTotal), color: theme.status.cost } }),
       ...(percent === undefined ? {} : {
         context: { text: `ctx ${percent}%`, color: contextColor },
@@ -400,7 +414,9 @@ const StatusDetails = memo(function StatusDetails({ source, theme, width, now, s
   const { stdout } = useStdout();
   const state = source;
   const running = source.running;
-  const since = source.since;
+  const activity = source.activity;
+  const busy = activity !== undefined;
+  const since = activity?.kind === 'turn' ? activity.since : activity?.kind === 'loop' ? activity.startedAt : undefined;
   const view = { values: source.values, queued: source.queued, jobs: source.jobs };
   const costs = source.cost;
   const sessionCost = source.cost?.sessionText ?? '?';
@@ -415,11 +431,13 @@ const StatusDetails = memo(function StatusDetails({ source, theme, width, now, s
   const turns = count(numeric(record(view.values.sessionStats).turns));
   const duration = since === undefined ? 'unknown duration' : elapsedTime(now - since);
   const detail: StatusDetail[] = [
-    { key: 'activity', color: source.pendingCount > 0 ? theme.status.critical : running ? theme.colors.context : theme.colors.muted, text: source.pendingCount > 0
+    { key: 'activity', color: source.pendingCount > 0 ? theme.status.critical : busy ? theme.colors.context : theme.colors.muted, text: source.pendingCount > 0
       ? '? Needs you · answer the request above to continue'
       : running
         ? `◐ Working · ${duration}${source.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
-        : '● Ready · Ctrl+C exit' },
+        : activity?.kind === 'loop'
+          ? `◐ ${activity.activity} ${activity.step}/${activity.total} · ${duration} · Ctrl+C Stop`
+          : '● Ready · Ctrl+C exit' },
     { key: 'host', text: `${safeText(source.host)} · ${safeText(state.status)}${!source.online ? ' · offline, last known status' : ''}` },
     ...source.sessionId
       ? [{ key: 'session', text: `Session ${safeText(source.sessionId)}${source.sessionMode ? ` · ${safeText(source.sessionMode)}` : ''}` }] : [],

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { CostLedger, loadPrices } from '../cost/index.ts';
 import { parseArgs } from 'node:util';
 import { mount } from '../ui/mount.tsx';
-import { ensureDirectory } from '../storage/index.ts';
+import { ensureDirectory, readText } from '../storage/index.ts';
 import { runStartup } from './startup.ts';
 import { sessionLabel } from '../session-title.ts';
 import { CookieStore, login } from '../transport/auth.ts';
@@ -17,7 +17,7 @@ import { ProcessVerifier } from './verifier.ts';
 import type { VerifierPort } from '../controller/verifier.ts';
 import { Controller } from '../controller/controller.ts';
 import { endpoint } from '../transport/endpoint.ts';
-import { errorText, string } from '../transport/wire.ts';
+import { errorText, object, string } from '../transport/wire.ts';
 import { safeText } from '../text.ts';
 
 const HELP = `Usage: dsht [options] [list workspaces|list sessions]
@@ -32,17 +32,20 @@ With no command, choose a workspace and session interactively.
   --prompt <text>       Send this plain prompt once the session is ready
   --wait                With --headless, exit when the sent prompt's turn has finished
   --verdict <path>      With --prompt/--wait, write the reply's verdict to this file
-  --verdict-identity <id>  <runId>/<kind>/<step>/<attempt> the verdict must declare
+  --verdict-identity <id>  <runId>/<kind>/<step>/<attempt>/<seq> the verdict must declare
   --headless            Run --command without the terminal interface, then exit
+  --deadline <minutes>  Stop the whole loop after this many minutes (DSHT_LOOP_DEADLINE)
   --auth-dir <path>     Private cookie directory (or DSHT_AUTH_DIR)
   --history-records <n> Soft history record limit (default 2000)
   --history-mb <n>      Soft history payload budget in MiB (default 16)
   --memory-log <path>   Append runtime memory samples; a failing log stops itself
+  --no-memory-log       Disable the runtime memory log (default: enabled)
   --trace <path>        Append connection/screen/selection events (default: <state>/trace.log)
   --no-trace            Disable the transition trace
-  --no-memory-log       Disable the runtime memory log (default: enabled)
+  --trace-verbose       Quote sanitized child output in verifier failure reasons
   --no-shell            Disable ! local commands (DSHT_NO_SHELL=1)
   --json               Print machine-readable list output
+  --version            Print the package version and exit
   --help               Show this help
 
 The default host is http://127.0.0.1:3080.
@@ -52,8 +55,8 @@ Cookies are saved per server origin and reused on later starts. Tokens are never
 /prompt lists saved shortcut prompts; /prompt TEXT saves one in <state>/prompts.json.
 !command runs on this machine, not on the host, and prints its output in the transcript.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
-The transition trace defaults to <state>/trace.log; DSHT_TRACE sets another path or 'off'.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
+The transition trace defaults to <state>/trace.log; DSHT_TRACE sets another path or 'off'.
 prices.json overrides the shipped rates and is seeded on first use; every scan re-decides the
 history with the table loaded then, so an edited table reaches past requests on the next scan.
 Examples:
@@ -66,19 +69,23 @@ async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     url: { type: 'string', default: process.env.DSH_URL ?? 'http://127.0.0.1:3080' },
     'history-records': { type: 'string' }, 'history-mb': { type: 'string' },
-    workspace: { type: 'string' }, ws: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' },
+    workspace: { type: 'string' }, ws: { type: 'string' }, session: { type: 'string' }, 'auth-dir': { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean' }, version: { type: 'boolean' },
     command: { type: 'string', multiple: true }, prompt: { type: 'string' }, wait: { type: 'boolean' },
     verdict: { type: 'string' }, 'verdict-identity': { type: 'string' }, headless: { type: 'boolean' },
-    trace: { type: 'string' }, 'no-trace': { type: 'boolean' },
+    deadline: { type: 'string' },
     'memory-log': { type: 'string' }, 'no-memory-log': { type: 'boolean' }, 'no-shell': { type: 'boolean' },
+    trace: { type: 'string' }, 'no-trace': { type: 'boolean' }, 'trace-verbose': { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
+  // The version is read from the manifest rather than repeated here, so a release never has to edit
+  // a string in this file; like `--help` it needs no host, no credentials and no terminal.
+  if (values.version) { process.stdout.write(`${await packageVersion()}\n`); return; }
   const list = positionals[0] === 'list' && ['workspaces', 'sessions'].includes(positionals[1] ?? '') && positionals.length === 2;
   if (positionals.length && !list) throw new Error('Unknown command. Use --help.');
   if (!list && (values.json || values.workspace)) throw new Error('--json and --workspace apply to list commands');
   if (list && values.session) throw new Error('--session applies to interactive mode');
-  if (list && (values.ws || values.command?.length || values.prompt !== undefined || values.wait || values.headless)) {
-    throw new Error('--ws, --command, --prompt, --wait and --headless apply to interactive mode');
+  if (list && (values.ws || values.command?.length || values.prompt !== undefined || values.wait || values.headless || values.deadline)) {
+    throw new Error('--ws, --command, --prompt, --wait, --deadline and --headless apply to interactive mode');
   }
   const limits = historyLimits(values['history-records'], values['history-mb']);
   const { url, token } = endpoint(values.url, process.env.DSH_TOKEN);
@@ -117,11 +124,14 @@ async function main(): Promise<void> {
     command: [process.execPath, ...process.execArgv, process.argv[1] ?? fileURLToPath(import.meta.url)],
     url: values.url,
     ...(values['auth-dir'] === undefined ? {} : { authDir: values['auth-dir'] }),
-    directory: localDirectory, cwd: localDirectory, env: process.env,
+    cwd: localDirectory, env: process.env,
     timeoutMs: verifyTimeoutMs(process.env.DSHT_VERIFY_TIMEOUT_MS),
     createSession: (title: string): Promise<string | undefined> => controller.actions.createVerifierSession(title),
     cancelSession: async (sessionId: string): Promise<void> => { await controller.actions.cancelVerifierSession(sessionId); },
     onLine: line => { if (values.headless) log(line); },
+    // Off by default: a verifier reason reaches the progress line and the trace, and that log may be
+    // pasted into a report, so the child's own words are quoted only when the operator asks.
+    verbose: values['trace-verbose'] === true || process.env.DSHT_TRACE_VERBOSE === '1',
   });
   const controller = new Controller({
     base: url, token, initialSession: values.session === 'new' ? undefined : values.session,
@@ -132,8 +142,9 @@ async function main(): Promise<void> {
     // elsewhere when the review targets a workspace this machine cannot write.
     verdictRoot: process.env.DSHT_VERDICT_ROOT ?? localDirectory,
     costs, historyLimits: limits, shellEnabled,
-    tracePath: tracePath(stateRoot, values.trace, values['no-trace']),
+    deadlineMs: loopDeadlineMs(values.deadline ?? process.env.DSHT_LOOP_DEADLINE),
     memoryLogPath: memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']),
+    tracePath: tracePath(stateRoot, values.trace, values['no-trace']),
     promptsPath: join(stateRoot, 'prompts.json'),
   });
   const plan = {
@@ -149,7 +160,11 @@ async function main(): Promise<void> {
   controller.start();
   if (values.headless) {
     // No renderer: run the plan, follow a started loop to its verdict, and report it as the exit code.
-    try { process.exitCode = await runStartup(controller, plan, log) === 'failed' ? 1 : 0; }
+    try {
+      const outcome = await runStartup(controller, plan, log);
+      // 0 passed, 1 failed, 3 waiting for a person: a script can tell the three apart.
+      process.exitCode = outcome === 'failed' ? 1 : outcome === 'needs-human' ? 3 : 0;
+    }
     finally { await controller.shutdown(); }
     return;
   }
@@ -161,6 +176,21 @@ async function main(): Promise<void> {
   finally { process.off('SIGTERM', terminate); await controller.shutdown(); }
 }
 
+/** Read the published version from the manifest beside this entry point.
+ *
+ * The path is relative to this module, so it resolves both in the source tree (`src/cli/`) and in
+ * the published build (`dist/cli/`). The version is never repeated as a literal, which is what lets
+ * a release touch only `package.json` and the lockfile.
+ * @returns The `version` field of `package.json`.
+ */
+async function packageVersion(): Promise<string> {
+  const manifest = await readText(fileURLToPath(new URL('../../package.json', import.meta.url)));
+  if (manifest === undefined) throw new Error('package.json is missing beside the client entry point');
+  const version = string(object(JSON.parse(manifest)).version);
+  if (version === '') throw new Error('package.json has no version');
+  return version;
+}
+
 /** The identity a written verdict must declare, refused when the flag that carries it is missing.
  * @param value - `--verdict-identity` value.
  * @returns The identity.
@@ -168,6 +198,21 @@ async function main(): Promise<void> {
 function requireIdentity(value: string | undefined): string {
   if (value === undefined || value.trim() === '') throw new Error('--verdict requires --verdict-identity');
   return value;
+}
+
+/** Whole-run budget from `--deadline`/`DSHT_LOOP_DEADLINE`, in minutes.
+ *
+ * Absent means no budget, which keeps the old behaviour for callers that never set one. A value that
+ * is not a positive number is refused rather than silently ignored, because a run that was supposed
+ * to be bounded and is not is worse than a startup error.
+ * @param value - Flag or environment value.
+ * @returns The budget in milliseconds, or undefined when unbounded.
+ */
+function loopDeadlineMs(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined;
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) throw new Error(`--deadline must be a positive number of minutes: ${value}`);
+  return Math.round(minutes * 60_000);
 }
 
 /** How long one forked verification may run, from a minute count in the environment.

@@ -5,7 +5,7 @@ import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement
 import { useMouseWheel } from './input/mouse.ts';
 import { TextInput } from './input/input.tsx';
 import { ReferenceMenu } from './input/references.tsx';
-import type { CommandIntent, PanelName, PanelState, Reasoning } from '../contracts.ts';
+import type { CommandResult, PanelName, PanelState, Reasoning, ViewEffect } from '../contracts.ts';
 import type { CostTotal } from '../contracts.ts';
 import { costText } from './status/model.ts';
 import { toolLine } from '../text.ts';
@@ -21,8 +21,10 @@ import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
 import type { Choice } from './dialogs/picker.tsx';
 import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
-import { COMMAND_HINTS, completeCommand as completeDraft, suggestedCommands } from '../slash/registry.ts';
-import { routeEnter } from './routing.ts';
+import { LoopDialog, LoopMenu, type LoopRun } from './dialogs/loop.tsx';
+import { COMMAND_HINTS, argumentHint, completeCommand as completeDraft, isControlCommand, suggestedCommands } from '../slash/registry.ts';
+import { interpret, normalize, authorize, type LineCommand } from '../slash/index.ts';
+import { loopNameQuery } from '../slash/parse.ts';
 import { Controller, type HistorySearch, type RemovalTarget } from '../controller/controller.ts';
 import { removalIntent, runCommand, type CommandPort } from '../controller/commands.ts';
 import { sessionLabel } from '../session-title.ts';
@@ -58,7 +60,7 @@ interface ComposerIntent {
  * here plus its own render.
  */
 interface Surface {
-  /** Panel identity a `CommandIntent` may name. */
+  /** Panel identity a `ViewEffect` may name. */
   name: PanelName;
   /** Whether the surface currently owns part of the screen. */
   open: boolean;
@@ -87,6 +89,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // callback reads the controller rather than a render closure Ink may not have refreshed yet.
   const [input, setInputValue] = useState('');
   const [cursor, setCursor] = useState(0);
+  // The freshest draft, readable from an async continuation: a command that finishes while the
+  // operator is already writing the next line must not clear that line (D1).
+  const inputRef = useRef(input);
+  inputRef.current = input;
   const parkedDraft = useRef('');
   const historyPaging = useRef(false);
   const setInput = (value: string, recalled = false) => {
@@ -107,7 +113,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [reasoningOverrides, setReasoningOverrides] = useState<ReadonlySet<number>>(new Set());
   const [liveReasoning, setLiveReasoning] = useState<Reasoning>('row');
   const historyWindow = state.session.window;
-  const [historyLoading, setHistoryLoading] = useState<string>();
+  /** The operation the controller owns right now; the front end only renders it. */
+  const foreground = controller.queries.foreground;
   const displayTranscript = historyWindow ?? state.session.record;
   const displayRef = useRef(displayTranscript); displayRef.current = displayTranscript;
   const conversationBox = useRef<DOMElement>(null);
@@ -119,6 +126,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
   });
   const [removal, setRemoval] = useState<RemovalTarget>();
+  // The loop parameter form is one modal step: the record it edits, while the form owns its values.
+  const [loopForm, setLoopForm] = useState<{ name: string }>();
   // A command may borrow the composer to edit one of its entries; Enter then commits instead of
   // sending, and Esc clears the draft. The composition root stays generic about who asked.
   const [composerIntent, setComposerIntent] = useState<ComposerIntent>();
@@ -134,8 +143,6 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const historyQuery = history?.query;
   const contentSearch = history?.contentSearch === true;
   const historyMatches = history?.matches;
-  const historyAbort = useRef<AbortController | undefined>(undefined);
-  useEffect(() => () => historyAbort.current?.abort(), []);
   const [costExpanded, setCostExpanded] = useState(false);
   const [statusExpanded, setStatusExpanded] = useState(false);
   const reasoning: Reasoning = 'row';
@@ -157,6 +164,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const { answers, option: optionState, approval: approvalSelection } = state.session.interaction;
   const [referenceIndex, setReferenceIndex] = useState(0);
   const [dismissedReference, setDismissedReference] = useState<string>();
+  // The `/loop` record list under the composer: which row is highlighted, and the draft Esc dismissed
+  // it for, so the next keystroke brings it back instead of it staying gone.
+  const [loopMenuIndex, setLoopMenuIndex] = useState(0);
+  const [dismissedLoopMenu, setDismissedLoopMenu] = useState<string>();
   const [lookup, setLookup] = useState<{ draft: string; sessionId: string; items: FileReference[]; error?: string }>();
   // Interactive panels remain stable while read; only transient notices expire.
   useEffect(() => {
@@ -175,25 +186,42 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const pending = state.pending[0];
   // The loop lives in the application; the UI only renders its progress snapshot.
   const loop = controller.queries.loop;
+  // The record the open form edits, read from the same list the runner uses.
+  const loopRecord = loopForm === undefined ? undefined
+    : controller.queries.loopRecords.find(record => record.name === loopForm.name);
   const queued = controller.queries.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
   useEffect(() => {
     setPanels({ thoughts: false, queue: false }); setReferenceIndex(0); setDismissedReference(undefined);
     setInputValue(''); setCursor(0); parkedDraft.current = ''; setComposerIntent(undefined);
     setScroll(0); setReasoningOverrides(new Set()); setLiveReasoning('row');
+    setLoopForm(undefined); setLoopMenuIndex(0); setDismissedLoopMenu(undefined);
   }, [state.sessionId]);
   useEffect(() => { openQueue(false); }, [state.sessionId, pending?.eventId]);
+  // A pending interaction owns the keyboard, so the loop form yields rather than swallowing its keys.
+  useEffect(() => { if (pending) setLoopForm(undefined); }, [pending?.eventId]);
   // A replayed interaction (same eventId after a reconnect) starts unselected again.
   useEffect(() => { controller.actions.setApproval(undefined); }, [state.sessionId, state.online, pending?.eventId]);
   const token = state.screen === 'chat' && state.online && !state.operation.busy && !pending
     && !input.startsWith('/') && dismissedReference !== input && cursor === input.length
     ? activeReference(input) : undefined;
   const referenceOpen = token !== undefined;
+  // `/loop` offers its records while the draft is still a name: the composer menu is the one place a
+  // name can be chosen, and every row carries the defaults the form would open with. Once a second
+  // word (a flag or value) is typed the operator has decided, so the menu steps aside. The candidates
+  // survive a dismissal, because Esc only hides the list — it does not withdraw the choice.
+  const loopDraft = state.screen === 'chat' && state.online && !state.operation.busy && !pending
+    && !copyMode && !referenceOpen ? loopNameQuery(input) : undefined;
+  const loopCandidates = loopDraft === undefined ? []
+    : controller.queries.loopRecords.filter(record => record.name.startsWith(loopDraft));
+  const loopMenuOpen = loopCandidates.length > 0 && loopForm === undefined && dismissedLoopMenu !== input;
+  const loopMenuCursor = Math.min(loopMenuIndex, Math.max(0, loopCandidates.length - 1));
   // The queue dialog is not rendered while an answer is waiting, so it is not "open" then either.
   const surfaces: readonly Surface[] = [
     { name: 'queue', open: queueOpen && !pending, reserved: ['d'], close: () => openQueue(false) },
     { name: 'prompts', open: !!promptsOpen, arrows: true, blocksKeys: true, reserved: ['d', 'e'], close: () => openPrompts(false) },
     { name: 'removal', open: !!removal, arrows: true, blocksKeys: true, close: () => setRemoval(undefined) },
     { name: 'model', open: !!models, arrows: true, blocksKeys: true, close: () => setModelPanel(undefined) },
+    { name: 'loop', open: !!loopForm, arrows: true, blocksKeys: true, close: () => setLoopForm(undefined) },
     { name: 'thoughts', open: thoughtList, arrows: true, blocksKeys: true, close: () => openThoughts(false) },
     { name: 'history', open: historyQuery !== undefined, arrows: true, blocksKeys: true, close: () => setHistoryPanel(undefined) },
     { name: 'search', open: !!searchResults, arrows: true, blocksKeys: true, close: () => setSearchPanel(undefined) },
@@ -273,26 +301,40 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   }, [answerPending, pending]);
   const approvalKeysActive = pending?.kind === 'approval' && !copyMode && !panelBlocksKeys;
   const approvalIndex = approvalSelection?.eventId === eventId ? approvalSelection.index : -1;
-  const answerQuestion = async (selected: string[], custom?: string): Promise<boolean> => {
-    if (controller.state.pending[0]?.eventId !== eventId) throw new Error('The pending question has changed');
-    const answer = { id: question!.id, selected, ...(custom ? { custom } : {}) };
-    const next = [...answered, answer];
-    if (next.length === questions.length) {
-      // A rejected submission keeps the collected answers and the keyboard state, so the reader can
-      // retry the same answer instead of rebuilding it.
-      if (!await controller.actions.answer({ answers: next })) return false;
-      const rest = { ...controller.queries.interaction.answers }; delete rest[eventId]; controller.actions.setAnswers(rest);
-    } else controller.actions.setAnswers({ ...controller.queries.interaction.answers, [eventId]: next });
-    controller.actions.setOption(undefined);
-    return true;
-  };
-
   // Actions own their busy/error envelope; this only surfaces a UI-local orchestration failure.
   const operate = (fn: () => Promise<unknown>) => { void fn().catch(error => setNotice(errorText(error))); };
   /** Resolve and apply a removal; shared by the pickers' `d` key and the delete commands. */
   async function requestRemoval(kind: 'workspace' | 'session', query: string): Promise<boolean> {
-    const intent = await removalIntent(controller, kind, query);
-    return intent === undefined ? false : await applyIntent(intent);
+    const effects = await removalIntent(controller, kind, query);
+    if (effects === undefined) return false;
+    for (const effect of effects) await applyEffect(effect);
+    return true;
+  }
+  /** Run one record with the values the form confirmed.
+   *
+   * The line is handed back to the application as a parsed command, so the form and a typed command
+   * start a run through exactly the same path and cannot disagree about what the values mean.
+   * @param name - Record key to run.
+   * @param run - The four limits and the record variables as the form left them.
+   */
+  function startLoopFromForm(name: string, run: LoopRun): void {
+    controller.traceNote('loop-ui', { phase: 'start', name, from: run.limits.from, to: run.limits.to,
+      score: run.limits.score, tries: run.limits.tries, vars: Object.keys(run.vars) });
+    operate(async () => {
+      const port: CommandPort = { interactive: true, run: (label, operation) => controller.actions.foreground('command', label, operation) };
+      // Start is a second submission (§3.4): the form may have been open while a turn started or a
+      // question arrived, so the line is authorized again here rather than trusting the earlier one.
+      const verdict = verdictFor({ kind: 'loop', name, options: { ...run.limits, vars: run.vars } });
+      const result = await runCommand(controller, verdict.allow ? verdict.command : verdict.error, port);
+      // A rejected result carries its own error and keeps the form open; only a missing one would leave
+      // Start looking ignored, so it says the same thing here.
+      if (result === undefined) {
+        setNotice(`Loop did not start: ${controller.state.operation.error || 'the host did not accept the request'}`);
+        return;
+      }
+      await applyResult(result);
+      if (result.disposition === 'consume') setLoopForm(undefined);
+    });
   }
   useInput((_value, key) => {
     if (key.eventType === 'release') return;
@@ -300,24 +342,31 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       if (key.escape || key.ctrl && (_value === 's' || _value === 'c')) setCopyMode(false);
       return;
     }
+    // The loop form owns every key but Ctrl+C: it reads them itself, and leaving them to this handler
+    // would let a digit meant for a value start a composer draft or a recall step.
+    if (loopForm && !(key.ctrl && _value === 'c')) return;
     if (key.ctrl && _value === 's') { setCopyMode(true); return; }
-    // A borrowed composer owns Esc: it drops the edit and clears the draft it loaded.
-    if (composerIntent && key.escape) { setInput(''); setComposerIntent(undefined); return; }
-    if ((key.escape || key.ctrl && _value === 'c') && historyAbort.current) {
-      historyAbort.current.abort();
-      // Esc also leaves a history list that was already on screen when the load was aborted.
-      if (key.escape && historyQuery !== undefined) { setHistoryPanel(undefined); }
-      return;
-    }
-    if ((key.escape || key.ctrl && _value === 'c') && controller.state.pending.length) {
-      if (key.ctrl && input) setInput('');
-      if (key.escape) {
+    // Esc is a table, not a chain (§5.4): the first rule whose condition holds wins. A table is what
+    // keeps a new surface from either shipping with no Escape rule or placing one after the fallback,
+    // where it can never run — the two mistakes this replaces.
+    const escapeRules: { when: boolean; run: () => void }[] = [
+      // 1 Copy mode is handled above: it owns the keyboard outright.
+      // 2 A borrowed composer drops the edit and the draft it loaded.
+      { when: composerIntent !== undefined, run: () => { setInput(''); setComposerIntent(undefined); } },
+      // 3 A cancellable load in flight is the most urgent thing Esc can stop.
+      { when: foreground !== undefined, run: () => {
+        controller.actions.cancelForeground();
+        // Esc also leaves a history list that was already on screen when the load was aborted.
+        if (historyQuery !== undefined) setHistoryPanel(undefined);
+      } },
+      // 4 An approval or a question owns the keyboard until it is settled.
+      { when: pending !== undefined, run: () => {
         controller.actions.setApproval(undefined);
         setRemoval(undefined); setModelPanel(undefined); openThoughts(false); setSearchPanel(undefined);
         setHistoryPanel(undefined); setHelp(false); setCostExpanded(false); setStatusExpanded(false);
-        // A question batch is one request, so Esc leaves the whole set the way the Web client's
-        // close button does. The free-text row keeps its own step back: its first Esc returns to
-        // the options, and only the next one dismisses. Approval keeps every choice explicit.
+        // A question batch is one request, so Esc leaves the whole set the way the Web client's close
+        // button does. The free-text row keeps its own step back: its first Esc returns to the options,
+        // and only the next one dismisses. Approval keeps every choice explicit.
         if (pending?.kind === 'question' && !choiceState.custom) {
           if (controller.state.online && !controller.state.operation.busy && controller.state.pending[0]?.eventId === eventId) {
             controller.actions.setOption(undefined);
@@ -327,7 +376,51 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           return;
         }
         controller.actions.setOption({ ...choiceState, custom: false });
-      }
+      } },
+      // 5 The panels a command opened.
+      { when: queueOpen === true, run: () => openQueue(false) },
+      { when: promptsOpen === true, run: () => openPrompts(false) },
+      { when: removal !== undefined, run: () => setRemoval(undefined) },
+      { when: models !== undefined, run: () => setModelPanel(undefined) },
+      { when: thoughtList === true, run: () => { openThoughts(false); if (controller.queries.running) void controller.actions.interrupt(true); } },
+      { when: searchResults !== undefined, run: () => { setSearchPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); } },
+      { when: historyQuery !== undefined, run: () => { setHistoryPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); } },
+      // 6 Screens. The typed host path is one of them: the picker behind it is disabled while a draft
+      // exists, so a leftover path would leave no way back at all.
+      { when: state.screen === 'path', run: () => { setInput(''); operate(() => controller.actions.showPicker('workspaces')); } },
+      // A picker opened over a conversation is a detour, so Esc returns to that conversation; from the
+      // session list with nothing selected it steps back to the workspace list instead, which is the
+      // only thing behind the startup picker.
+      { when: state.screen === 'sessions', run: () => { if (!controller.actions.showChat()) operate(() => controller.actions.showPicker('workspaces')); } },
+      { when: state.screen === 'workspaces', run: () => { controller.actions.showChat(); } },
+      // 7 The composer's own menus: hiding one never undoes the choice it was offering.
+      { when: loopMenuOpen === true, run: () => setDismissedLoopMenu(input) },
+      { when: referenceOpen === true, run: () => { setDismissedReference(input); if (controller.queries.running) void controller.actions.interrupt(true); } },
+      // 8 The read-only surfaces.
+      { when: help || costExpanded || statusExpanded || notice !== undefined, run: () => {
+        setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusScroll(0); setNotice(undefined);
+        if (controller.queries.running) void controller.actions.interrupt(true);
+      } },
+      // 9 A local command in the transcript is more immediate than the agent behind it.
+      { when: state.shell.running && input === '' && !panelBlocksKeys && pending === undefined && state.screen === 'chat',
+        run: () => controller.shell.cancel() },
+      // 10 Anything left on the conversation screen cancels whatever the agent is doing.
+      { when: state.screen === 'chat', run: () => { void controller.actions.interrupt(true); } },
+    ];
+    if (key.escape) {
+      const rule = escapeRules.find(candidate => candidate.when);
+      if (rule !== undefined) { rule.run(); return; }
+    }
+    // Ctrl+C is not Esc: it never dismisses a dialog, and when nothing is pending it stops the agent
+    // and then exits. The branches below keep that order.
+    if (key.ctrl && _value === 'c') {
+      if (controller.queries.foreground !== undefined) { controller.actions.cancelForeground(); return; }
+      if (controller.state.pending.length) { if (input) setInput(''); return; }
+      if (input === '' && state.shell.running) { controller.shell.cancel(); return; }
+      // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
+      if (input !== '') { setInput(''); return; }
+      if (composerIntent) { setComposerIntent(undefined); return; }
+      void controller.actions.interrupt().then(shouldExit => { if (shouldExit) exit(); });
       return;
     }
     if (approvalKeysActive && !input && controller.state.online && !controller.state.operation.busy
@@ -362,7 +455,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         if (optionCursor === options.length) { controller.actions.setOption({ ...choiceState, custom: true }); return; }
         const selected = question!.multiSelect === true ? choiceState.selected : [string(options[optionCursor]!.label)];
         if (!selected.length) { setNotice('Select at least one option with Space or a number'); return; }
-        operate(() => answerQuestion(selected)); return;
+        operate(() => controller.actions.answerQuestion({ selected })); return;
       }
     }
     if (help && (key.pageUp || key.pageDown)) {
@@ -375,30 +468,17 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setStatusScroll(value => Math.max(0, value + (key.pageUp ? -statusViewRows : statusViewRows))); return;
     }
     if (key.pageUp || key.pageDown) { scrollHistory(key.pageUp ? 10 : -10); return; }
-    if (key.escape && queueOpen) { openQueue(false); return; }
-    if (key.escape && promptsOpen) { openPrompts(false); return; }
-    if (key.escape && removal) { setRemoval(undefined); return; }
-    if (key.escape && models) { setModelPanel(undefined); return; }
-    if (key.escape && thoughtList) { openThoughts(false); if (controller.queries.running) void controller.actions.interrupt(true); return; }
-    if (key.escape && searchResults) { setSearchPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); return; }
-    if (key.escape && historyQuery !== undefined) { setHistoryPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); return; }
-    // The typed host path is a screen of its own, so Esc has to leave it: the picker behind it is
-    // disabled while a draft exists, so a leftover path would leave no way back at all.
-    if (key.escape && state.screen === 'path') { setInput(''); operate(() => controller.actions.showPicker('workspaces')); return; }
-    if (key.ctrl && _value === 'c' && input === '' && state.shell.running) {
-      // A local command in the transcript is the most immediate thing Ctrl+C can stop.
-      controller.shell.cancel(); return;
-    }
-    if (key.ctrl && _value === 'c') {
-      // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
-      if (input !== '') { setInput(''); return; }
-      if (composerIntent) { setComposerIntent(undefined); return; }
-      void controller.actions.interrupt().then(shouldExit => { if (shouldExit) exit(); });
-      return;
+    if (loopMenuOpen) {
+      if (key.tab) {
+        const chosen = loopCandidates[loopMenuCursor];
+        if (chosen !== undefined) setInput(`/loop ${chosen.name}`);
+        return;
+      }
+      if (key.upArrow) { setLoopMenuIndex(Math.max(0, loopMenuCursor - 1)); return; }
+      if (key.downArrow) { setLoopMenuIndex(Math.min(loopCandidates.length - 1, loopMenuCursor + 1)); return; }
     }
     if (referenceOpen) {
-      if (key.escape) { setDismissedReference(input); if (controller.queries.running) void controller.actions.interrupt(true); }
-      else if (key.tab) pickReference();
+      if (key.tab) pickReference();
       else if (key.upArrow) setReferenceIndex(Math.max(0, referenceIndex - 1));
       else if (key.downArrow) setReferenceIndex(Math.max(0, Math.min((matches?.items.length ?? 1) - 1, referenceIndex + 1)));
       return;
@@ -418,17 +498,28 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setInput(controller.queries.recall(recallPrevious ? -1 : 1, input), true); return;
     }
     if (key.tab && !composerIntent) { completeCommand(); return; }
-    if (key.escape && (help || costExpanded || statusExpanded || notice !== undefined)) {
-      setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusScroll(0); setNotice(undefined);
-      if (controller.queries.running) void controller.actions.interrupt(true);
-      return;
-    }
-    if (key.escape && state.shell.running && input === '' && !panelBlocksKeys && !pending && state.screen === 'chat') {
-      // The local command is the most immediate thing Esc can stop; the next press interrupts the agent.
-      controller.shell.cancel(); return;
-    }
-    if (key.escape && state.screen === 'chat') { void controller.actions.interrupt(true); }
   });
+
+  /** The application facts `normalize`/`authorize` read, read in one place.
+   *
+   * Every submission uses these — the composer's line and the loop form's Start — so a command cannot
+   * pass one door and not the other (§3.4: authorize is per submission, not per user action).
+   */
+  function applicationFacts() {
+    return {
+      sessionSelected: state.sessionId !== undefined,
+      pending: pending !== undefined,
+      // A loop is reported as such because stopping it is what the refusal has to name.
+      during: controller.queries.loop?.active === true ? 'loop' as const
+        : controller.queries.running ? 'turn' as const : 'idle' as const,
+    };
+  }
+
+  /** Authorize one already-normalized line against the facts as they are *now*. */
+  function verdictFor(command: LineCommand) {
+    const facts = applicationFacts();
+    return authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending, during: facts.during });
+  }
 
   const submit = async (raw: string) => {
     // A borrowed composer commits on Enter instead of sending, so an edit is never delivered.
@@ -438,59 +529,110 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       if (await composerIntent.commit(text)) { setComposerIntent(undefined); setInput(''); }
       return;
     }
-    const submission = routeEnter({ line: raw,
-      referenceOpen, copyMode, pending: pending !== undefined, question: question !== undefined, screen: state.screen });
-    if (submission.kind === 'ignore') return;
-    if (submission.kind === 'reference') { pickReference(); return; }
-    const value = raw.trim();
+    // A composer menu completes the draft before it is submitted: Enter on the record list accepts the
+    // highlighted record exactly as if its name had been typed, so even that decision belongs to the
+    // pipeline below — the application still says whether a bare known name opens its form.
+    const highlighted = loopDraft !== undefined && loopForm === undefined ? loopCandidates[loopMenuCursor] : undefined;
+    if (highlighted !== undefined) {
+      controller.traceNote('loop-ui', { phase: 'choose', draft: loopDraft ?? '', index: loopMenuCursor,
+        candidates: loopCandidates.length, chosen: highlighted.name });
+    }
+    const line = highlighted === undefined ? raw : `/loop ${highlighted.name}`;
+    // The pipeline decides what the line means; the root only carries out the three stages' results.
+    const submission = interpret({ line, referenceOpen, copyMode, screen: state.screen });
+    if (submission.kind === 'mode') {
+      if (submission.action.kind === 'ignore') return;
+      pickReference(); return;
+    }
+    const facts = applicationFacts();
+    const command = normalize(submission, { sessionSelected: facts.sessionSelected, question: question !== undefined, pending: facts.pending });
+    const verdict = verdictFor(command);
+    const executable = verdict.allow ? verdict.command : verdict.error;
+    // One line completes before the next may start: while a line still owns the controller (its busy
+    // envelope) or a UI-orchestrated request is running, the composer refuses a second submission —
+    // a slash command and an ordinary prompt alike. The focus gate already enforces this; the guard
+    // keeps the rule true if a caller ever submits without passing through the editor. A control
+    // command is the exception: its whole purpose is to interrupt the line that owns the controller,
+    // so it is admitted through while everything else waits (§6.3.2 control lane).
+    if (state.operation.busy && !isControlCommand(executable.kind)) return;
+    const value = line.trim();
     if (!pending && !/^\/feedback(?:\s|$)/.test(value)) controller.actions.recordRecall(value);
-    // The application decides what the line does and returns a view intent; the UI only applies it.
-    const port: CommandPort = { run: (label, operation) => historyOperation(operation, label) };
-    let accepted = false;
+    // The application decides what the command does and returns the effects; the UI applies them in
+    // order. The port says a surface can be shown, which is what lets `/loop <name>` confirm defaults.
+    const port: CommandPort = { interactive: true, run: (label, operation) => controller.actions.foreground('command', label, operation) };
     try {
-      const intent = await runCommand(controller, submission, port);
-      if (intent !== undefined) accepted = await applyIntent(intent);
+      const result = await runCommand(controller, executable, port);
+      if (result !== undefined) {
+        await applyResult(result);
+        // Consuming the line is the application's decision, so the composer never guesses it. Only the
+        // line that was submitted is cleared: the operation may have taken long enough for the operator
+        // to write the next one (D1), and that draft is theirs, not this result's to discard.
+        if (result.disposition === 'consume' && inputRef.current === raw) setInput('');
+      }
     } catch (error) { setNotice(errorText(error)); }
-    if (accepted) setInput('');
   };
 
-  /** Apply one application-produced view intent; the UI names no command here. */
-  async function applyIntent(intent: CommandIntent): Promise<boolean> {
-    if (intent.quit) { exit(); return true; }
-    if (intent.copy) setCopyMode(true);
-    if (intent.closePanels) closePanelsExcept(intent.open ?? intent.toggle);
-    if (intent.close !== undefined) closePanel(intent.close);
-    if (intent.live) controller.actions.setViewWindow(undefined);
-    if (intent.pinLive) controller.actions.pinHistory(false);
-    if (intent.resetFolds) setReasoningOverrides(new Set());
-    if (intent.toggle === 'help') { setHelp(value => !value); setHelpPage(0); }
-    else if (intent.toggle === 'cost') {
-      const next = !costExpanded; setCostExpanded(next);
-      if (next) void historyOperation(signal => controller.actions.refreshCosts(signal));
-    } else if (intent.toggle === 'status') { setStatusExpanded(value => !value); setStatusScroll(0); }
-    if (intent.open === 'queue') openQueue(true);
-    else if (intent.open === 'prompts') openPrompts(true);
-    else if (intent.open === 'thoughts') openThoughts(true);
-    if (intent.history !== undefined) setHistoryPanel(intent.history);
-    if (intent.search !== undefined) setSearchPanel(intent.search);
-    if (intent.model !== undefined) setModelPanel(intent.model);
-    if (intent.removal !== undefined) setRemoval(intent.removal);
-    if (intent.toggleLiveReasoning) setLiveReasoning(liveReasoning === 'row' ? 'full' : 'row');
-    if (intent.toggleFold !== undefined) {
-      const next = new Set(reasoningOverrides);
-      if (next.delete(intent.toggleFold)) setReasoningOverrides(next);
-      else { next.add(intent.toggleFold); setReasoningOverrides(next); await jumpHistory(intent.toggleFold, next); }
-    }
-    if (intent.scroll !== undefined) setScroll(intent.scroll);
-    const { scrollBy } = intent;
-    if (scrollBy !== undefined) setScroll(current => current + scrollBy);
-    if (intent.answer !== undefined) return await answerQuestion(question!.multiSelect === true ? choiceState.selected : [], intent.answer);
-    if (intent.error !== undefined) { setNotice(intent.error); return false; }
-    if (intent.notice !== undefined) setNotice(intent.notice);
-    return true;
+  /** Apply one command result: its effects in the order the application emitted them.
+   *
+   * This is the whole front-end half of a command — the UI names no command here and never reorders.
+   * @param result - What the application did and what should be shown.
+   */
+  async function applyResult(result: CommandResult): Promise<void> {
+    // `closePanels` must know which panel this result keeps, and the contract puts it first, so the
+    // kept panel is read from the whole list before any effect runs.
+    const keep = result.effects.find(effect => effect.kind === 'open' || effect.kind === 'toggle');
+    const keepPanel = keep?.kind === 'open' || keep?.kind === 'toggle' ? keep.panel : undefined;
+    for (const effect of result.effects) await applyEffect(effect, keepPanel);
   }
 
-  /** Close every panel except the one an intent keeps open. */
+  /** Apply one presentational verb. */
+  async function applyEffect(effect: ViewEffect, keepPanel?: PanelName): Promise<void> {
+    switch (effect.kind) {
+      case 'quit': exit(); return;
+      case 'copy': setCopyMode(true); return;
+      case 'closePanels': closePanelsExcept(keepPanel); return;
+      case 'close': closePanel(effect.panel); return;
+      case 'open':
+        if (effect.panel === 'queue') openQueue(true);
+        else if (effect.panel === 'prompts') openPrompts(true);
+        else if (effect.panel === 'thoughts') openThoughts(true);
+        return;
+      case 'toggle':
+        if (effect.panel === 'help') { setHelp(value => !value); setHelpPage(0); }
+        else if (effect.panel === 'cost') setCostExpanded(value => !value);
+        else if (effect.panel === 'status') { setStatusExpanded(value => !value); setStatusScroll(0); }
+        return;
+      case 'history': setHistoryPanel(effect.history); return;
+      case 'search': setSearchPanel(effect.search); return;
+      case 'model': setModelPanel(effect.model); return;
+      case 'removal': setRemoval(effect.removal); return;
+      case 'loop': {
+        // The application validated the record before asking for the form, so the UI only records that
+        // the request arrived and renders it.
+        const known = controller.queries.loopRecords.some(record => record.name === effect.loop.name);
+        controller.traceNote('loop-ui', { phase: 'open', name: effect.loop.name, known });
+        setDismissedLoopMenu(undefined);
+        setLoopForm({ name: effect.loop.name });
+        return;
+      }
+      case 'live': controller.actions.setViewWindow(undefined); return;
+      case 'pinLive': controller.actions.pinHistory(false); return;
+      case 'resetFolds': setReasoningOverrides(new Set()); return;
+      case 'toggleLiveReasoning': setLiveReasoning(liveReasoning === 'row' ? 'full' : 'row'); return;
+      case 'toggleFold': {
+        const next = new Set(reasoningOverrides);
+        if (next.delete(effect.seq)) setReasoningOverrides(next);
+        else { next.add(effect.seq); setReasoningOverrides(next); await jumpHistory(effect.seq, next); }
+        return;
+      }
+      case 'scroll': setScroll(effect.position); return;
+      case 'scrollBy': setScroll(current => current + effect.delta); return;
+      case 'notice': setNotice(effect.text); return;
+      case 'error': setNotice(effect.text); return;
+    }
+  }
+
+  /** Close every panel except the one a result keeps open. */
   function closePanelsExcept(keep?: PanelName): void {
     for (const surface of surfaces) if (surface.name !== keep) surface.close?.();
   }
@@ -604,11 +746,16 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       }
     }).finally(() => { loadingPage.current = false; });
   }
+  /** Run one front-end-orchestrated operation in the controller's foreground slot.
+   *
+   * The slot, its abort controller and its label live in the controller (§6.2), so this is only a
+   * typed name for the common case: paging through history.
+   * @param operation - Work handed the signal the controller aborts.
+   * @param label - Label the status line shows while it runs.
+   * @returns The value, or undefined when the slot was taken or the work was cancelled.
+   */
   async function historyOperation<T>(operation: (signal: AbortSignal) => Promise<T>, label = 'Loading history…'): Promise<T | undefined> {
-    const abort = new AbortController();
-    historyAbort.current = abort; setHistoryLoading(label);
-    try { return await operation(abort.signal); }
-    finally { if (historyAbort.current === abort) { historyAbort.current = undefined; setHistoryLoading(undefined); } }
+    return await controller.actions.foreground('history', label, operation);
   }
 
   /** Reach one prompt older than the index's boundary, from memory first and the host second.
@@ -652,20 +799,18 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   async function jumpHistory(target: number, folds = reasoningOverrides): Promise<void> {
     if (state.screen !== 'chat') throw new Error('Select a session first');
     ++scrollIntent.current;
-    const abort = new AbortController();
-    historyAbort.current = abort;
-    try {
+    await controller.actions.foreground('history', 'Jumping to a message…', async signal => {
       const transcript = displayTranscript.messages.some(message => message.seq === target) ? displayTranscript
         : state.session.record.messages.some(message => message.seq === target) ? state.session.record
-        : await controller.queries.historyAt(target, abort.signal);
-      abort.signal.throwIfAborted();
+        : await controller.queries.historyAt(target, signal);
+      signal.throwIfAborted();
       const current = controller.queries.render({ transcript, width, folds, liveReasoning });
       const row = current.offsets.get(target);
-      if (row === undefined) throw new Error('No visible message at this sequence; use /history to choose a record');
+      if (row === undefined) throw new Error('No visible message at that sequence; use /history to choose a record');
       controller.actions.setViewWindow(transcript === state.session.record ? undefined : transcript);
       setHistoryPanel(undefined); openThoughts(false);
       setScroll(Math.max(0, current.length - pageSize - row));
-    } finally { if (historyAbort.current === abort) historyAbort.current = undefined; }
+    });
   }
   useMouseWheel(direction => { if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3)); else scrollHistory(direction * 3); }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
   const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
@@ -689,7 +834,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const headerTitle = controller.queries.sessionName
     ? [controller.queries.sessionName, width >= 60 ? workspaceName : undefined].filter(Boolean).join(' · ')
     : workspaceName || 'All workspaces';
-  const commandSuggestions = input.startsWith('/') && !input.includes(' ') ? suggestedCommands(input) : undefined;
+  const commandSuggestions = !loopMenuOpen && input.startsWith('/') && !input.includes(' ') ? suggestedCommands(input) : undefined;
+  // Once the name is settled and arguments begin, the composer says what this command takes. The
+  // `/loop` record list is more specific, so it replaces the generic line rather than stacking on it.
+  const commandHint = loopMenuOpen ? undefined : argumentHint(input);
   // Reading older history pauses the clock without freezing the connection state on picker screens.
   // A paused clock is named rather than left frozen: a stopped number looks like a stall.
   const pauseReason: 'copy' | 'dialog' | 'history' | undefined = copyMode ? 'copy'
@@ -708,7 +856,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const session = sessionOf();
     return {
       host: controller.base, online: state.online, status: state.status,
-      running: controller.queries.running, since: controller.queries.workingSince,
+      running: controller.queries.running,
+      // What is busy, and since when, is the controller's answer; the bar only draws it.
+      ...(controller.queries.activity === undefined ? {} : { activity: controller.queries.activity }),
       sessionId: state.sessionId, sessionMode: controller.queries.sessionMode,
       workspaceLabel: workspace ? `${string(workspace.title)} · ${string(workspace.path)}` : 'none selected',
       activeTurnStartedAt: state.session.record.activeTurnStartedAt,
@@ -750,7 +900,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     {copyMode && <Text color={theme.accent}>Copy mode · drag to select · Esc / Ctrl+S resumes</Text>}
     <ChatHeader title={headerTitle} mode={controller.queries.sessionMode} width={width} frozen={displayPaused} identity={`${width}:${state.sessionId}`} />
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden">
-    {historyLoading && <Text dimColor>{historyLoading} · Esc / Ctrl+C cancel</Text>}
+    {foreground && <Text dimColor>{foreground.label} · Esc / Ctrl+C cancel</Text>}
     <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
     {state.operation.error && <Text color={theme.colors.error}>{state.operation.error}</Text>}
       {state.screen === 'chat' && <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
@@ -763,7 +913,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {loop && <LoopStatus progress={loop} />}
       <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
-    {queueOpen && !pending ? <QueueDialog queued={queued} rows={stdout.rows ?? 30} width={width}
+    {loopForm && loopRecord ? <LoopDialog key={loopForm.name} record={loopRecord}
+      enabled={state.online && !controller.state.operation.busy}
+      onStart={run => startLoopFromForm(loopForm.name, run)}
+      onBack={() => { setLoopForm(undefined); setInput('/loop '); setDismissedLoopMenu(undefined); }}
+      onClose={() => setLoopForm(undefined)} /> : queueOpen && !pending ? <QueueDialog queued={queued} rows={stdout.rows ?? 30} width={width}
       unavailable={!!state.controlError}
       enabled={!input && !state.operation.busy && state.online}
       canSelect={() => !input && !controller.state.operation.busy && controller.state.online && !controller.state.pending.length}
@@ -840,13 +994,18 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     </>}
         </Box>
         {!queueOpen && !pending && state.screen === 'chat' && queued.length > 0 && <QueuedPreview queued={queued} width={width} />}
+        {/* D1: a long operation must not take the keyboard away. The draft stays editable, Enter is
+            refused by the admission guard in `submit` instead of being sent or dropped, and nothing
+            sends the draft when the operation finishes. */}
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(input); }}
           reservedKeys={approvalKeysActive ? ['1','2','3'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : surfaceReservedKeys.length ? surfaceReservedKeys : undefined}
           width={draftWidth} maxRows={composerRows} promptColor={answerPending ? theme.colors.muted : theme.accent}
-          focus={state.online && !state.operation.busy && !copyMode && !answerPending} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
+          focus={state.online && !copyMode && !answerPending && !loopForm} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
+      {loopMenuOpen && <LoopMenu records={loopCandidates} index={loopMenuCursor} />}
       </Box>
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
+      {commandHint && <Text dimColor><Text color={theme.accent}>{commandHint.command}{commandHint.usage === undefined ? '' : ` ${commandHint.usage}`}</Text> · {commandHint.description}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
       {costExpanded && <CostPanel source={costSource} />}
       <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}:${pauseReason ?? ''}`}><StatusBar source={statusSource} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} onRows={setStatusBarRows} pauseReason={pauseReason} revision={state.version} /></Frozen>

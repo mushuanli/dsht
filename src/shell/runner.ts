@@ -85,6 +85,8 @@ export function runProcess(file: string, args: readonly string[], options: Shell
  */
 function spawnLines(file: string, args: readonly string[], options: ShellRunOptions): Promise<ShellExit> {
   return new Promise<ShellExit>(resolve => {
+    // Nothing to cancel yet: never spawn a process the caller already abandoned.
+    if (options.signal.aborted) { resolve({ code: null, signal: 'SIGTERM' }); return; }
     const child = spawn(file, [...args], {
       cwd: options.cwd, env: options.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -93,7 +95,18 @@ function spawnLines(file: string, args: readonly string[], options: ShellRunOpti
     let settled = false;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
-    /** Emit one assembled line, keeping the partial remainder for the next chunk. */
+    /** Emit one assembled line, truncated to the budget.
+     *
+     * The bound is applied to every emitted line, not only to a partial remainder that overflowed:
+     * pipe chunking decides whether one huge line arrives whole or in pieces, so a bound applied only
+     * to the remainder would make the client's memory depend on the operating system's read size.
+     */
+    const emit = (line: string, stream: ShellStream): void => {
+      if (discarding[stream]) { discarding[stream] = false; return; }
+      const clean = line.replace(/\r$/, '');
+      options.onLine(clean.length > MAX_LINE_CHARS ? `${clean.slice(0, MAX_LINE_CHARS)}…` : clean, stream);
+    };
+    /** Split one chunk into lines, keeping the partial remainder for the next chunk. */
     const feed = (stream: ShellStream, chunk: string): void => {
       carry[stream] += chunk;
       for (;;) {
@@ -101,16 +114,16 @@ function spawnLines(file: string, args: readonly string[], options: ShellRunOpti
         if (newline < 0) break;
         const line = carry[stream].slice(0, newline);
         carry[stream] = carry[stream].slice(newline + 1);
-        if (discarding[stream]) discarding[stream] = false;
-        else options.onLine(line.replace(/\r$/, ''), stream);
+        emit(line, stream);
       }
       if (carry[stream].length > MAX_LINE_CHARS) {
+        // No newline in sight: emit the head once and drop the rest of this line.
         if (!discarding[stream]) { options.onLine(`${carry[stream].slice(0, MAX_LINE_CHARS)}…`, stream); discarding[stream] = true; }
         carry[stream] = '';
       }
     };
     const flush = (stream: ShellStream): void => {
-      if (carry[stream] !== '' && !discarding[stream]) options.onLine(carry[stream].replace(/\r$/, ''), stream);
+      if (carry[stream] !== '') emit(carry[stream], stream);
       carry[stream] = '';
     };
     const finish = (exit: ShellExit): void => {

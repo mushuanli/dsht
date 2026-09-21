@@ -1,8 +1,8 @@
 /** Startup automation: pick a workspace and a session, then run the requested slash lines.
  *
  * This is the scriptable half of the client — `dsht --ws X --session new --command "…"` — so a
- * review can be launched without typing. It drives the same controller the UI drives, and applies
- * only the effect of each line: the presentational part of a command's intent belongs to the UI.
+ * review can be launched without typing. It drives the same controller the UI drives, and reads only
+ * the outcome of each line: the presentational effects of a command belong to the UI.
  */
 import { runCommand, type CommandPort, type Controller } from '../controller/index.ts';
 import { errorText } from '../transport/wire.ts';
@@ -10,7 +10,8 @@ import { dirname } from 'node:path';
 import { ensureDirectory, renameFile, writePrivateFile } from '../storage/index.ts';
 import { latestAssistantText } from '../controller/loop.ts';
 import { parseVerdict } from '../controller/loop-contract.ts';
-import { parseCommand } from '../slash/index.ts';
+import { needsHumanLine, type VerificationHumanRequest } from '../controller/verifier.ts';
+import { authorize, normalize } from '../slash/index.ts';
 
 /** What the operator asked the client to do before/while taking over. */
 export interface StartupPlan {
@@ -39,7 +40,7 @@ export interface VerdictTarget {
 }
 
 /** How the startup run ended. */
-export type StartupOutcome = 'passed' | 'idle' | 'failed';
+export type StartupOutcome = 'passed' | 'idle' | 'failed' | 'needs-human';
 
 const POLL_MS = 250;
 /** How long a connection, session or workspace operation may take. */
@@ -94,20 +95,36 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
   // and exports, which have no meaning before the operator is present.
   const port: CommandPort = { run: (_label, operation) => operation(controller.connection.signal()) };
   for (const line of plan.commands) {
-    const command = parseCommand(line);
-    if (command.kind === 'ignore') throw new Error('Empty command');
+    // The scripted half runs the same two stages the composer does after `interpret`: a headless
+    // caller has no menus or screens, but it has every application fact `normalize`/`authorize` read.
+    const command = normalize({ kind: 'line', line }, {
+      sessionSelected: controller.state.sessionId !== undefined,
+      question: controller.state.pending[0]?.kind === 'question',
+      pending: controller.state.pending.length > 0,
+    });
     if (command.kind === 'error') throw new Error(command.message);
-    const intent = await runCommand(controller, command, port);
-    if (intent === undefined) {
+    const verdict = authorize(command, {
+      sessionSelected: controller.state.sessionId !== undefined,
+      pending: controller.state.pending.length > 0,
+      during: controller.queries.loop?.active === true ? 'loop' : controller.queries.running ? 'turn' : 'idle',
+    });
+    if (!verdict.allow) throw new Error(verdict.error.message);
+    const result = await runCommand(controller, verdict.command, port);
+    if (result === undefined) {
       const reason = controller.state.operation.error;
       throw new Error(`Command was not accepted: ${line}${reason ? ` (${reason})` : ''}`);
     }
-    if (intent.error !== undefined) throw new Error(intent.error);
-    if (intent.notice !== undefined) log(intent.notice);
+    if (result.outcome !== 'ok') {
+      const failure = result.effects.find(effect => effect.kind === 'error');
+      throw new Error(failure?.kind === 'error' ? failure.text : `Command failed (${result.outcome}): ${line}`);
+    }
+    if (result.disposition === 'retain') throw new Error(`Command did not settle: ${line}`);
+    for (const effect of result.effects) if (effect.kind === 'notice') log(effect.text);
   }
 
-  // The count is taken before the prompt, because a turn can start and finish between two polls.
+  // Both counts are taken before the prompt, because a turn can start and finish between two polls.
   const finishedBefore = controller.queries.turnsCompleted;
+  const repliesBefore = controller.queries.record.messages.length;
   if (plan.prompt !== undefined) {
     // Sending a prompt needs the follow snapshot, and a verifier starts the instant a busy turn ends,
     // so this wait is longer than a normal startup step: the host can be slow to open the new stream.
@@ -125,7 +142,7 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
   if (controller.queries.loop !== undefined) return await waitForLoop(controller, plan.timeoutSeconds * 1000, log);
   if (plan.wait) {
     const outcome = await waitForTurn(controller, finishedBefore, plan.timeoutSeconds * 1000, log);
-    if (outcome === 'idle' && plan.verdict !== undefined) await writeVerdict(controller, plan.verdict, log);
+    if (outcome === 'idle' && plan.verdict !== undefined) await writeVerdict(controller, plan.verdict, repliesBefore, log);
     return outcome;
   }
   return 'idle';
@@ -138,22 +155,34 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
  * A reply with no usable verdict changes nothing — the parent validates whatever is there.
  * @param controller - Connected facade whose transcript holds the reply.
  * @param target - File to write and the identity the verdict must declare.
+ * @param repliesBefore - Messages on the transcript before the prompt was sent: only a reply that
+ *   arrived after it can be this turn's, so an idle from an earlier or replayed turn cannot be read
+ *   as the verdict.
  * @param log - Progress sink.
  */
-async function writeVerdict(controller: Controller, target: VerdictTarget, log: (line: string) => void): Promise<void> {
+async function writeVerdict(controller: Controller, target: VerdictTarget, repliesBefore: number, log: (line: string) => void): Promise<void> {
   const [, kind = '', step = '', attempt = ''] = target.identity.split('/');
   const expect = { verificationId: target.identity, kind, step: Number(step), attempt: Number(attempt) };
   // The host reports the turn idle just before that reply is committed, so an immediate parse can
-  // find nothing; the verdict is only missing once it has had time to arrive.
-  let parsed = parseVerdict(latestAssistantText(controller.queries.record.messages), expect);
+  // find nothing; the verdict is only missing once it has had time to arrive. Waiting on an
+  // assistant reply that did not exist when the prompt was sent is what ties the verdict to this
+  // prompt: the prompt itself only adds a user message, and an earlier turn's reply is behind the
+  // baseline.
+  const replyArrived = (): boolean => controller.queries.record.messages
+    .slice(repliesBefore).some(message => message.role === 'Assistant');
+  let parsed = replyArrived() ? parseVerdict(latestAssistantText(controller.queries.record.messages), expect) : undefined;
   const deadline = Date.now() + VERDICT_GRACE_MS;
   while (parsed === undefined && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, VERDICT_POLL_MS));
-    parsed = parseVerdict(latestAssistantText(controller.queries.record.messages), expect);
+    if (replyArrived()) parsed = parseVerdict(latestAssistantText(controller.queries.record.messages), expect);
   }
   if (parsed === undefined) {
-    // Say what the reply actually ended with: "no JSON at all" and "JSON that is not this round" are
-    // different faults, and one line here is what tells them apart without another live run.
+    // Say what actually happened: "no reply yet", "no JSON at all" and "JSON that is not this round"
+    // are different faults, and one line here is what tells them apart without another live run.
+    if (!replyArrived()) {
+      log('Turn ended but no reply was committed after the prompt; leaving the verdict file untouched');
+      return;
+    }
     const tail = latestAssistantText(controller.queries.record.messages).slice(-240).replace(/\s+/g, ' ');
     log(`No parsable verdict in the reply; leaving the verdict file untouched (reply tail: ${tail})`);
     return;
@@ -187,9 +216,26 @@ async function waitForTurn(controller: Controller, finishedBefore: number, timeo
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (controller.queries.turnsCompleted > finishedBefore) { log('Turn finished'); return 'idle'; }
+    // A headless verifier cannot answer an approval or a question: stop and say what is needed,
+    // instead of waiting for the deadline and being retried as an infrastructure failure.
+    const request = humanRequest(controller);
+    if (request !== undefined) { log(needsHumanLine(request)); return 'needs-human'; }
     if (Date.now() >= deadline) { log('Turn timed out'); return 'failed'; }
     await new Promise(resolve => setTimeout(resolve, POLL_MS));
   }
+}
+
+/** The host interaction this client cannot answer itself, when one is pending.
+ * @param controller - Connected facade whose selected session is the verifier's session.
+ * @returns The request to report, or undefined when nothing is pending.
+ */
+function humanRequest(controller: Controller): VerificationHumanRequest | undefined {
+  const [pending] = controller.state.pending;
+  if (pending === undefined) return undefined;
+  if (pending.kind === 'approval') {
+    return { kind: 'approval', text: pending.description === '' ? 'a tool approval is required' : pending.description };
+  }
+  return { kind: 'question', text: pending.questions[0]?.question ?? 'a question was asked' };
 }
 
 /** Select the directory this client runs in, registering it when the host does not know it yet. */
@@ -213,8 +259,16 @@ async function waitForLoop(controller: Controller, timeoutMs: number, log: (line
     if (progress === undefined || progress.phase !== 'running') {
       // A cancelled loop usually means the connection ended; say so, or the exit code is a mystery.
       const why = controller.state.operation.error || controller.state.status;
-      log(`Loop ${progress?.phase ?? 'gone'}${why ? ` · ${why}` : ''}${progress?.note === undefined ? '' : ` · ${progress.note}`}`);
-      return progress?.phase === 'passed' ? 'passed' : 'failed';
+      const interaction = progress?.interaction;
+      // `passed` only claims the rounds that ran, so a headless reader is told which ones.
+      const scope = progress?.phase === 'passed' ? ` · ${progress.scope}` : '';
+      log(`Loop ${progress?.phase ?? 'gone'}${scope}${why ? ` · ${why}` : ''}`
+        + `${interaction === undefined ? '' : ` · ${interaction.kind}: ${interaction.text}`}`
+        + `${progress?.note === undefined ? '' : ` · ${progress.note}`}`);
+      if (progress?.phase === 'passed') return 'passed';
+      // A run stopped on a host request is not a failure: it is waiting for a person, and phase 1
+      // deliberately has no in-process answer path.
+      return progress?.phase === 'needs-human' ? 'needs-human' : 'failed';
     }
     const label = progress.stepLabel === undefined ? '' : ` · ${progress.stepLabel}`;
     // The note carries why an attempt was decided the way it was — including why verification was
