@@ -13,7 +13,10 @@
 #   starts:   verify (check the existing artifact first) or work (default: ask for work first)
 #   artifactMarker: a template for the line the artifact must contain once a round is done (e.g. its
 #             section heading). The client checks it itself before accepting a round, so a high score
-#             cannot pass a round whose output never reached the file. Needs `artifact`.
+#             cannot pass a round whose output never reached the file. Needs `artifact`. Use the
+#             record's vars in the heading (designdoc-review does) whenever two runs can write into the
+#             same file: without the document in the heading, a section left by a run against another
+#             document satisfies the check and is then scored as this run's.
 #   standard: extra requirements folded on top of every round's rubric (replaces `/verify`)
 #   vars:     the record's inputs and their defaults, e.g. the document a review targets. `/loop`
 #             shows one editable row per name, so a run retargets the record without editing this file
@@ -142,7 +145,9 @@ protocols:
     steps: 10
     starts: verify
     artifact: "DESIGN-DOC-REVIEW.md"
-    artifactMarker: "## 第 {{step}} 轮 · {{title}}"
+    # The document is part of the heading: DESIGN-DOC-REVIEW.md accumulates one section per round, and
+    # a run retargeted to another document must not be satisfied by the sections of the previous one.
+    artifactMarker: "## 第 {{step}} 轮 · {{title}} · {{path}}"
     # The document under review, relative to the reviewed workspace. A different document means
     # editing this one line, not adding a command back.
     vars:
@@ -200,9 +205,9 @@ protocols:
       - "- 本轮收敛结论"
       - ""
       - >-
-        每轮结论必须写入工作区文件 {{artifact}} 的 “## 第 {{step}} 轮 · {{title}}”
-        小节：不存在则创建，已存在则替换该小节，不要覆盖其它轮次。验证者会直接读这个文件。若工作区不可写，则在正文给出完整内容并在 evidence 中说明。
+        每轮结论必须写入工作区文件 {{artifact}} 的 “## 第 {{step}} 轮 · {{title}} · {{path}}”
+        小节：不存在则创建，已存在则替换该小节，不要覆盖其它轮次（标题里的 {{path}} 就是本次 run 的被评审文档，换文档审查时不要改别的文档的小节）。验证者会直接读这个文件。若工作区不可写，则在正文给出完整内容并在 evidence 中说明。
       - "若本轮确实没有可改进项，请如实在 status 中给 done 并说明无需改进，不要为了触发重试而压低分数。"
     followUp:
       - "现在是第 {{step}} 轮、第 {{attempt}}/{{tries}} 次尝试（及格线 {{score}}）。"
-      - "以 {{path}} 为准，按第 {{step}} 轮（{{title}}）的要求处理上一版未解决的问题，并更新工作区文件 {{artifact}} 中本轮的小节。"
+      - "以 {{path}} 为准，按第 {{step}} 轮（{{title}}）的要求处理上一版未解决的问题，并更新工作区文件 {{artifact}} 中 “## 第 {{step}} 轮 · {{title}} · {{path}}” 小节。"

@@ -74,6 +74,13 @@ test('the verifier prompt names the file as the only channel back, and the round
   const two = verdictBrief({ verificationId: 'r/k/1/1/1', kind: 'k', step: 1, attempt: 1, file: '/f',
     vars: { path: 'loop.md', scope: 'src' } });
   assert.match(two, /path=loop\.md、scope=src/);
+  // The heading the client checks is the heading the verifier is told to judge, so "which section is
+  // this round's" cannot be read two ways.
+  assert.doesNotMatch(two, /小节标题/);
+  const marked = verdictBrief({ verificationId: 'r/k/1/1/1', kind: 'k', step: 1, attempt: 1, file: '/f',
+    marker: '## 第 1 轮 · 定位与范围 · loop.md' });
+  assert.match(marked, /本轮在产出物中的小节标题：## 第 1 轮 · 定位与范围 · loop\.md/);
+  assert.match(marked, /标题不符、只有同名但不同对象的旧小节、或该小节缺失时，本轮按不满足处理/);
 });
 
 test('a forked round tells the agent it is not the scorer, and never promises self-scoring', () => {

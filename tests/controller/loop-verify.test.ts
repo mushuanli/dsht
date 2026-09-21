@@ -520,7 +520,7 @@ test('a verify-first record verifies each round before asking for any work', asy
   const verifier = fakeVerifier(() => ({ type: 'verified', result: { score: 9, status: 'done' }, sessionId: 'session-verifier' }));
   // The reviewed document already carries both rounds' sections, which is what verify-first is for.
   const workspace = await reviewedWorkspace('DESIGN-DOC-REVIEW.md',
-    '## 第 1 轮 · 定位与范围\nround one\n\n## 第 2 轮 · 结构与导航\nround two\n');
+    '## 第 1 轮 · 定位与范围 · tui-design.md\nround one\n\n## 第 2 轮 · 结构与导航 · tui-design.md\nround two\n');
   t.after(() => workspace.cleanup());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
     localDirectory: workspace.directory, verifier: verifier.port });
@@ -544,7 +544,7 @@ test('a verify-first round that fails asks for work, carrying the findings', asy
       ? { type: 'verified', result: { score: 4, status: 'retry', findings: ['缺少取消接口'] }, sessionId: 'session-verifier' }
       : { type: 'verified', result: { score: 9, status: 'done' }, sessionId: 'session-verifier' };
   });
-  const workspace = await reviewedWorkspace('DESIGN-DOC-REVIEW.md', '## 第 1 轮 · 定位与范围\nround one\n');
+  const workspace = await reviewedWorkspace('DESIGN-DOC-REVIEW.md', '## 第 1 轮 · 定位与范围 · tui-design.md\nround one\n');
   t.after(() => workspace.cleanup());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
     localDirectory: workspace.directory, verifier: verifier.port });
@@ -567,7 +567,7 @@ test('a high score cannot pass a round whose output never reached the artifact',
   const verifier = fakeVerifier(() => ({ type: 'verified', result: {
     score: 9.5, status: 'done', evidence: '全文复核通过' }, sessionId: 'session-verifier' }));
   // The document exists but has no section for this round: the round's conclusion was not written.
-  const workspace = await reviewedWorkspace('DESIGN-DOC-REVIEW.md', '## 第 1 轮 · 定位与范围\nround one\n');
+  const workspace = await reviewedWorkspace('DESIGN-DOC-REVIEW.md', '## 第 1 轮 · 定位与范围 · tui-design.md\nround one\n');
   t.after(() => workspace.cleanup());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
     localDirectory: workspace.directory, verifier: verifier.port });
@@ -580,7 +580,7 @@ test('a high score cannot pass a round whose output never reached the artifact',
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
 
   // The verifier's own finding stays in the feedback; the missing section is added as a hard one.
-  assert.match(lastPrompt(fixture), /工作区文件 DESIGN-DOC-REVIEW\.md 缺少本轮小节「## 第 2 轮 · 结构与导航」/);
+  assert.match(lastPrompt(fixture), /工作区文件 DESIGN-DOC-REVIEW\.md 缺少本轮小节「## 第 2 轮 · 结构与导航 · tui-design\.md」/);
   assert.match(controller.queries.loop?.note ?? '', /artifact check/);
   assert.equal(controller.queries.loop?.phase, 'running');
   assert.equal(controller.queries.loop?.best, 0, 'a score that cannot pass must not raise best');
@@ -590,7 +590,7 @@ test('a high score cannot pass a round whose output never reached the artifact',
 test('the artifact check leaves a round alone when the section is there or unreadable', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const verifier = fakeVerifier(() => ({ type: 'verified', result: { score: 9, status: 'done' }, sessionId: 'session-verifier' }));
-  const workspace = await reviewedWorkspace('DESIGN-DOC-REVIEW.md', '## 第 1 轮 · 定位与范围\nround one\n');
+  const workspace = await reviewedWorkspace('DESIGN-DOC-REVIEW.md', '## 第 1 轮 · 定位与范围 · tui-design.md\nround one\n');
   t.after(() => workspace.cleanup());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
     localDirectory: workspace.directory, verifier: verifier.port });

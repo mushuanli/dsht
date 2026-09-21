@@ -43,7 +43,12 @@ test('every record renders its own placeholders and vars', () => {
   // The artifact marker is a template like the others: it names this round's own section.
   assert.equal(design.artifactMarker(3), '## 第 3 轮 · 接口审查');
   assert.equal(design.artifactMarker(11), '## 第 11 轮 · 收敛审查');
-  assert.equal(doc.artifactMarker(1), '## 第 1 轮 · 定位与范围');
+  // The document is part of the heading, so a section written for another document cannot satisfy
+  // this run's round check.
+  assert.equal(doc.artifactMarker(1), '## 第 1 轮 · 定位与范围 · tui-design.md');
+  // Retargeting the run moves the heading with it: the marker is rendered with the run's vars.
+  assert.equal(records.find('designdoc-review', { path: 'loop.md' })!.artifactMarker(1), '## 第 1 轮 · 定位与范围 · loop.md');
+  assert.match(brief, /## 第 1 轮 · 定位与范围 · tui-design\.md/);
 
   assert.equal(records.find('nope'), undefined);
 });

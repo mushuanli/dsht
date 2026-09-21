@@ -19,6 +19,13 @@ test('the verifier is told the run\'s variables, so it cannot judge another docu
   const retargeted = loopProtocolFor('designdoc-review', true, { path: 'loop.md' })!.verify!(limits, 1, 1, target);
   assert.match(retargeted, /本次 run 的记录变量：path=loop\.md/);
   assert.doesNotMatch(retargeted, /path=tui-design\.md/);
+  // The verifier judges the very heading the client will check, document included.
+  const protocol = loopProtocolFor('designdoc-review', true, { path: 'loop.md' })!;
+  assert.match(retargeted, /本轮在产出物中的小节标题：## 第 1 轮 · 定位与范围 · loop\.md/);
+  assert.match(retargeted, new RegExp(`小节标题：${protocol.artifactMarker!(1)!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  // A record whose marker is not a heading still says nothing about sections.
+  const design = loopProtocolFor('design-review', true)!.verify!(limits, 1, 1, target);
+  assert.match(design, /本轮在产出物中的小节标题：## 第 1 轮 · 职责与归属/);
 });
 
 test('a record becomes a protocol without any per-record code', () => {

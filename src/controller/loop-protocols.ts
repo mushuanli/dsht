@@ -98,12 +98,18 @@ export function loopProtocolFor(name: string, forked = false, vars?: Readonly<Re
     // The verifier's only input is this prompt and the artifact, so the run's own variables travel
     // with it: without `path` it cannot tell which document this run reviews and can only follow the
     // artifact left by an earlier run against a different one.
-    ...(forked ? { verify: (limits: LoopLimits, step: number, attempt: number, target: VerifyTarget, previous?: PriorVerdict) => verdictBrief({
-      ...target, kind: name, step, attempt, previous, standard: standard(step), vars: text.vars,
-      ...(artifact === undefined ? {} : { artifact }),
-      ...(text.focus(step) === undefined ? {} : { focus: text.focus(step) }),
-      ...(consolidates(limits, step) ? { coverage: coverage(step) } : {}),
-    }) } : {}),
+    ...(forked ? { verify: (limits: LoopLimits, step: number, attempt: number, target: VerifyTarget, previous?: PriorVerdict) => {
+      // The verifier is told the same heading the client will check, so "which section is this round's"
+      // is one fact on both sides instead of two readings of the same file.
+      const marker = text.artifactMarker(step);
+      return verdictBrief({
+        ...target, kind: name, step, attempt, previous, standard: standard(step), vars: text.vars,
+        ...(artifact === undefined ? {} : { artifact }),
+        ...(marker === undefined ? {} : { marker }),
+        ...(text.focus(step) === undefined ? {} : { focus: text.focus(step) }),
+        ...(consolidates(limits, step) ? { coverage: coverage(step) } : {}),
+      });
+    } } : {}),
     followUp: (limits, step, attempt) => [
       ...text.followUp({ ...limits, step, attempt }),
       followUpContract(name, step, attempt),

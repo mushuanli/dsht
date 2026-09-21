@@ -22,7 +22,7 @@ test('startup picks the workspace, creates a session and follows the loop to its
   const fixture = await host(); t.after(() => fixture.close());
   // The reviewed document carries the round's own section, which the client checks before accepting.
   const workspace = await mkdtemp(join(tmpdir(), 'dsht-startup-'));
-  await writeFile(join(workspace, 'DESIGN-DOC-REVIEW.md'), '## 第 1 轮 · 定位与范围\nround one\n');
+  await writeFile(join(workspace, 'DESIGN-DOC-REVIEW.md'), '## 第 1 轮 · 定位与范围 · tui-design.md\nround one\n');
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', localDirectory: workspace });
   t.after(async () => { await controller.stop(); });

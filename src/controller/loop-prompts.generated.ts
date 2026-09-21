@@ -102,7 +102,7 @@ export const LOOP_PROMPTS = {
       "steps": 10,
       "starts": "verify",
       "artifact": "DESIGN-DOC-REVIEW.md",
-      "artifactMarker": "## 第 {{step}} 轮 · {{title}}",
+      "artifactMarker": "## 第 {{step}} 轮 · {{title}} · {{path}}",
       "vars": {
         "path": "tui-design.md"
       },
@@ -174,12 +174,12 @@ export const LOOP_PROMPTS = {
         "- 修改后减少了什么维护风险",
         "- 本轮收敛结论",
         "",
-        "每轮结论必须写入工作区文件 {{artifact}} 的 “## 第 {{step}} 轮 · {{title}}” 小节：不存在则创建，已存在则替换该小节，不要覆盖其它轮次。验证者会直接读这个文件。若工作区不可写，则在正文给出完整内容并在 evidence 中说明。",
+        "每轮结论必须写入工作区文件 {{artifact}} 的 “## 第 {{step}} 轮 · {{title}} · {{path}}” 小节：不存在则创建，已存在则替换该小节，不要覆盖其它轮次（标题里的 {{path}} 就是本次 run 的被评审文档，换文档审查时不要改别的文档的小节）。验证者会直接读这个文件。若工作区不可写，则在正文给出完整内容并在 evidence 中说明。",
         "若本轮确实没有可改进项，请如实在 status 中给 done 并说明无需改进，不要为了触发重试而压低分数。"
       ],
       "followUp": [
         "现在是第 {{step}} 轮、第 {{attempt}}/{{tries}} 次尝试（及格线 {{score}}）。",
-        "以 {{path}} 为准，按第 {{step}} 轮（{{title}}）的要求处理上一版未解决的问题，并更新工作区文件 {{artifact}} 中本轮的小节。"
+        "以 {{path}} 为准，按第 {{step}} 轮（{{title}}）的要求处理上一版未解决的问题，并更新工作区文件 {{artifact}} 中 “## 第 {{step}} 轮 · {{title}} · {{path}}” 小节。"
       ]
     }
   }

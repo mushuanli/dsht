@@ -126,6 +126,12 @@ export interface VerdictBrief extends VerificationBrief {
   previous?: PriorVerdict;
   /** Every earlier round's requirements, when this step has to re-check the whole record. */
   coverage?: readonly { title: string; checks: string }[];
+  /** The heading the round's section carries in the artifact, as the client checks it.
+   *
+   * The verifier marks the section it judged, and the client marks the section it accepts: giving both
+   * the same string is what keeps a section from another run against another document out of the round.
+   */
+  marker?: string;
   /** The run's record variables, resolved: what this run is about, e.g. `path` for the reviewed file.
    *
    * The verifier cannot see the review conversation, so without these it can only guess the subject
@@ -161,7 +167,7 @@ export function findingsLines(result: LoopResult): string[] {
  * @returns The prompt as one string.
  */
 export function verdictBrief(brief: VerdictBrief): string {
-  const { verificationId: identity, kind, step, attempt, standard, artifact, focus, previous, coverage, vars } = brief;
+  const { verificationId: identity, kind, step, attempt, standard, artifact, focus, previous, coverage, vars, marker } = brief;
   return [
     `你是独立验证者：验证 kind=${kind} 的第 ${step} 轮第 ${attempt} 次尝试。`,
     '你没有本次评审的对话上下文，也不属于被验证的 session；你的判断只能来自磁盘上的产出物和你自己跑出来的证据。',
@@ -171,6 +177,10 @@ export function verdictBrief(brief: VerdictBrief): string {
       `本次 run 的记录变量：${Object.entries(vars).map(([key, value]) => `${key}=${value}`).join('、')}`,
       '产出物必须属于这次 run 所指的同一个对象（例如同一份被评审文档）。小节内容谈的是别的对象、'
         + '或明显来自更早的 run 时，本轮按不满足处理。',
+    ]),
+    ...(marker === undefined ? [] : [
+      `本轮在产出物中的小节标题：${marker}`,
+      '以这个标题定位本轮小节；标题不符、只有同名但不同对象的旧小节、或该小节缺失时，本轮按不满足处理。',
     ]),
     ...(focus === undefined ? [] : [`本轮焦点：${focus}`]),
     ...(coverage === undefined || coverage.length === 0 ? [] : [
