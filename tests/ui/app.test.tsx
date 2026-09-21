@@ -2484,3 +2484,77 @@ test('Ctrl+O follows a subagent child and shows what that session streams', asyn
   await until(() => fixture.cancels.length > cancelled);
   assert.doesNotMatch(ui.lastFrame()!, /explore the parser/);
 });
+
+test('clicking a local command bar opens that run read-only, other rows still copy', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  controller.shell.start('echo click-target');
+  await until(() => controller.shell.runs[0]?.status === 'exited');
+
+  // The bar the click is aimed at is the row the reader sees, so the test finds it in the frame
+  // instead of assuming a screen offset: the application's own row math must agree with Ink's.
+  const barRow = ui.lastFrame()!.split('\n').findIndex(line => line.includes('! echo click-target'));
+  assert.ok(barRow >= 0, ui.lastFrame()!);
+  await pressKey(ui, `\u001b[<0;5;${barRow + 1}M`);
+  await until(() => ui.lastFrame()?.includes('Esc closes') === true);
+  assert.match(ui.lastFrame()!, /! echo click-target/);
+  assert.match(ui.lastFrame()!, /shell:1 · local process · ended/);
+  await pressKey(ui, '\u001b');
+
+  // A press on an ordinary conversation row is not a click target: it still enters copy mode.
+  await until(() => ui.lastFrame()?.includes('Message, @host-file, or /help') === true);
+  const messageRow = ui.lastFrame()!.split('\n').findIndex(line => line.includes('你好'));
+  assert.ok(messageRow >= 0, ui.lastFrame()!);
+  await pressKey(ui, `\u001b[<0;5;${messageRow + 1}M`);
+  await until(() => ui.lastFrame()?.includes('Copy mode') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /Esc closes/);
+});
+
+test('the bar /loop leaves in the transcript opens the verification session', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // The verifier creates its own session — the way the forked process does — and then never answers,
+  // so the run stays in the verification it just started.
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let created: string | undefined;
+  const verifier: VerifierPort = { name: 'fake', verify: async request => {
+    created = await controller.actions.createVerifierSession(request.title);
+    await gate;
+    return { type: 'cancelled' };
+  } };
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { release?.(); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await pressKey(ui, '/loop');
+  await until(() => ui.lastFrame()?.includes('Loop records') === true);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Run loop record · designdoc-review') === true);
+  await pressKey(ui, '\r');
+  await until(() => controller.queries.loop?.activity === 'verify');
+
+  // The run echoed one bar where it started, and it points at the session doing the check.
+  await until(() => ui.lastFrame()?.includes('click this bar to read it') === true);
+  assert.equal(created, 's-new');
+  const frame = ui.lastFrame()!;
+  assert.match(frame, /\/loop designdoc-review 1–10 · pass 8 · ≤10 tries/);
+  assert.match(frame, /s-new · click this bar to read it/);
+  // The bar itself is the row the reader clicks; SGR rows are one-based.
+  const barRow = frame.split('\n').findIndex(line => line.includes('/loop designdoc-review'));
+  assert.ok(barRow >= 0, frame);
+  await pressKey(ui, `\u001b[<0;5;${barRow + 1}M`);
+  await until(() => ui.lastFrame()?.includes('Esc closes') === true);
+  const panel = ui.lastFrame()!;
+  // The panel is the verifier's session, not the reviewed conversation.
+  assert.match(panel, /Designdoc review · tui-design\.md · 1\/1/);
+  assert.match(panel, /s-new · verifier fake · running · from s1/);
+  // The client header still names the conversation the view was opened from.
+  assert.match(panel, /First conversation/);
+  await pressKey(ui, '\u001b');
+  await until(() => ui.lastFrame()?.includes('First conversation') === true);
+});

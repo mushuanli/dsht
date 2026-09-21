@@ -29,7 +29,7 @@ import { costAddresses } from '../cost/scanner.ts';
 import { sessionLabel } from '../session-title.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
-import { ShellController } from '../shell/index.ts';
+import { ShellController, localSourceId } from '../shell/index.ts';
 import type { HistorySearch, AnswerValue, RemovalTarget } from '../session/types.ts';
 import type { SavedPrompt } from '../contracts.ts';
 import type { FileReference } from '../session/references.ts';
@@ -959,7 +959,9 @@ export class Controller implements ControllerStore, ConnectionListener {
     const seen = new Set<string>();
     for (const [id, source] of this.createdSources) { sources.push(source); seen.add(id); }
     for (const block of this.state.shell.blocks) {
-      const id = `shell:${block.id}`;
+      // A note runs nothing: it is a bar pointing at another source, which is listed on its own.
+      if (block.kind !== 'shell') continue;
+      const id = localSourceId(block.id);
       if (seen.has(id)) continue;
       seen.add(id);
       sources.push({
@@ -998,6 +1000,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       ...(parent === undefined ? {} : { parentSessionId: parent }),
       ...(this.verifier === undefined ? {} : { detail: `verifier ${this.verifier.name}` }),
     });
+    // The bar the run echoed into the transcript now opens this session, which is the newest check.
+    this.shell.link(sessionId);
     // A long-lived client runs many reviews; the registry is a convenience list, not a ledger, and a
     // dropped session is still reachable by selecting it. Insertion order is the age order.
     while (this.createdSources.size > SOURCE_LIMIT) {

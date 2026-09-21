@@ -16,9 +16,21 @@ const BLOCK_LIMIT = 20;
 /** Fastest repaint cadence while output streams; status changes always publish. */
 const PUBLISH_INTERVAL_MS = 80;
 
-/** One local command and the output retained for it. */
+/** Readable id of one `!` run's own output, so its transcript bar and its source entry agree. */
+export function localSourceId(id: number): string { return `shell:${id}`; }
+
+/** One local command and the output retained for it.
+ *
+ * A block is either a `!` process (`shell`) or a client command echoed so its bar can be read and
+ * clicked (`note`). A note runs nothing; it carries the readable source its bar opens, which the
+ * application links once the thing it announced exists.
+ */
 export interface ShellBlock {
   id: number;
+  /** What produced the block: a local process, or a command echoed for reading. */
+  kind: 'shell' | 'note';
+  /** Readable source this block's bar opens: its own lines, or the session a note announces. */
+  source?: string;
   command: string;
   /** Retained output lines, oldest first. */
   lines: string[];
@@ -83,8 +95,9 @@ export class ShellController {
   start(command: string): ShellBlock {
     if (!this.enabled) throw new Error('Shell commands are disabled (--no-shell or DSHT_NO_SHELL=1)');
     if (this.task) throw new Error('A shell command is already running; Ctrl+C stops it');
-    const block: ShellBlock = { id: this.nextId++, command, lines: [], dropped: 0, status: 'running',
-      startedAt: Date.now(), anchor: this.host.anchor() };
+    const id = this.nextId++;
+    const block: ShellBlock = { id, kind: 'shell', source: localSourceId(id), command, lines: [], dropped: 0,
+      status: 'running', startedAt: Date.now(), anchor: this.host.anchor() };
     this.blocks.push(block);
     while (this.blocks.length > BLOCK_LIMIT) this.blocks.shift();
     this.bytes.set(block, 0);
@@ -115,6 +128,33 @@ export class ShellController {
     if (!this.abort) return false;
     this.abort.abort();
     return true;
+  }
+
+  /** Echo one client command as a local block, so the transcript holds a bar for it.
+   *
+   * Nothing runs and nothing is retained: the bar exists to be read and clicked, and the application
+   * links it to a readable source afterwards (`link`). A command that only fills a composer frame
+   * never reaches here, so the transcript does not collect bars for forms that were never run.
+   * @param command - The command line as the operator submitted it.
+   * @param source - Readable source the bar opens, when one already exists; `link` adds a later one.
+   * @returns The block created for it.
+   */
+  note(command: string, source?: string): ShellBlock {
+    const block: ShellBlock = { id: this.nextId++, kind: 'note', command, lines: [], dropped: 0,
+      status: 'exited', startedAt: Date.now(), endedAt: Date.now(), anchor: this.host.anchor(),
+      ...(source === undefined ? {} : { source }) };
+    this.blocks.push(block);
+    while (this.blocks.length > BLOCK_LIMIT) this.blocks.shift();
+    this.publish(true);
+    return block;
+  }
+
+  /** Point the newest note at a readable source, so its bar opens what the run is doing now. */
+  link(source: string): void {
+    const note = [...this.blocks].reverse().find(block => block.kind === 'note');
+    if (note === undefined || note.source === source) return;
+    note.source = source;
+    this.publish(true);
   }
 
   /** One run's retained output, with dropped lines made explicit.

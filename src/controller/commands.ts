@@ -330,6 +330,13 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
         controller.traceNote('loop', { phase: 'not-started', name: command.name, why: why.slice(0, 200) });
         return refused(`Loop did not start: ${why}`);
       }
+      // The run leaves a bar in the transcript where it started, so the loop is readable in place and
+      // the bar can open the verification session this run is using (`Controller.createVerifierSession`).
+      // A record that starts by verifying (`starts: verify`) already created that session inside
+      // `startLoop`, so the bar takes the newest one now and later checks re-point it through `link`.
+      const checking = controller.queries.sources.find(source => source.createdBy === 'verifier' && source.state === 'running');
+      controller.shell.note(`/loop ${command.name} ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries`,
+        checking?.id);
       return ok([{ kind: 'closePanels' }, { kind: 'live' }, { kind: 'scroll', position: 0 },
         { kind: 'notice', text: `${protocol.title} started · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` }]);
     }

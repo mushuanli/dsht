@@ -20,9 +20,10 @@
 > **`ForegroundOperation` 归 controller（槽位 / AbortSignal / 取消入口合一）**是【现状】。
 > 前台槽位排队（A1）、`during*` 的 `queue`（A2）、`dsht trace` 汇总、§7.3 的隐私边界
 > （结构化 reason + `sanitizeTraceText()` + `--trace-verbose`）也都是【现状】；
-> **只读输出源 + 整屏 peek 视图**（§7.5，`Ctrl+O` / `Esc`）也是【现状】——机制、面板、trace 都已落地，
-> 只剩"点击 transcript 行打开指定源"（§13.1 里仍标 ◐ 的条目之一）。
-> 【目标】另见 §13.1 里仍标 ◐ 的条目（`/loop answer`、`/loop abort` 与 `needs-human` 的 PAUSED 化）。
+> **只读输出源 + 整屏 peek 视图 + 行级点击**（§7.5：`Ctrl+O` / 点本地块标题栏 / `Esc`）也是【现状】：
+> 机制、面板、本地块（`!` 与 `/loop` 回显）、点击命中与 trace 都已落地并有用例。
+> 仍属【目标】的只剩 host 侧的 `parentSessionId` 登记（需改上层仓库）与 §13.1 里标 ◐ 的条目
+> （`/loop answer`、`/loop abort` 与 `needs-human` 的 PAUSED 化）。
 
 ---
 
@@ -869,8 +870,20 @@ composer 换了收件人），所以"看一眼"和"接管"分不开。
 **【取舍】为什么是整屏只读视图**：面板按 §5.3 是"面"，但这一张复用的是会话本身的排版（
 `queries.render()`，与聊天同一套 wrap/markdown/颜色），并且要能滚动长输出；塞进 composer 上方的
 小面板既看不清也不是"读别人输出"的形态。所以它是唯一**替换正文区**的面：打开时 composer 让位，
-`Esc` 是唯一回路（Esc 表第 4 条，早于 pending/面板规则）。键盘入口 `Ctrl+O` 打开"最新的一个源"，
-点击 transcript 行打开指定源是下一步（§13.1 未标 ✅ 的条目）。
+`Esc` 是唯一回路（Esc 表第 4 条，早于 pending/面板规则）。键盘入口 `Ctrl+O` 打开"最新的一个源"。
+
+**行级点击（B）**：transcript 里的"本地块"（§7.5 的 `ShellBlock`，`kind: 'shell' | 'note'`）的第一行
+就是它的**标题栏**，也就是点击目标；块下面的输出行不是身份，点它仍进入复制模式。`ShellBlock.source`
+带上这条栏要打开的源：`!` 运行指向自己的 `shell:<id>`，`note` 指向它宣布的那个会话（`link()` 在
+verifier 会话创建时重指，因此一条 `/loop` 栏总是指向**当前**那一次验证）。`mergeShellRuns()` 把每个
+栏所在的合并行号映射到源 id（`sources`），前端再用几何换算把屏幕行换成合并行号：从屏幕顶部数——
+复制模式横幅（0/1 行）+ 实测的 header 高 + 实测的正文前缀（foreground/连接提示/lastFailure）+ viewport
+上边距；正文行是**顶对齐**的，所以某行屏幕位置 = 该和 + 它在 `visible` 里的下标。这条几何是纯前端
+知识（§5.1）：应用只回答"这一行属于哪个源"。
+
+**为什么 `/loop` 要在 transcript 里留一条栏**：循环的进度条（composer 上方）只是状态，不是历史；
+把一次运行回显成块让"它起于哪、当时跑了什么参数"留在原地，也让"点这一行看它的验证会话"有一个
+真实的行可点。表单只被打开、未被 Start 时不回显，所以 transcript 不会堆满没跑过的参数框。
 
 ---
 
@@ -1093,6 +1106,9 @@ type LoopTerminalReason =
 | 跟随只读：`session/follow` 用正确地址形态（子会话两种都试）、不选中不写入、关闭即 cancel | `tests/controller/sources.test.ts`、`tests/ui/app.test.tsx` | §7.5 |
 | 本地源不需要流：`lines` 直接可读，打开它不发 host 请求 | `tests/controller/sources.test.ts` | §7.5 |
 | 整屏视图：`Ctrl+O` 打开最新源、箭头/PgUp/PgDn/滚轮滚动、`Esc` 关闭并交回 composer | `tests/ui/app.test.tsx` | §7.5/§5.4 |
+| 本地块渲染与源映射：`!` 栏指向自身、`note` 栏指向被 `link` 的会话、只有栏那一行是点击目标 | `tests/ui/shell-blocks.test.ts` | §7.5 |
+| 点击栏打开该源（含 `/loop` 栏打开 verifier 会话），点普通行仍进入复制模式 | `tests/ui/app.test.tsx` | §7.5 |
+| SGR 左键解码：只有 `\x1b[<0;C;RM` 是点击，其余按键/释放/拖动都不是 | `tests/session/history.test.ts` | §7.5 |
 
 ---
 
@@ -1135,7 +1151,7 @@ type LoopTerminalReason =
 | **P2** ✅ | **`SessionMutationGate(sessionId)`**：显式化 host 单 turn 语义 + client 写串行；关闭 `promptInternal` 与 foreground 写的重叠 | 已实现（`src/session/mutation-gate.ts`）：**admission/dispatch serializer，不是 long-running mutex**；`cancel`/`interrupt`/`cancelNamedSession` 走控制泳道，可抢占普通等待队列；每个写入口都被 `mutation` 事件记录（§6.3.1/§6.3.2）。**仍未做**：`runAction` 的 busy 信封仍是"拒绝第二个"而不是排队（P4 未完成部分） |
 | **P3** ✅ | `CommandResult` + 判别联合 `ViewEffect`（数组即顺序）；消除两个 UI 触发效果（`answer`、`/cost` 的 `refreshCosts`）；按 13.2-D2 收敛错误通道 | 已实现：`CommandIntent` 删除；提问瀑布搬进 `Controller.answerQuestion`（键路径与命令行共用）；`/cost` 的刷新由 `execute` 经 `port.run` 起；`runCommand` 在本行已报告失败后清掉 action 信封里的同一次失败。**仍未做**：`state.operation.error` 仍是连接/动作信封的字段（未进一步删除或改名） |
 | **P4** ✅ | `ForegroundOperation` 归 controller（含 AbortSignal）；`duringTurn`/`duringLoop` 按 kind（一期 `run/deny`）；Esc 表驱动；LoopRun 显式对象与 loop 发送排队；composer 聚焦策略（13.2-D1） | 已实现（§6.2/§3.4/§5.4/§13.2-D1）：槽位 + abort + `id/kind/label` 归 controller，`queries.foreground` 与 `actions.cancelForeground()` 是唯一读/取消入口；UI 的 `historyAbort`/`historyLoading` 已删除并由架构守卫禁止回归；嵌套认领用 `AsyncLocalStorage` 精确判定；loop 发送排队由用例固定；表单 Start 与命令行走同一套 `authorize`。A1（前台槽位排队）、A2（`during*` 的 `queue`）、A3（`state.lastFailure`）、A5（`/loop answer`、`/loop abort`、PAUSED）均已完成；D15（`dsht trace`）另见 §7.4 |
-| **P5** ◐ | 只读输出源（§7.5）：`OutputSource` 注册表、`SessionPeek` 跟随、整屏 peek 视图、`peek begin/end`；随后点击 transcript 行打开指定源 | **机制 + 面板 ✅**（`src/session/peek.ts`、`Controller.outputSources()/openPeek/closePeek`、`src/ui/dialogs/peek.tsx`；用例见 §11）。**未做**：屏幕行坐标图与 SGR 左键命中测试，让"点某一行"打开那一条源 |
+| **P5** ✅ | 只读输出源（§7.5）：`OutputSource` 注册表、`SessionPeek` 跟随、整屏 peek 视图、`peek begin/end`；本地块（`!` / `/loop` 回显）与行级点击 | **已实现**：`src/session/peek.ts`、`Controller.outputSources()/openPeek/closePeek`、`src/ui/dialogs/peek.tsx`、`ShellBlock.kind/source` + `mergeShellRuns().sources`、`src/ui/input/mouse.ts` 的坐标解码；用例见 §11。**未做**：host 侧的 `parentSessionId` 登记（需要改上层仓库，见 §7.5 取舍） |
 
 **每期先写不变量测试，再改实现**——否则"目标态"只会成为下一次事故的来源。
 

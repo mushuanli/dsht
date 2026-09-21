@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { historyLayout } from '../../src/session/history.ts';
-import { isMouseReport, wheelDirection } from '../../src/ui/input/mouse.ts';
+import { isMouseReport, mousePress, wheelDirection } from '../../src/ui/input/mouse.ts';
 import { Transcript } from '../../src/session/transcript.ts';
 import { Controller } from '../../src/controller/controller.ts';
 import { host, snapshot, until } from '../support/host.ts';
@@ -23,6 +23,15 @@ test('mouse decoding ignores buttons, motion, releases and horizontal wheels', (
   for (const button of [0, 1, 2, 32, 66, 67, 96]) assert.equal(wheelDirection(`\x1b[<${button};1;2M`), 0);
   assert.equal(wheelDirection('\x1b[<64;1;2m'), 0);
   assert.equal(isMouseReport('\x1b[<0;1;2m'), true);
+  assert.equal(isMouseReport('hello'), false);
+  // A left press carries the cell it landed on; every other button, release and modifier is not one,
+  // so a click can never be confused with a drag, a release or a middle press.
+  assert.deepEqual(mousePress('\x1b[<0;12;7M'), { column: 12, row: 7 });
+  for (const report of ['\x1b[<0;12;7m', '\x1b[<0;12;7M\x1b[<0;13;7M', '\x1b[<1;12;7M', '\x1b[<32;12;7M',
+    '\x1b[<64;12;7M', '\x1b[<4;12;7M', '\x1b[<0;0;0M']) {
+    if (report === '\x1b[<0;0;0M') { assert.deepEqual(mousePress(report), { column: 0, row: 0 }); continue; }
+    assert.equal(mousePress(report), undefined, report);
+  }
   assert.equal(isMouseReport('hello'), false);
 });
 

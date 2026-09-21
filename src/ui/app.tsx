@@ -211,6 +211,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const [peekScroll, setPeekScroll] = useState(0);
   const peekBox = useRef<DOMElement>(null);
   const [peekRows, setPeekRows] = useState(20);
+  // The rows above the transcript are measured, not guessed: a click is placed by counting down from
+  // the first line, and the header and the connection/foreground notices are what stand above it.
+  const headerSection = useRef<DOMElement>(null);
+  const bodyPrefix = useRef<DOMElement>(null);
+  const [chromeRows, setChromeRows] = useState({ header: 2, prefix: 0 });
   useLayoutEffect(() => {
     if (peekBox.current) {
       const height = Math.floor(measureElement(peekBox.current).height);
@@ -219,6 +224,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   });
   // A new source is a new document: it opens at its newest row rather than wherever the last one was.
   useEffect(() => { setPeekScroll(0); }, [peek?.source.id]);
+  useLayoutEffect(() => {
+    const header = headerSection.current ? Math.floor(measureElement(headerSection.current).height) : 0;
+    const prefix = bodyPrefix.current ? Math.floor(measureElement(bodyPrefix.current).height) : 0;
+    if (header !== chromeRows.header || prefix !== chromeRows.prefix) setChromeRows({ header, prefix });
+  });
   useEffect(() => {
     setPanels({ thoughts: false, queue: false }); setReferenceIndex(0); setDismissedReference(undefined);
     setInputValue(''); setCursor(0); parkedDraft.current = ''; setComposerIntent(undefined);
@@ -928,12 +938,6 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setScroll(Math.max(0, current.length - pageSize - row));
     });
   }
-  useMouseWheel(direction => {
-    // The read-only view scrolls itself; the conversation behind it must not move.
-    if (peek !== undefined) { setPeekScroll(value => Math.max(0, value + direction * 3)); return; }
-    if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3));
-    else scrollHistory(direction * 3);
-  }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
   const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
   const end = Math.max(pageSize, totalRows - position - trailingGap);
   const visible = useMemo(() => merged.viewport(Math.max(0, end - pageSize), end), [merged, end, pageSize]);
@@ -945,6 +949,24 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const peekEnd = Math.max(0, peekTotal - peekPosition);
   const peekStart = Math.max(0, peekEnd - Math.max(1, peekRows));
   const peekVisible = peekLayout === undefined ? peekPlainRows.slice(peekStart, peekEnd) : peekLayout.viewport(peekStart, peekEnd);
+  // Where the first visible transcript row sits on screen: the copy-mode banner, the measured header,
+  // the measured connection/foreground notices inside the body, and the viewport's own top margin.
+  // Rows are laid out from the top of the viewport, so a given row's screen line is simply this plus
+  // its index in `visible` — no counting back from the composer's variable height.
+  const transcriptTop = (copyMode ? 1 : 0) + chromeRows.header + chromeRows.prefix + (dialogOpen ? 0 : 1);
+  useMouseWheel(direction => {
+    // The read-only view scrolls itself; the conversation behind it must not move.
+    if (peek !== undefined) { setPeekScroll(value => Math.max(0, value + direction * 3)); return; }
+    if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3));
+    else scrollHistory(direction * 3);
+  }, !copyMode && state.screen === 'chat', cell => {
+    // A bar stands for one readable source, and only its own row is the bar: its output rows below
+    // are content, and a press on them still starts a selection. Everything else is copy mode.
+    if (dialogOpen) return;
+    const source = merged.sources.get(cell.row - 1 - transcriptTop);
+    if (source !== undefined) { controller.actions.openPeek(source); return; }
+    setCopyMode(true);
+  });
   // Clamp the stored offset once the source's length is known, so scrolling back down starts moving
   // immediately instead of burning the overshoot first.
   useLayoutEffect(() => {
@@ -1032,11 +1054,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
 
   return <ThemeContext.Provider value={theme}><CopyMode.Provider value={copyMode}><Frozen frozen={copyMode} identity={`${width}:${stdout.rows}`}><Box flexDirection="column" paddingX={1} height={Math.max(1, (stdout.rows ?? 30) - 1)} overflowY="hidden">
     {copyMode && <Text color={theme.accent}>Copy mode · drag to select · Esc / Ctrl+S resumes</Text>}
-    <ChatHeader title={headerTitle} mode={controller.queries.sessionMode} width={width} frozen={displayPaused} identity={`${width}:${state.sessionId}`} />
+    <Box ref={headerSection} flexShrink={0}><ChatHeader title={headerTitle} mode={controller.queries.sessionMode} width={width} frozen={displayPaused} identity={`${width}:${state.sessionId}`} /></Box>
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden">
+    <Box ref={bodyPrefix} flexDirection="column" flexShrink={0}>
     {foreground && <Text dimColor>{foreground.label} · Esc / Ctrl+C cancel</Text>}
     <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
     {state.lastFailure && <Text color={theme.colors.error}>{state.lastFailure}</Text>}
+    </Box>
       {state.screen === 'chat' && (peek === undefined ? <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
         historyWindow={!!historyWindow} frozen={displayPaused}
         identity={`${width}:${state.sessionId}:${position}:${pageSize}`} boxRef={conversationBox} />

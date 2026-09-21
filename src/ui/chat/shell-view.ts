@@ -26,8 +26,8 @@ export interface RowSource {
   offsets: ReadonlyMap<number, number>;
 }
 
-/** One block's rows and the host row index they follow. */
-interface Placement { at: number; rows: HistoryRow[] }
+/** One block's rows, the host row index they follow, and the source its bar opens. */
+interface Placement { at: number; rows: HistoryRow[]; source?: string }
 
 /** Rows for one run: the command bar, then its wrapped and indented output.
  * @param run - Block from the shell controller.
@@ -36,7 +36,15 @@ interface Placement { at: number; rows: HistoryRow[] }
  */
 export function blockRows(run: ShellBlock, width: number): HistoryRow[] {
   const reserve = Math.max(stringWidth(MARKER), stringWidth(GUTTER));
-  const rows: HistoryRow[] = [{ text: `! ${run.command}`, kind: 'shell', bold: true, highlight: true }];
+  const rows: HistoryRow[] = [{ text: run.kind === 'note' ? run.command : `! ${run.command}`,
+    kind: 'shell', bold: true, highlight: true }];
+  // A note produced nothing to show; its bar says whether there is a session to read yet, which is
+  // also the only hint that the bar is clickable.
+  if (run.kind === 'note') {
+    rows.push({ text: run.source === undefined ? `${GUTTER}no readable session yet` : `${GUTTER}${run.source} · click this bar to read it`,
+      kind: 'muted' });
+    return rows;
+  }
   const body = [
     ...(run.dropped > 0 ? [`… ${run.dropped} earlier lines dropped …`] : []),
     ...run.lines,
@@ -83,13 +91,16 @@ function rowAfter(layout: RowSource, anchor: number): number {
  */
 export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], width: number): {
   total: number;
+  /** Merged row index of each block bar that opens a readable source, to its source id. */
+  sources: ReadonlyMap<number, string>;
   viewport(start: number, end: number): HistoryRow[];
 } {
   const placements: Placement[] = [];
+  const sources = new Map<number, string>();
   let cursor = 0;
   for (const run of runs) {
     const at = Math.max(cursor, Math.min(layout.length, rowAfter(layout, run.anchor)));
-    placements.push({ at, rows: blockRows(run, width) });
+    placements.push({ at, rows: blockRows(run, width), ...(run.source === undefined ? {} : { source: run.source }) });
     cursor = at;
   }
   // Segments alternate host rows and block rows in merged index order.
@@ -100,6 +111,8 @@ export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], w
       segments.push({ from: merged, count: placement.at - host, host });
       merged += placement.at - host; host = placement.at;
     }
+    // Only the block's first row is the bar; the rows under it are its output, not its identity.
+    if (placement.source !== undefined) sources.set(merged, placement.source);
     segments.push({ from: merged, count: placement.rows.length, rows: placement.rows });
     merged += placement.rows.length;
   }
@@ -107,6 +120,7 @@ export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], w
   const total = merged + Math.max(0, layout.length - host);
   return {
     total,
+    sources,
     viewport(start, end) {
       const rows: HistoryRow[] = [];
       for (const segment of segments) {
