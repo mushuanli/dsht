@@ -59,9 +59,14 @@ export function roundStandard(checks: string, standard?: string): string {
  * @param name - Record key in loop.yaml.
  * @param forked - Delegate each round's verdict to an independent verifier process.
  * @param vars - Values that replace the record's own `vars` for this run, e.g. another document.
+ * @param selfScoring - Whether this client's own reply may decide an attempt. Without a forked
+ *   verifier it always does; with one, only when the operator allowed the verifier's fallback to it.
+ *   When it does not, the brief stops asking for a verdict block: nothing reads it, and a visible
+ *   score that moves nothing is exactly what a reader mistakes for the real one.
  * @returns The protocol the scored loop runs, or undefined for an unknown name.
  */
-export function loopProtocolFor(name: string, forked = false, vars?: Readonly<Record<string, string>>): LoopProtocol | undefined {
+export function loopProtocolFor(name: string, forked = false, vars?: Readonly<Record<string, string>>,
+  selfScoring = !forked): LoopProtocol | undefined {
   const text = loopPrompts().find(name, vars);
   if (text === undefined) return undefined;
   const standard = (step: number): string => roundStandard(text.checks(step), text.standard);
@@ -93,7 +98,7 @@ export function loopProtocolFor(name: string, forked = false, vars?: Readonly<Re
         ...(artifact === undefined ? {} : { artifact }),
         ...(text.focus(step) === undefined ? {} : { focus: text.focus(step) }),
         ...(consolidates(limits, step) ? { final: true } : {}),
-      }, forked ? 'forked' : 'subagent'),
+      }, forked ? 'forked' : 'subagent', selfScoring),
     ].join('\n'),
     // The verifier's only input is this prompt and the artifact, so the run's own variables travel
     // with it: without `path` it cannot tell which document this run reviews and can only follow the
@@ -112,7 +117,7 @@ export function loopProtocolFor(name: string, forked = false, vars?: Readonly<Re
     } } : {}),
     followUp: (limits, step, attempt) => [
       ...text.followUp({ ...limits, step, attempt }),
-      followUpContract(name, step, attempt),
+      followUpContract(name, step, attempt, selfScoring),
     ].join('\n'),
   };
 }

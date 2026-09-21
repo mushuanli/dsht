@@ -322,7 +322,7 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
         controller.traceNote('loop', { phase: 'form', name: command.name });
         return ok([{ kind: 'closePanels' }, { kind: 'loop', loop: { name: command.name } }]);
       }
-      const protocol = loopProtocolFor(command.name, controller.queries.forkedVerification, vars);
+      const protocol = loopProtocolFor(command.name, controller.queries.forkedVerification, vars, controller.queries.selfScoring);
       if (protocol === undefined) return refused(LOOP_USAGE);
       const limits = resolveLoop(protocol, command.options);
       if (limits === undefined) return refused(LOOP_USAGE);

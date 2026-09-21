@@ -88,10 +88,18 @@ test('a forked round tells the agent it is not the scorer, and never promises se
   const forked = resultContract('designdoc-review', limits, 1, 1, { artifact: 'tui-design.md' }, 'forked').join('\n');
   assert.match(forked, /独立验证进程/);
   assert.match(forked, /不要 spawn 子代理/);
-  assert.match(forked, /评分以独立验证为准/);
+  assert.match(forked, /不要自评/);
   assert.doesNotMatch(forked, /以你结尾输出的块为准/);
-  // The block the reply parser reads keeps its format wherever the score came from.
-  assert.match(forked, /```dsht-loop/);
+  // Strict forked mode reads no reply block at all, so the brief must not ask for one: a block nobody
+  // reads shows the reader a score that moves nothing (the live confusion behind this change).
+  assert.doesNotMatch(forked, /```dsht-loop/);
+  assert.match(forked, /不要输出 dsht-loop 块/);
+  assert.doesNotMatch(forked, /status 必须是 retry/);
+  // With the operator's fallback allowed, the block is the stand-in verdict and stays required.
+  const fallback = resultContract('designdoc-review', limits, 1, 1, { artifact: 'tui-design.md' }, 'forked', true).join('\n');
+  assert.match(fallback, /验证进程无法判断时，本轮采用它/);
+  assert.match(fallback, /```dsht-loop/);
+  assert.match(fallback, /status 必须是 retry/);
 
   const subagent = resultContract('designdoc-review', limits, 1, 1, { artifact: 'tui-design.md' }).join('\n');
   assert.match(subagent, /spawn 一个全新的 verifier 子代理/);

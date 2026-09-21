@@ -63,7 +63,7 @@ export interface VerificationBrief {
  * @returns The contract as lines, ready to append to a brief.
  */
 export function resultContract(kind: string, limits: LoopLimits, step: number, attempt: number,
-  brief: VerificationBrief = {}, mode: 'subagent' | 'forked' = 'subagent'): string[] {
+  brief: VerificationBrief = {}, mode: 'subagent' | 'forked' = 'subagent', selfScoring = mode !== 'forked'): string[] {
   const { standard, artifact, focus, final } = brief;
   return [
     '评分与验证：',
@@ -72,7 +72,13 @@ export function resultContract(kind: string, limits: LoopLimits, step: number, a
       ? [
         '2. 本轮由 dsht 启动的独立验证进程单独评分：它有自己的 session、自己的上下文，会读产出物并自己取证，你无法影响它的判断。',
         '3. 不要 spawn 子代理替你评分，也不要自评；只要完成本步工作，并在回复里简要列出改了什么、依据是什么。',
-        '4. 结尾仍需按下面的格式给出块（它是本轮的自述记录）；评分以独立验证为准，不要自评。',
+        ...(selfScoring
+          // The verifier's verdict normally decides, but the operator allowed the reply block to stand
+          // in when it cannot judge — so that block still has to be there.
+          ? ['4. 结尾仍需按下面的格式给出块：验证进程无法判断时，本轮采用它。']
+          // Nothing reads a block here, so asking for one costs output tokens and shows the reader a
+          // score that moves nothing (the confusing part of the old wording).
+          : ['4. 不要输出 dsht-loop 块：本轮的分数只来自那个独立验证进程，回复里的块不会被读取。']),
       ]
       : [
         '2. 每次尝试都要 spawn 一个全新的 verifier 子代理（subagent，独立上下文），把「原始目标 + 本步焦点 + 产出物 + 评分标准」交给它独立打分；不要用主回复替代它的判断。',
@@ -85,12 +91,17 @@ export function resultContract(kind: string, limits: LoopLimits, step: number, a
     ...(standard === undefined
       ? ['评分标准：未提供；按原始目标的完成度评分。']
       : ['评分标准（逐条对照）：', standard]),
-    `分数为 0–10（允许小数）。score 小于 ${limits.score} 时 status 必须是 retry，并列出仍未解决的问题。`,
-    ...earlyStopLines(),
-    `结尾必须输出唯一一个 \`\`\`${LOOP_MARKER} 代码块，并且它必须是回复正文的最后内容：`,
-    `{"kind":"${kind}","step":${step},"attempt":${attempt},"score":X,"status":"${LOOP_STATUSES}","evidence":"...","top_findings":["..."]}`,
-    'status 为 blocked 或 abstained 时不要 score，改为给 "reason"；abstained 再加上 "needs"。',
-    'evidence 必须给出评分的依据：跑过的命令与结果、看到的具体失败、或验证者引用的原文。',
+    ...(selfScoring ? [
+      `分数为 0–10（允许小数）。score 小于 ${limits.score} 时 status 必须是 retry，并列出仍未解决的问题。`,
+      ...earlyStopLines(),
+      `结尾必须输出唯一一个 \`\`\`${LOOP_MARKER} 代码块，并且它必须是回复正文的最后内容：`,
+      `{"kind":"${kind}","step":${step},"attempt":${attempt},"score":X,"status":"${LOOP_STATUSES}","evidence":"...","top_findings":["..."]}`,
+      'status 为 blocked 或 abstained 时不要 score，改为给 "reason"；abstained 再加上 "needs"。',
+      'evidence 必须给出评分的依据：跑过的命令与结果、看到的具体失败、或验证者引用的原文。',
+    ] : [
+      '结论写在工作正文里即可（发现的问题、依据、改法）：本轮的分数、status 与 findings 都由那个独立验证进程给出，'
+        + '它读产出物和你写在产出物里的结论，不读你的回复格式。',
+    ]),
   ];
 }
 
@@ -100,9 +111,11 @@ export function resultContract(kind: string, limits: LoopLimits, step: number, a
  * @param attempt - Attempt in flight.
  * @returns The clause as one line.
  */
-export function followUpContract(kind: string, step: number, attempt: number): string {
-  return `结尾仍然只输出一个 \`\`\`${LOOP_MARKER} JSON 块，`
-    + `kind=${kind}、step=${step}、attempt=${attempt}、score 为本次评分、status 为 ${LOOP_STATUSES}。`;
+export function followUpContract(kind: string, step: number, attempt: number, selfScoring = true): string {
+  return selfScoring
+    ? `结尾仍然只输出一个 \`\`\`${LOOP_MARKER} JSON 块，`
+      + `kind=${kind}、step=${step}、attempt=${attempt}、score 为本次评分、status 为 ${LOOP_STATUSES}。`
+    : '结尾不需要输出 dsht-loop 块：本轮分数同样只由独立验证进程给出。';
 }
 
 /** What the forked verifier must judge, and where its verdict has to land.

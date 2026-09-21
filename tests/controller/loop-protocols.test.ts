@@ -9,6 +9,23 @@ test('the records of loop.yaml are the protocols /loop can run', () => {
   assert.equal(loopProtocolFor('nope'), undefined);
 });
 
+test('a strict forked run asks for no verdict block, a fallback run does', () => {
+  const limits = { from: 1, to: 2, score: 8, tries: 2 };
+  // No forked verifier: the reply block is the verdict, wherever the score came from.
+  const selfScored = loopProtocolFor('design-review', false)!;
+  assert.match(selfScored.brief(limits, 1, 1), /```dsht-loop/);
+  assert.match(selfScored.followUp(limits, 1, 2), /```dsht-loop/);
+  // A forked verifier with the fallback off: nothing reads a block, so none is asked for.
+  const strict = loopProtocolFor('design-review', true)!;
+  assert.doesNotMatch(strict.brief(limits, 1, 1), /```dsht-loop/);
+  assert.doesNotMatch(strict.followUp(limits, 1, 2), /```dsht-loop/);
+  assert.match(strict.followUp(limits, 1, 2), /不需要输出 dsht-loop 块/);
+  // The operator allowed the verifier's fallback: the block stands in when it cannot judge.
+  const fallback = loopProtocolFor('design-review', true, undefined, true)!;
+  assert.match(fallback.brief(limits, 1, 1), /```dsht-loop/);
+  assert.match(fallback.followUp(limits, 1, 2), /```dsht-loop/);
+});
+
 test('the verifier is told the run\'s variables, so it cannot judge another document', () => {
   const limits = { from: 1, to: 10, score: 8, tries: 10 };
   const target = { verificationId: 'r/designdoc-review/1/1/1', file: '/w/v.json' };

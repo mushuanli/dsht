@@ -183,6 +183,8 @@ export interface Queries {
   readonly turnsCompleted: number;
   /** Whether a forked verifier is available to score rounds. */
   readonly forkedVerification: boolean;
+  /** Whether this client's own reply block may decide an attempt: no verifier, or the fallback is on. */
+  readonly selfScoring: boolean;
   /** Whether this connection generation finished its startup work and is safe to drive. */
   readonly connectionSettled: boolean;
   readonly sessionName: string | undefined;
@@ -599,6 +601,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       get running() { return controller.running; },
       get turnsCompleted() { return controller.completedTurns; },
       get forkedVerification() { return controller.verifier !== undefined; },
+      get selfScoring() { return controller.verifier === undefined || controller.allowSelfFallback; },
       get connectionSettled() { return controller.connectionSettled; },
       get sessionName() { return controller.sessionName; },
       get sessionMode() { return controller.sessionMode; },
