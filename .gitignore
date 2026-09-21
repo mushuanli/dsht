@@ -11,6 +11,8 @@ tmp/
 snapshot-*
 HANDOFF.md
 DESIGN-DOC-REVIEW.md
+# A round's review of one document, written next to it (`{{path}}.review.md`).
+*.review.md
 
 # Verdict files a forked verifier writes inside the reviewed workspace.
 .dsht/

@@ -183,7 +183,7 @@ export function parseVerdict(text: string, expect: {verificationId,kind,step,att
 ```
 
 * `mode: 'forked'` 时：主 brief 明确「独立进程打分、不要 spawn 子代理替你评分」，并**仍要求结尾给出 ` ```dsht-loop ` 块**（`resultContract` 第 4 条）。注意实际默认行为与该措辞不一致：CLI 不传 `allowSelfFallback`，父进程在严格模式下**不使用**这个块——verifier 不可用即结束；只有显式打开 `allowSelfFallback` 时才回退并标注。这条一致性是本路径第 1 个待修项（§9）。
-* `verdictBrief` 明确四件事：你没有本对话上下文；不许改产出物；**verdict 由客户端从你回复正文的 JSON 落盘**，并给出唯一允许的 JSON 形状；**本次 run 的记录变量原样带上**（`path=loop.md`），并要求产出物属于这组变量所指的同一个对象。最后一条是实测补的：verifier 的唯一输入是这段 prompt 与磁盘上的产出物，少了变量它只能从产出物猜评审对象——一次真实 run 里 `/loop designdoc-review` 把 `path` 改成 `loop.md`，标题与工作 brief 都对，但 verifier 看到的是上一轮为 `tui-design.md` 写的小节，于是连着两次都在评审 `tui-design.md`，还给了 8.4/9 分。**已补**：`designdoc-review` 的 `artifactMarker` 现在是 `## 第 {{step}} 轮 · {{title}} · {{path}}`，brief/followUp 里那两处写小节也点明同一个标题——所以换文档重跑时，旧文档留下的同名小节不再满足「本轮小节存在」；同一份标题也随 `VerdictBrief.marker` 交给 verifier，「本轮小节是哪一节」在两侧只有一个答案（`text.artifactMarker(step)` 与客户端检查用的是同一个值）。
+* `verdictBrief` 明确四件事：你没有本对话上下文；不许改产出物；**verdict 由客户端从你回复正文的 JSON 落盘**，并给出唯一允许的 JSON 形状；**本次 run 的记录变量原样带上**（`path=loop.md`），并要求产出物属于这组变量所指的同一个对象。最后一条是实测补的：verifier 的唯一输入是这段 prompt 与磁盘上的产出物，少了变量它只能从产出物猜评审对象——一次真实 run 里 `/loop designdoc-review` 把 `path` 改成 `loop.md`，标题与工作 brief 都对，但 verifier 看到的是上一轮为 `tui-design.md` 写的小节，于是连着两次都在评审 `tui-design.md`，还给了 8.4/9 分。**已补**：`designdoc-review` 的 `artifact` 现在也是模板——`{{path}}.review.md`，即**一份被评审文档一个文件、落在文档旁边**（默认 `tui-design.md.review.md`，换成 `loop.md` 就是 `loop.md.review.md`）。`artifact` 从"记录常量"变成"用 vars 渲染一次"的模板（`loop-prompts.ts`），schema 只允许它用记录的 vars、禁止 runtime 占位符（文件名不能随轮次移动）；`*.review.md` 进了 `.gitignore`。`artifactMarker` 是 `## 第 {{step}} 轮 · {{title}} · {{path}}`，brief/followUp 里那两处写小节也点明同一个标题，同一份标题再随 `VerdictBrief.marker` 交给 verifier——「本轮小节是哪一节」在两侧只有一个答案（`text.artifactMarker(step)` 与客户端检查用的是同一个值），标题里的文档名则让每个小节单独拿出来也自解释。
 * `parseVerdict` 把回复当**不可信输入**：枚举正文里每个顶层平衡 JSON 对象（最近的优先），先校验 `verificationId` 必须与本轮一致，再校验 `kind/step/attempt`，否则视为无 verdict（防陈旧文件误判）。枚举**从 `{"` 开始**、并按字符串状态跳过引号内的花括号（`evidence` 引用记录时会带 `{{step}}` 之类的占位符）；`JSON.parse` 失败时**只把 JSON 未定义的转义补齐**再试一次——真实 run 里一份 `score 8.4 · done` 的完整 verdict 因为 `evidence` 写了一个没转义的正则 `\d+\.\d+` 整份被丢弃，白花一次 attempt。身份校验不放松，因此补转义不可能放进别轮的 verdict。
 
 verdict 文件形状：
@@ -425,7 +425,7 @@ fork 路径已在 tsx 启动方式（`npx tsx src/cli/index.ts`）下跑通过�
 | H | 验证者可以提前停下吗？怎么表达、怎么回到流程？ | 见下方「设计：验证者提前停下与人工介入」——**停下必须给理由**，但**不得跳过未验证的范围**：`cannot-fix`（无法改 → blocked）、`needs-human`（需要人介入 → 一期终态 + exit 3）；`no-change-needed` 只是解释字段。**一期已实现**（`reason` 必填、两种停下都不许带 `score`、label 必须自洽，否则整个块按「无判定」处理）；`code` 枚举与 `/loop answer` 恢复属二期 |
 | I | 命令面是否收敛为单一 `/loop <name>`？ | 是（§4.6，**已实现**）：`/design-review`、`/designdoc-review`、`/verify` 已删除，协议、附加标准、`vars` 与默认值都由 `loop.yaml` 的记录承载 |
 
-**其它未做（状态以本节「收敛进展」表为准，此处只记门禁与理由）：**`README.md`／`README.zh.md` 与 `tui-design.md` §3.4 已按现行命令面与失败语义同步（`README.i18n.yaml` 的配对哈希已重记）；`DESIGN-DOC-REVIEW.md`（设计文档审查的产出物）与本文一样**未纳入版本控制**；本批改动**尚未 commit**。
+**其它未做（状态以本节「收敛进展」表为准，此处只记门禁与理由）：**`README.md`／`README.zh.md` 与 `tui-design.md` §3.4 已按现行命令面与失败语义同步（`README.i18n.yaml` 的配对哈希已重记）；`{{path}}.review.md`（设计文档审查的产出物，现在是每份文档一个文件）与本文一样**未纳入版本控制**；本批改动**尚未 commit**。
 
 ### 待补契约（建议的实现顺序：先统一语义 → 再身份与完成/取消边界 → 然后弃权恢复 → 最后发布入口与远端部署）
 
@@ -660,6 +660,7 @@ codex --ask-for-approval never exec --json --sandbox read-only \
 | **协议是记录，命令只有一个** | ✅ 已实现（G7） | `/loop <name>` 从 `loop.yaml` 取记录，`controller/loop-protocols.ts` 是唯一装配点；`/design-review`、`/designdoc-review`、`/verify` 与三个协议文件（`design-review.ts`／`designdoc-review.ts`／`loop-prompt.ts`）已删除。测试：`loop-protocols.test.ts`、`commands.test.ts`、`ui/commands.test.ts` |
 | **run 内协议冻结** | ✅ 已实现（G9；YAML 为构建期内联） | 记录在 `loopProtocolFor` 里读一次并由闭包保存（标题/rubric/standard/vars/默认值），`LoopLimits` 在 `startLoop` 解析一次；未知占位符与保留名在生成期失败。**将来若启用运行时加载**，仍需保留这层快照 |
 | verifier session / verdict 清理 | ⬜ 未做 | 一期明确「为审计保留、手动清理」；`runId` 目录已可整组删除 |
+| 一份被评审文档一个产出物文件 | ✅ 已实现 | `designdoc-review` 的 `artifact` 是模板 `{{path}}.review.md`（落在被评审文档旁边），换文档重跑不会把两次审查写进同一个文件；schema 只允许 `artifact` 用记录 vars（`{{step}}` 会被拒），`*.review.md` 已被 `.gitignore` 覆盖；用例：`loop-prompts.test.ts`、`loop-protocols.test.ts`（记录列表按默认值与覆盖各渲染一次） |
 | verifier 知道它在评审哪一份文档 | ✅ 已实现 | `verdictBrief` 带上本次 run 解析后的记录变量（`path=…`）并要求产出物属于同一对象；`designdoc-review` 的 `artifactMarker` 与小节写入指令都把文档写进标题，客户端与 verifier 用的是同一个标题（`VerdictBrief.marker`）；用例：`loop-protocols.test.ts`（默认值、`vars` 覆盖、prompt 里的 marker == `protocol.artifactMarker(step)`）、`loop-prompts.test.ts`（换文档后标题随之改变）、`loop-contract.test.ts` |
 | 一份完整 verdict 不会因为转义/占位符被丢弃 | ✅ 已实现 | `parseVerdict` 从 `{"` 起按字符串状态取候选，并对 JSON 未定义的转义做一次补齐；用例：`loop-contract.test.ts` 的两种真实形态 |
 | 缺失 verdict 的原因来自子进程自己的诊断 | ✅ 已实现 | `childFault()` 认出本进程自己写的那两句（`no JSON verdict in the reply` / `no reply committed after the turn`），不再退化成 `stderrClass unknown`；用例：`cli/verifier.test.ts` |

@@ -117,7 +117,7 @@ test('the record list offers the same names, artifacts, defaults and inputs the 
     artifact: 'DESIGN-REVIEW.md', defaultScore: 8, defaultTries: 10, vars: {} });
   // A record's own vars are already rendered into the title the picker shows, and listed for the form.
   assert.equal(records[1]?.title, 'Designdoc review · tui-design.md');
-  assert.equal(records[1]?.artifact, 'DESIGN-DOC-REVIEW.md');
+  assert.equal(records[1]?.artifact, 'tui-design.md.review.md');
   assert.deepEqual(records[1]?.vars, { path: 'tui-design.md' });
   assert.deepEqual(loopRecordVars('designdoc-review'), { path: 'tui-design.md' });
   assert.equal(loopRecordVars('nope'), undefined);

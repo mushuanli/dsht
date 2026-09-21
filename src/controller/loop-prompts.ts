@@ -100,11 +100,14 @@ function render(kind: string, protocol: LoopProtocolText, overrides?: Readonly<R
   };
   // A per-run override wins over the record's declared value, so retargeting a record never edits it.
   const vars: Readonly<Record<string, string>> = { ...(protocol.vars ?? {}), ...(overrides ?? {}) };
+  // The artifact is a template like the title: a record whose runs target different inputs names one
+  // file per input (`{{path}}.review.md`), so a run never reads another input's conclusions.
+  const artifact = protocol.artifact === undefined ? undefined : fill([protocol.artifact], { ...vars }, kind)[0]!;
   const values = (runtime: LoopPromptValues): Record<string, string | number | undefined> => ({
     ...vars,
     ...runtime,
     title: roundTitle(runtime.step),
-    artifact: protocol.artifact,
+    artifact,
     checks: checks(runtime.step),
   });
   return {
@@ -112,7 +115,7 @@ function render(kind: string, protocol: LoopProtocolText, overrides?: Readonly<R
     // The title is static per run: it may use vars, never the step.
     title: fill([protocol.title], { ...vars }, kind)[0]!,
     steps: protocol.steps,
-    ...(protocol.artifact === undefined ? {} : { artifact: protocol.artifact }),
+    ...(artifact === undefined ? {} : { artifact }),
     ...(protocol.standard === undefined ? {} : { standard: protocol.standard }),
     vars,
     defaultScore: protocol.defaults?.score ?? SOURCE.defaults.score,
@@ -121,7 +124,7 @@ function render(kind: string, protocol: LoopProtocolText, overrides?: Readonly<R
     roundTitle,
     checks,
     artifactMarker: protocol.artifactMarker === undefined ? () => undefined
-      : step => fill([protocol.artifactMarker!], { ...vars, step, title: roundTitle(step), artifact: protocol.artifact }, kind)[0]!,
+      : step => fill([protocol.artifactMarker!], { ...vars, step, title: roundTitle(step), artifact }, kind)[0]!,
     focus: step => protocol.verifyFocus === undefined
       ? undefined
       : fill([protocol.verifyFocus], { ...vars, step, title: roundTitle(step) }, kind)[0]!,

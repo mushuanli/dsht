@@ -48,6 +48,9 @@ test('every record renders its own placeholders and vars', () => {
   assert.equal(doc.artifactMarker(1), '## 第 1 轮 · 定位与范围 · tui-design.md');
   // Retargeting the run moves the heading with it: the marker is rendered with the run's vars.
   assert.equal(records.find('designdoc-review', { path: 'loop.md' })!.artifactMarker(1), '## 第 1 轮 · 定位与范围 · loop.md');
+  // One file per reviewed document: the artifact name follows the run's own input.
+  assert.equal(doc.artifact, 'tui-design.md.review.md');
+  assert.equal(records.find('designdoc-review', { path: 'loop.md' })!.artifact, 'loop.md.review.md');
   assert.match(brief, /## 第 1 轮 · 定位与范围 · tui-design\.md/);
 
   assert.equal(records.find('nope'), undefined);
@@ -71,6 +74,8 @@ test('the schema rejects the mistakes an editor would make', () => {
         rounds: [], brief: ['{{score}}'], followUp: ['x'] },
       marker: { title: 'M', steps: 1, artifactMarker: '## 第 {{nope}} 轮', fallbackLabel: 'F',
         rounds: [], brief: ['ok'], followUp: ['x'] },
+      moving: { title: 'Move', steps: 1, artifact: 'out/{{step}}.md', artifactMarker: '## {{title}}', fallbackLabel: 'F',
+        rounds: [{ title: 'a', checks: 'b' }], brief: ['{{checks}}'], followUp: ['x'] },
     },
   });
   assert.ok(errors.some(message => message.includes('rounds has 1 entries but steps is 2')));
@@ -82,6 +87,9 @@ test('the schema rejects the mistakes an editor would make', () => {
   // A marker is only checkable against a file, and only with the placeholders a record may use.
   assert.ok(errors.some(message => message.includes('protocols.marker.artifactMarker: unknown placeholder {{nope}}')));
   assert.ok(errors.some(message => message.includes('protocols.marker.artifactMarker needs protocols.marker.artifact')));
+  // The artifact may use the record's vars (one file per input) but never a runtime placeholder: a
+  // file that moves between rounds is not a place a round's conclusion can be checked.
+  assert.ok(errors.some(message => message.includes('protocols.moving.artifact: {{step}} must be a record var')));
   // The real document must satisfy the same validator the build runs.
   assert.deepEqual(validateLoopPrompts(parse(readFileSync('loop.yaml', 'utf8'))), []);
 });

@@ -95,6 +95,14 @@ export function validateLoopPrompts(source: unknown): string[] {
     if (!Number.isInteger(protocol.steps) || (protocol.steps ?? 0) < 1) errors.push(`${at}.steps must be a positive integer`);
     if (protocol.artifact !== undefined && (typeof protocol.artifact !== 'string' || protocol.artifact === '')) {
       errors.push(`${at}.artifact must be a non-empty string when present`);
+    } else if (typeof protocol.artifact === 'string') {
+      // The file name may use the record's vars — that is how one run per input gets its own file —
+      // but never a runtime placeholder: the artifact must not move between rounds.
+      for (const name of placeholders(protocol.artifact)) {
+        if (!allowed.has(name) || runtime.has(name)) {
+          errors.push(`${at}.artifact: {{${name}}} must be a record var; the artifact may not depend on the round`);
+        }
+      }
     }
     if (protocol.artifactMarker !== undefined) {
       if (typeof protocol.artifactMarker !== 'string' || protocol.artifactMarker.trim() === '') {

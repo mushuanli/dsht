@@ -101,7 +101,7 @@ export const LOOP_PROMPTS = {
       "title": "Designdoc review · {{path}}",
       "steps": 10,
       "starts": "verify",
-      "artifact": "DESIGN-DOC-REVIEW.md",
+      "artifact": "{{path}}.review.md",
       "artifactMarker": "## 第 {{step}} 轮 · {{title}} · {{path}}",
       "vars": {
         "path": "tui-design.md"

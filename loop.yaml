@@ -10,13 +10,16 @@
 #
 # A record may declare:
 #   title / steps / artifact / artifactMarker / fallbackLabel / verifyFocus / rounds / brief / followUp
+#   artifact: the workspace file the round's conclusion lands in. It is a template like the rest, so a
+#             record whose runs target different inputs names one file per input (`{{path}}.review.md`)
+#             and never reads another input's conclusions. Only the record's vars may be used.
 #   starts:   verify (check the existing artifact first) or work (default: ask for work first)
 #   artifactMarker: a template for the line the artifact must contain once a round is done (e.g. its
 #             section heading). The client checks it itself before accepting a round, so a high score
-#             cannot pass a round whose output never reached the file. Needs `artifact`. Use the
-#             record's vars in the heading (designdoc-review does) whenever two runs can write into the
-#             same file: without the document in the heading, a section left by a run against another
-#             document satisfies the check and is then scored as this run's.
+#             cannot pass a round whose output never reached the file. Needs `artifact`. Put the
+#             record's vars in the heading too (designdoc-review does): the file name already separates
+#             inputs, and the heading keeps each section self-describing if the files are ever read
+#             or concatenated together.
 #   standard: extra requirements folded on top of every round's rubric (replaces `/verify`)
 #   vars:     the record's inputs and their defaults, e.g. the document a review targets. `/loop`
 #             shows one editable row per name, so a run retargets the record without editing this file
@@ -144,9 +147,10 @@ protocols:
     title: "Designdoc review · {{path}}"
     steps: 10
     starts: verify
-    artifact: "DESIGN-DOC-REVIEW.md"
-    # The document is part of the heading: DESIGN-DOC-REVIEW.md accumulates one section per round, and
-    # a run retargeted to another document must not be satisfied by the sections of the previous one.
+    # One file per reviewed document, next to it: retargeting the run moves the conclusions with it
+    # instead of writing a second document's rounds into the first one's file.
+    artifact: "{{path}}.review.md"
+    # The document is in the heading as well, so a section stays self-describing on its own.
     artifactMarker: "## 第 {{step}} 轮 · {{title}} · {{path}}"
     # The document under review, relative to the reviewed workspace. A different document means
     # editing this one line, not adding a command back.
