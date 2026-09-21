@@ -40,11 +40,21 @@ async function reviewedWorkspace(artifact: string, contents: string): Promise<{ 
   return { directory, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
-/** Text of the newest `session/prompt` request. */
-function lastPrompt(fixture: Awaited<ReturnType<typeof host>>): string {
-  const call = fixture.calls.filter(entry => entry.method === 'session/prompt').at(-1)!;
+/** Text of one `session/prompt` request this client sent; negative indexes count from the end.
+ *
+ * A test that waits for a send must read that send rather than "the newest", or a later prompt landing
+ * during the wait silently changes what is being asserted.
+ * @param fixture - Host fixture holding the recorded calls.
+ * @param index - Which prompt, in send order.
+ * @returns The prompt text.
+ */
+function promptAt(fixture: Awaited<ReturnType<typeof host>>, index: number): string {
+  const call = fixture.calls.filter(entry => entry.method === 'session/prompt').at(index)!;
   return String(object(array(object(object(object(call.payload).args).request).content)[0]).text);
 }
+
+/** Text of the newest `session/prompt` request. */
+function lastPrompt(fixture: Awaited<ReturnType<typeof host>>): string { return promptAt(fixture, -1); }
 
 /** Report the reviewed session idle, which is what ends an attempt. */
 function idle(fixture: Awaited<ReturnType<typeof host>>, sessionId: string): void {
@@ -575,12 +585,22 @@ test('a high score cannot pass a round whose output never reached the artifact',
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  // Round 2 is judged first (verify-first) and scores 9.5, but the artifact has no round-2 section.
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 2, to: 2, score: 8, tries: 2 });
+  // Round 2 has no section yet, so the run starts by asking for work instead of spending a check.
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 2, to: 2, score: 8, tries: 3 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  assert.equal(verifier.requests.length, 0, 'nothing to verify while the section is absent');
 
-  // The verifier's own finding stays in the feedback; the missing section is added as a hard one.
-  assert.match(lastPrompt(fixture), /工作区文件 tui-design\.md\.review\.md 缺少本轮小节「## 第 2 轮 · 结构与导航 · tui-design\.md」/);
+  // The work turn ends without writing the round's section, and the check that follows scores 9.5.
+  idle(fixture, 's1');
+  const prompts = () => fixture.calls.filter(call => call.method === 'session/prompt');
+  await until(() => verifier.requests.length > 0 && prompts().length >= 2, 15_000);
+  await until(() => controller.queries.loop?.attempt === 2, 15_000);
+
+  // The verifier's own finding stays in the feedback; the missing section is added as a hard one, and
+  // the 9.5 cannot raise best or pass the round.
+  const feedback = promptAt(fixture, 1);
+  assert.match(feedback, /工作区文件 tui-design\.md\.review\.md 缺少本轮小节「## 第 2 轮 · 结构与导航 · tui-design\.md」/);
+  assert.match(feedback, /全文复核通过/);
   assert.match(controller.queries.loop?.note ?? '', /artifact check/);
   assert.equal(controller.queries.loop?.phase, 'running');
   assert.equal(controller.queries.loop?.best, 0, 'a score that cannot pass must not raise best');
@@ -660,4 +680,71 @@ test('a forked round traces its verifier lifecycle, so a missing verdict has a w
   // One begin per attempt, a retry between them, and a final reason the operator can act on.
   assert.deepEqual(verified.map(entry => entry.phase), ['begin', 'retry', 'begin', 'retry', 'begin', 'unavailable']);
   assert.match(verified.at(-1)?.reason ?? '', /boom/);
+});
+
+test('a verify-first run sends the brief on its first work turn, not a follow-up', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // The check finds a section that is there but scores it low, so the round has to ask for work.
+  const verifier = fakeVerifier(() => ({ type: 'verified', result: { score: 3, status: 'retry', findings: ['范围没写清'] }, sessionId: 'session-verifier' }));
+  const workspace = await reviewedWorkspace('tui-design.md.review.md', '## 第 1 轮 · 定位与范围 · tui-design.md\nround one\n');
+  t.after(() => workspace.cleanup());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
+    localDirectory: workspace.directory, verifier: verifier.port });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 3 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+
+  // The opening prompt is the round's brief: the task, the artifact and the checklist for this round.
+  // A follow-up ("the previous version", "the results above") describes nothing on a run that began by
+  // verifying, and the round's checklist would never reach the agent at all.
+  const prompts = () => fixture.calls.filter(call => call.method === 'session/prompt');
+  const prompt = promptAt(fixture, 0);
+  assert.match(prompt, /你是一名资深软件架构师兼技术文档维护者/);
+  assert.match(prompt, /本轮检查要点/);
+  assert.match(prompt, /这份文档为谁写/);
+  assert.match(prompt, /第 1 轮 · 定位与范围 · tui-design\.md/);
+  assert.match(prompt, /范围没写清/);
+  assert.match(prompt, /本次只执行第 1 轮的第 2 次尝试/);
+  assert.doesNotMatch(prompt, /阅读上面的结果、意见与建议/);
+
+  // After that turn the round is checked again and scores the same, so the next send is a retry of the
+  // same round and goes back to the follow-up: the brief is owed once per run, not once per attempt.
+  idle(fixture, 's1');
+  await until(() => prompts().length >= 2, 15_000);
+  const retry = promptAt(fixture, 1);
+  assert.doesNotMatch(retry, /本轮检查要点/);
+  assert.match(retry, /现在是第 1 轮、第 [23]\/3 次尝试/);
+});
+
+test('a verify-first round with no artifact at all asks for work without a verifier', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const verifier = fakeVerifier(() => ({ type: 'verified', result: { score: 9, status: 'done' }, sessionId: 'session-verifier' }));
+  // The per-document artifact does not exist yet: a run over a document with no review starts from
+  // nothing, and the section cannot be there, so no verdict could ever accept this round.
+  // The workspace holds the document, not a review of it: the artifact the record names is absent.
+  const workspace = await reviewedWorkspace('loop.md', '# the document under review\n');
+  t.after(() => workspace.cleanup());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
+    localDirectory: workspace.directory, verifier: verifier.port });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true, { path: 'loop.md' })!, { from: 1, to: 1, score: 8, tries: 3 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+
+  // No verifier was forked, and no attempt was spent: the first work turn is attempt 1, exactly as it
+  // is for a record that asks for work first. Spending a session (and attempt 1) to be told "the file
+  // is not there" is a cost the client can refuse to pay.
+  assert.equal(verifier.requests.length, 0, 'nothing to verify before anything was written');
+  assert.equal(controller.queries.loop?.attempt, 1);
+  assert.equal(controller.queries.loop?.phase, 'running');
+  assert.match(controller.queries.loop?.note ?? '', /还没有本轮小节/);
+  // The work prompt is the brief for this run: artifact and round named, checklist included.
+  const prompt = lastPrompt(fixture);
+  assert.match(prompt, /loop\.md\.review\.md/);
+  assert.match(prompt, /本轮检查要点/);
+  assert.match(prompt, /本次只执行第 1 轮的第 1 次尝试/);
 });

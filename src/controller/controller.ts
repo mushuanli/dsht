@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { Client } from '../transport/client.ts';
-import { readText, removeFile, writeHeapSnapshot } from '../storage/index.ts';
+import { listEntries, readText, removeFile, writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { HostEvent } from '../transport/events.ts';
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from '../session/memory.ts';
@@ -1423,7 +1423,56 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param loop - Loop whose step and attempt are already set.
    */
   private verifyStep(loop: ScoredLoop): void {
-    void this.verifyRound(loop);
+    void this.verifySection(loop);
+  }
+
+  /** Check the round's own section before spending a verifier on it, then verify or ask for work.
+   *
+   * Verify-first exists so a round that already passes costs no work turn. When the section is not in
+   * the artifact at all the round *cannot* pass, and this client can read that itself — the same check
+   * it applies to a verdict before accepting one. Sending a verifier to discover "the file is missing"
+   * costs a session and, because a failed attempt consumes one, also the round's first attempt: a run
+   * over a document with no review yet would start working at attempt 2/10. An artifact this client
+   * cannot read stays a boundary: the verification runs and its verdict decides, as before.
+   * @param loop - Loop whose step and attempt are already set.
+   */
+  private async verifySection(loop: ScoredLoop): Promise<void> {
+    const artifact = loop.protocol.artifact;
+    const marker = loop.protocol.artifactMarker?.(loop.progress.step);
+    if (artifact === undefined || marker === undefined) { void this.verifyRound(loop); return; }
+    // `readText` answers undefined only for a file that is not there and throws for one that cannot be
+    // read, so the two cases are told apart here: a missing file has no section either, while an
+    // unreadable one is a boundary this client cannot decide.
+    let text: string | undefined;
+    try { text = await readText(join(this.localDirectory, artifact)); }
+    catch { void this.verifyRound(loop); return; }
+    // Reading the artifact is I/O, so the run may have moved on before it came back.
+    if (this.loop !== loop || !loop.active) return;
+    if (text !== undefined && text.includes(marker)) { void this.verifyRound(loop); return; }
+    // A missing file only proves the producer never wrote it when this client can see the workspace at
+    // all. A workspace this machine does not have is a boundary — the same boundary the artifact check
+    // after a verdict already respects — so the verifier's reading decides instead.
+    if (text === undefined && !await this.workspaceVisible()) { void this.verifyRound(loop); return; }
+    this.traceEvent('loop', { phase: 'work-first', runId: this.loopRunId ?? '', kind: loop.protocol.kind,
+      step: loop.progress.step, artifact, reason: 'section-missing' });
+    loop.note(`⚠ artifact check · ${artifact} 还没有本轮小节，直接开始工作`);
+    // No verdict was consumed, so the attempt is untouched: the first work turn is attempt 1, exactly
+    // as it is for a record that asks for work first.
+    this.loopPrompt = loop.workPrompt();
+    this.update({});
+    void this.flushLoop();
+  }
+
+  /** Whether the directory this client runs in is readable here at all.
+   *
+   * `readText` answers undefined for a missing file and for a file inside a directory this machine does
+   * not have, and the two mean opposite things: the first is a producer that wrote nothing, the second
+   * is a workspace whose verdict cannot be checked from here.
+   * @returns True when the directory can be listed.
+   */
+  private async workspaceVisible(): Promise<boolean> {
+    try { await listEntries(this.localDirectory); return true; }
+    catch { return false; }
   }
 
   /** Arm the whole-run budget, when the operator set one. */
@@ -1716,6 +1765,8 @@ export class Controller implements ControllerStore, ConnectionListener {
         return;
       }
       const findings = result === undefined ? [] : findingsLines(result);
+      // `step.prompt` is already brief-aware: a run that began by verifying has sent no prompt yet, so
+      // its first work message is the brief rather than a follow-up that describes nothing.
       this.loopPrompt = [step.prompt, ...findings].join('\n');
     }
     this.update({});

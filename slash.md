@@ -956,6 +956,8 @@ duringLoop 授权 / 禁止第二个 /loop / steering 是否属于 loop
 **`loopProgress?: LoopProgress`**（不是 `loop?: LoopRun`），从命名上就阻止 `if (state.loop)` 被当成
 "正在运行"来用。这是这类终态可见 UI 最常见的 bug 来源。
 
+**【补充·verify-first 的两处修正】**：`starts: verify` 的记录起手不工作、先验产出物，于是有两条只有这条路径才会走到的行为：① **brief 从未发出**——第一个工作消息必须是 brief（任务＋本轮 `{{checks}}`），否则 agent 只能从验证者的 findings 里反推本轮要求（§8.3 的 attempt 语义不变：`intro()` 只在本次 run 尚未发过任何 prompt 时生效）；② **产出物根本不存在时不验证**——客户端自己读产出物即可判定「本轮不可能通过」，此时不 spawn verifier、不消耗 attempt（工作区不可见＝远端仍是边界，照旧先验证）。两处都有 `loop-verify.test.ts` 的用例。
+
 ### 8.4 LoopRun：两轴 + 父子会话【现状 + 目标修正】
 
 ```

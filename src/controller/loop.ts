@@ -314,14 +314,32 @@ export class ScoredLoop {
     return this.phase === 'running' || (this.phase === 'needs-human' && this.terminalReason === undefined);
   }
 
+  /** Whether this run has sent any prompt yet, so `intro` knows the opening one is still owed. */
+  private briefed = false;
   /** Whether a prompt was sent and its reply is still outstanding. */
   get settled(): boolean { return this.awaiting; }
 
   /** The opening prompt; the caller sends it and then calls `sent()`. */
   start(): string { return this.protocol.brief(this.limits, this.step, this.attempt); }
 
+  /** The opening prompt, when this run has not sent one yet; undefined once it has.
+   *
+   * A record that verifies first never sends its brief at the start — it checks the artifact instead —
+   * so the first work message after a failed check has to be the brief. A follow-up would open with
+   * "read the results and opinions above" and refer to a previous version, and neither exists on the
+   * first work turn; the round's own checklist only reaches the agent through this prompt.
+   */
+  intro(): string | undefined {
+    return this.briefed ? undefined : this.protocol.brief(this.limits, this.step, this.attempt);
+  }
+
+  /** The prompt that asks for work on the step in flight: the owed brief, else the follow-up. */
+  workPrompt(): string {
+    return this.intro() ?? this.protocol.followUp(this.limits, this.step, this.attempt);
+  }
+
   /** Record that the outstanding prompt reached the host. */
-  sent(): void { this.awaiting = true; this.activity = 'turn'; }
+  sent(): void { this.awaiting = true; this.activity = 'turn'; this.briefed = true; }
 
   /** Record that this attempt is judged by a forked verifier instead of the session's own turn. */
   verifying(): void { this.awaiting = true; this.activity = 'verify'; }
@@ -361,7 +379,7 @@ export class ScoredLoop {
     if (score !== undefined && score >= this.limits.score) {
       if (this.step >= this.limits.to) { this.phase = 'passed'; this.terminalReason = 'pass'; return { kind: 'passed' }; }
       this.step += 1; this.attempt = 1; this.best = 0; this.noProgress = 0;
-      return { kind: 'continue', prompt: this.protocol.followUp(this.limits, this.step, this.attempt) };
+      return { kind: 'continue', prompt: this.workPrompt() };
     }
     // Retries that keep not improving are not converging: spending the rest of the step's budget on
     // them only reaches the same conclusion later, so the run stops and says so.
@@ -369,7 +387,7 @@ export class ScoredLoop {
     // A missing or low score is a failed attempt and costs one from the step's budget.
     this.attempt += 1;
     if (this.attempt > this.limits.tries) { this.phase = 'exhausted'; this.terminalReason = 'exhausted'; return { kind: 'exhausted' }; }
-    return { kind: 'continue', prompt: this.protocol.followUp(this.limits, this.step, this.attempt) };
+    return { kind: 'continue', prompt: this.workPrompt() };
   }
 
   /** Stop the run; a cancelled run never sends again.
