@@ -133,6 +133,8 @@ export type VerifierOutcome =
 
 /** Judge one round independently. */
 export interface VerifierPort {
+  /** Which harness judges: `dsht` for the forked client, a future adapter names itself here. */
+  readonly name: string;
   /** Run one verification to completion, or to cancellation.
    * @param request - Round identity, prompt and verdict path.
    * @param signal - Cancels the run and its child process.

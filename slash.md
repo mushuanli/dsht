@@ -20,6 +20,8 @@
 > **`ForegroundOperation` 归 controller（槽位 / AbortSignal / 取消入口合一）**是【现状】。
 > 前台槽位排队（A1）、`during*` 的 `queue`（A2）、`dsht trace` 汇总、§7.3 的隐私边界
 > （结构化 reason + `sanitizeTraceText()` + `--trace-verbose`）也都是【现状】；
+> **只读输出源 + 整屏 peek 视图**（§7.5，`Ctrl+O` / `Esc`）也是【现状】——机制、面板、trace 都已落地，
+> 只剩"点击 transcript 行打开指定源"（§13.1 里仍标 ◐ 的条目之一）。
 > 【目标】另见 §13.1 里仍标 ◐ 的条目（`/loop answer`、`/loop abort` 与 `needs-human` 的 PAUSED 化）。
 
 ---
@@ -756,6 +758,7 @@ Gate 要消除的是"两个并发决定基于同一份陈旧状态"，而不是"
 | `loop` | `command`/`form`/`rejected`/`not-started`/`begin`/`verify-first`/`sent`/`answered`/`end` | commands + controller | `/loop` 的决策、启动与回答；`answered` 只记 `judged` 与 `chars`，**绝不记答案正文** |
 | `loop-ui` | `choose`/`open`/`start` | app | 菜单选了哪条记录、表单是否打开、Start 提交的值 |
 | `verify` | `begin`/`verified`/`retry`/`unavailable`/`fallback`/`needs-human`/`cancelled`/`stale`/`abandoned` | controller | 每次 fork 验证的生命周期 |
+| `peek` | `begin`/`end` | controller | 只读视图打开了哪个源（`source`、`kind`）；配对只用于对账，不参与淘汰（见 §7.5） |
 | `artifact` | `missing` | controller | 验证给分但产出物缺本轮小节（硬判不通过） |
 
 ### 7.1 一次 `/loop` 的典型序列（真实先后）
@@ -834,6 +837,40 @@ verify  verified    runId=…, score=…   |  verify unavailable runId=…, reas
 以及所有 begin/end 不配对的 span（含"end without begin"——那说明窗口淘汰或写入端出了问题）。
 它需要 host、凭据、终端都为零，因为读自己的日志本来就不该需要这些；老格式（没有 `runId`、没有
 `command begin/end`）也能读，只是把同一段历史归到一个无 identity 的 run 上（显示为 `<no-run-id>`）。
+
+### 7.5 只读输出源与 peek 视图【现状】
+
+**问题**：一个 client 里同时存在多份"别人在说话"的输出——fork 出来的 verifier 会话、host 侧 subagent
+子会话、本机 `!` 命令的 stdout——而它们此前只能靠"切过去选中"来看。选中即写入（follow 成为当前会话、
+composer 换了收件人），所以"看一眼"和"接管"分不开。
+
+**机制**（`OutputSource` / `PeekSnapshot` / `SessionPeek`）：
+
+* **一个源就是一个可读对象**：`OutputSource { id, kind, label, state, startedAt?, endedAt?, createdBy,
+  parentSessionId?, detail? }`。血缘是重点——`createdBy` 说谁造的、`parentSessionId` 说属于哪个会话，
+  看的人不必猜这个 session 为什么存在。
+* **三个来源合成一张表**（`Controller.outputSources()`）：本 client 自己造的 session（host 没有记录这条
+  血缘的 API，所以由 client 登记，`createdBy: 'verifier'`）、本机 `!` 运行（`shell:<id>`，`createdBy: 'shell'`）、
+  host 侧 subagent 子会话（唯一记载在 `session/list` 行的 `origin`/`parentSessionId`，`createdBy: 'agent'`）。
+  同一 session 上 client 登记优先于列表行，因为它知道得更多。
+* **跟随是只读的**：`SessionPeek` 用 `session/follow` 订阅目标地址，自带一个 `Transcript`，**不选中、不
+  写入、不占用 mutation 门**；关闭即 `cancel()` + `releaseHistoryLayout` + `dispose()`。子会话在其 parent
+  之下，地址形态（`continuable`/`one-shot`）列表行并不携带，因此按 `costAddresses()` 的顺序逐个尝试。
+* **同址复用**：`!` 的地址形态与 subagent 相同，所以这一条通路以后同时服务两者——本机 `!` 现在仍然是
+  内联块（**共存**，不是替换），peek 是它的展开视图。
+
+**【取舍】为什么 host 侧子会话登记要改上层仓库**：`session/create` 的参数只有
+`{ workspaceId?, cwd?, sessionId? }`，host 的父子关系来自 `subagents.list(parentSessionId)` 目录。
+本 client 造的 verifier session 因此**只能由 client 自己**记住血缘；要让它也成为 host 意义上的 child，
+需要在被审查的仓库里给 create 增加 `parentSessionId`/origin 并登记进目录——那是 `tui/` 之外的一步，
+**尚未做**。现在的做法是在 client 侧登记（`createdSources`），并让 peeker 对两种地址形态都能工作：
+即使将来 host 侧补上了，客户端代码不需要改。
+
+**【取舍】为什么是整屏只读视图**：面板按 §5.3 是"面"，但这一张复用的是会话本身的排版（
+`queries.render()`，与聊天同一套 wrap/markdown/颜色），并且要能滚动长输出；塞进 composer 上方的
+小面板既看不清也不是"读别人输出"的形态。所以它是唯一**替换正文区**的面：打开时 composer 让位，
+`Esc` 是唯一回路（Esc 表第 4 条，早于 pending/面板规则）。键盘入口 `Ctrl+O` 打开"最新的一个源"，
+点击 transcript 行打开指定源是下一步（§13.1 未标 ✅ 的条目）。
 
 ---
 
@@ -1052,6 +1089,10 @@ type LoopTerminalReason =
 | loop 身份跨重连不变 | `tests/controller/loop-run.test.ts` | §8.4 |
 | `begin/end` 在保留窗口内配对 | `tests/controller/trace-log.test.ts`（`compactCut`） | I9 |
 | `/loop stop` 结束运行、无运行时只提示；记录名 `stop` 被拒 | `tests/ui/app.test.tsx`、`tests/controller/commands.test.ts`、`tests/ui/commands.test.ts` | §8.5 + 控制泳道 |
+| 三个来源合成一张源表（client 登记的 verifier、`!` 运行、host subagent 子会话），登记优先于列表行 | `tests/controller/sources.test.ts` | §7.5 |
+| 跟随只读：`session/follow` 用正确地址形态（子会话两种都试）、不选中不写入、关闭即 cancel | `tests/controller/sources.test.ts`、`tests/ui/app.test.tsx` | §7.5 |
+| 本地源不需要流：`lines` 直接可读，打开它不发 host 请求 | `tests/controller/sources.test.ts` | §7.5 |
+| 整屏视图：`Ctrl+O` 打开最新源、箭头/PgUp/PgDn/滚轮滚动、`Esc` 关闭并交回 composer | `tests/ui/app.test.tsx` | §7.5/§5.4 |
 
 ---
 
@@ -1094,6 +1135,7 @@ type LoopTerminalReason =
 | **P2** ✅ | **`SessionMutationGate(sessionId)`**：显式化 host 单 turn 语义 + client 写串行；关闭 `promptInternal` 与 foreground 写的重叠 | 已实现（`src/session/mutation-gate.ts`）：**admission/dispatch serializer，不是 long-running mutex**；`cancel`/`interrupt`/`cancelNamedSession` 走控制泳道，可抢占普通等待队列；每个写入口都被 `mutation` 事件记录（§6.3.1/§6.3.2）。**仍未做**：`runAction` 的 busy 信封仍是"拒绝第二个"而不是排队（P4 未完成部分） |
 | **P3** ✅ | `CommandResult` + 判别联合 `ViewEffect`（数组即顺序）；消除两个 UI 触发效果（`answer`、`/cost` 的 `refreshCosts`）；按 13.2-D2 收敛错误通道 | 已实现：`CommandIntent` 删除；提问瀑布搬进 `Controller.answerQuestion`（键路径与命令行共用）；`/cost` 的刷新由 `execute` 经 `port.run` 起；`runCommand` 在本行已报告失败后清掉 action 信封里的同一次失败。**仍未做**：`state.operation.error` 仍是连接/动作信封的字段（未进一步删除或改名） |
 | **P4** ✅ | `ForegroundOperation` 归 controller（含 AbortSignal）；`duringTurn`/`duringLoop` 按 kind（一期 `run/deny`）；Esc 表驱动；LoopRun 显式对象与 loop 发送排队；composer 聚焦策略（13.2-D1） | 已实现（§6.2/§3.4/§5.4/§13.2-D1）：槽位 + abort + `id/kind/label` 归 controller，`queries.foreground` 与 `actions.cancelForeground()` 是唯一读/取消入口；UI 的 `historyAbort`/`historyLoading` 已删除并由架构守卫禁止回归；嵌套认领用 `AsyncLocalStorage` 精确判定；loop 发送排队由用例固定；表单 Start 与命令行走同一套 `authorize`。A1（前台槽位排队）、A2（`during*` 的 `queue`）、A3（`state.lastFailure`）、A5（`/loop answer`、`/loop abort`、PAUSED）均已完成；D15（`dsht trace`）另见 §7.4 |
+| **P5** ◐ | 只读输出源（§7.5）：`OutputSource` 注册表、`SessionPeek` 跟随、整屏 peek 视图、`peek begin/end`；随后点击 transcript 行打开指定源 | **机制 + 面板 ✅**（`src/session/peek.ts`、`Controller.outputSources()/openPeek/closePeek`、`src/ui/dialogs/peek.tsx`；用例见 §11）。**未做**：屏幕行坐标图与 SGR 左键命中测试，让"点某一行"打开那一条源 |
 
 **每期先写不变量测试，再改实现**——否则"目标态"只会成为下一次事故的来源。
 
@@ -1106,6 +1148,7 @@ type LoopTerminalReason =
 | D2 | 错误/提示 owner | **业务失败事实归 `CommandResult.outcome` + trace；UI 只拥有展示生命周期**；`state.operation.error` 最终删除或降级为内部 `lastFailure` | 否则会出现三套"用户可见错误事实"，必然互相矛盾。**已完成**：结果 + trace 同源；命令自行报告失败后不再留第二份（`clearFailure()`）；`state.operation` 这个信封整体删除——失败只剩 `state.lastFailure` 一条内部记录（连接、会话流、动作信封写它），"是否有操作在跑"不再有第二个布尔，唯一事实是 `queries.foreground`（`ControllerStore.busy()` 供领域层读取） |
 | D3 | `/loop stop` 后显示 | **保留 terminal progress，直到下一次 loop 或显式清除** | 终态是最需要被看到的结果；配合 §8.3.1，只有 `active` 参与并发判断，终态残留不会污染授权 |
 | D4 | `needs-human` | **已升级为 PAUSED**（`/loop answer` 落地后）：判断者弃权 = 暂停 + 可回答；验证进程/host 要人仍按终态（`terminalReason` 存在） | 暂停态必须真的能恢复，否则标成 PAUSED 只是暗示一个不存在的路径 |
+| D5 | 只读输出源与 peek 视图（§7.5） | **源由 client 登记**（host 侧血缘另改上层仓库）；**与内联 `!` 块共存**（视图是展开，不是替换）；**点击粒度是 transcript 行**；**不做源切换 UI**；**整屏只读视图**，`Esc` 返回 | 多份"别人在说话"的输出必须能只读地看而不接管；点行是唯一"我知道我点的是哪一条"的入口，另做切换器等于在视图里再造一个选择器；整屏是读长输出的形态 |
 
 ### 13.3 实现后必须能回答的问题（验收口径）
 

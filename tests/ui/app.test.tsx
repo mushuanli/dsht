@@ -2195,7 +2195,7 @@ test('the status bar reports a verifying loop instead of claiming Ready', async 
   // to leave the bar saying Ready while the client was plainly working.
   let release: (() => void) | undefined;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const verifier: VerifierPort = { verify: async () => { await gate; return { type: 'cancelled' }; } };
+  const verifier: VerifierPort = { name: 'fake', verify: async () => { await gate; return { type: 'cancelled' }; } };
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier });
   const ui = render(<App controller={controller} />);
   t.after(async () => { release?.(); ui.unmount(); ui.cleanup(); await controller.stop(); fixture.close(); });
@@ -2422,4 +2422,65 @@ test('a command with arguments shows what it takes once the name is settled', as
   await pressKey(ui, '/loop ');
   await until(() => ui.lastFrame()?.includes('Loop records') === true);
   assert.doesNotMatch(ui.lastFrame()!, /List loop\.yaml records/);
+});
+
+test('Ctrl+O opens the read-only view on a local run and Esc gives the composer back', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  controller.shell.start('seq 1 30');
+  await until(() => controller.shell.runs[0]?.status === 'exited');
+
+  await pressKey(ui, '\u000f');
+  await until(() => ui.lastFrame()?.includes('! seq 1 30') === true);
+  const frame = ui.lastFrame()!;
+  // The panel is the source, not the conversation: its identity, its newest lines, and its own footer.
+  assert.match(frame, /^.*! seq 1 30/m);
+  assert.match(frame, /shell:1 · local process · ended · from s1 · ran \d+s/);
+  assert.match(frame, /lines \d+–30 of 30/);
+  assert.match(frame, /Esc closes/);
+  // The composer is gone while the view owns the screen.
+  assert.doesNotMatch(frame, /Message, @host-file, or \/help/);
+
+  // Arrows scroll the view without touching the conversation behind it.
+  for (let step = 0; step < 25; step++) await pressKey(ui, '\u001b[A');
+  await until(() => /lines 1–\d+ of 30/.test(ui.lastFrame() ?? ''));
+  for (let step = 0; step < 25; step++) await pressKey(ui, '\u001b[B');
+  await until(() => /lines \d+–30 of 30/.test(ui.lastFrame() ?? ''));
+
+  await pressKey(ui, '\u001b');
+  await until(() => ui.lastFrame()?.includes('Message, @host-file, or /help') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /Esc closes/);
+  // The conversation is back where it was: the block's output is still in the transcript.
+  assert.match(ui.lastFrame()!, /30/);
+});
+
+test('Ctrl+O follows a subagent child and shows what that session streams', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.subagent = { sessionId: 'child-1', origin: 'subagent', parentSessionId: 's1',
+    projections: { values: { title: 'explore the parser' } } };
+  // The child belongs to the selected workspace, which is the list a reader sees.
+  fixture.baseline = [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 'child-1'] }];
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+
+  await pressKey(ui, '\u000f');
+  await until(() => ui.lastFrame()?.includes('explore the parser') === true);
+  assert.match(ui.lastFrame()!, /child-1 · session · ended · from s1/);
+  await until(() => ui.lastFrame()?.includes('你好') === true);
+  fixture.follow({ type: 'event', event: { seq: 9, type: 'assistant/message', surfaceOp: 'append',
+    data: { message: { content: [{ type: 'text', text: 'the parser lives in parse.ts' }] } } } });
+  await until(() => ui.lastFrame()?.includes('the parser lives in parse.ts') === true);
+
+  // Esc releases the follow: the child's stream stops with the view.
+  const cancelled = fixture.cancels.length;
+  await pressKey(ui, '\u001b');
+  await until(() => fixture.cancels.length > cancelled);
+  assert.doesNotMatch(ui.lastFrame()!, /explore the parser/);
 });

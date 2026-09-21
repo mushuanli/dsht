@@ -58,6 +58,7 @@ function fakeVerifier(outcome: (request: VerifierRequest) => VerifierOutcome | P
   return {
     requests, signals,
     port: {
+      name: 'fake',
       verify: async (request: VerifierRequest, signal: AbortSignal): Promise<VerifierOutcome> => {
         requests.push(request); signals.push(signal);
         return await outcome(request);
@@ -397,7 +398,7 @@ test('cancelling the review cancels the verifier and ignores its late verdict', 
   const fixture = await host(); t.after(() => fixture.close());
   let settle: ((outcome: VerifierOutcome) => void) | undefined;
   const signals: AbortSignal[] = [];
-  const port = { verify: (request: VerifierRequest, signal: AbortSignal): Promise<VerifierOutcome> => {
+  const port = { name: 'fake', verify: (request: VerifierRequest, signal: AbortSignal): Promise<VerifierOutcome> => {
     void request;
     signals.push(signal);
     return new Promise<VerifierOutcome>(resolve => { settle = resolve; });

@@ -660,6 +660,7 @@ codex --ask-for-approval never exec --json --sandbox read-only \
 | **协议是记录，命令只有一个** | ✅ 已实现（G7） | `/loop <name>` 从 `loop.yaml` 取记录，`controller/loop-protocols.ts` 是唯一装配点；`/design-review`、`/designdoc-review`、`/verify` 与三个协议文件（`design-review.ts`／`designdoc-review.ts`／`loop-prompt.ts`）已删除。测试：`loop-protocols.test.ts`、`commands.test.ts`、`ui/commands.test.ts` |
 | **run 内协议冻结** | ✅ 已实现（G9；YAML 为构建期内联） | 记录在 `loopProtocolFor` 里读一次并由闭包保存（标题/rubric/standard/vars/默认值），`LoopLimits` 在 `startLoop` 解析一次；未知占位符与保留名在生成期失败。**将来若启用运行时加载**，仍需保留这层快照 |
 | verifier session / verdict 清理 | ⬜ 未做 | 一期明确「为审计保留、手动清理」；`runId` 目录已可整组删除 |
+| verifier 会话可只读观察、不必接管 | ✅ 已实现 | 会话由 client 登记为一个只读**输出源**（`createdBy: 'verifier'`、parent = 被评审会话、detail = verifier 名），`Ctrl+O`／整屏 peek 视图用 `session/follow` 跟随它，不选中、不写入；运行停止后源仍在列表里（`state: 'ended'`）。证据：`tests/controller/sources.test.ts`、`tests/ui/app.test.tsx`；机制与取舍见 `slash.md` §7.5 |
 | README / `tui-design.md` 同步 | ✅ 已做（G7 同批） | `README.md`/`README.zh.md` 命令表改为 `/loop <name>`（删除 `/design-review`、`/verify` 行）并重记 `README.i18n.yaml` 哈希；`tui-design.md` §3.4／附录 A 已按新命令面与文件集更新 |
 
 

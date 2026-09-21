@@ -83,6 +83,8 @@ async function fingerprint(path: string): Promise<string | undefined> {
  * context: the prompt, the standard and the artifact on disk are all it knows.
  */
 export class ProcessVerifier implements VerifierPort {
+  /** This client forks itself, so the harness that judges is this one. */
+  readonly name = 'dsht';
   constructor(private readonly options: ProcessVerifierOptions) {}
 
   /** @param request - Round identity, prompt and verdict path.

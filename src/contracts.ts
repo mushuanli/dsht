@@ -4,8 +4,11 @@
  * between presentation and the domain stays a type-only dependency. Anything this file needs at
  * runtime belongs in a view model next to the component that renders it.
  */
+import type { Transcript } from './session/transcript.ts';
+
 export type { Json, ObjectValue } from './json.ts';
 export type { HistoryRow, Reasoning, RowKind, SessionRender } from './session/history.ts';
+export type { Transcript } from './session/transcript.ts';
 export type { LivePhase, Message } from './session/transcript.ts';
 export type { FileReference } from './references.ts';
 export type { HistorySearch, RemovalTarget } from './session/types.ts';
@@ -62,6 +65,45 @@ export interface LoopLimits {
   to: number;
   score: number;
   tries: number;
+}
+
+/** Which kind of thing a read-only view can show. */
+export type OutputSourceKind = 'session' | 'local';
+
+/** One readable output source: a session this client can follow, or a local run it already holds.
+ *
+ * The lineage is the point: a source says who created it (`createdBy`) and which session owns it
+ * (`parentSessionId`), so a viewer never has to guess why a session exists. Host-created children are
+ * found in the session list (`origin`/`parentSessionId`); children this client created are registered
+ * by the application, because the host has no way to record a client-made link.
+ */
+export interface OutputSource {
+  /** Stable identity the front end clicks and the application opens. */
+  readonly id: string;
+  readonly kind: OutputSourceKind;
+  /** What a list and the view header call it, e.g. the record's title or `! command`. */
+  readonly label: string;
+  readonly state: 'running' | 'ended';
+  /** When it began, when known; a host list row carries only `updatedAt`, so this can be absent. */
+  readonly startedAt?: number;
+  readonly endedAt?: number;
+  /** Who created it, when this client knows. */
+  readonly createdBy: 'verifier' | 'shell' | 'agent' | 'unknown';
+  /** Session that owns it: the reviewed session for a verifier, the typed session for `!`. */
+  readonly parentSessionId?: string;
+  /** One extra line for the header, such as which verifier produced the session. */
+  readonly detail?: string;
+}
+
+/** What the read-only view renders: one source, and its content in whatever form it has. */
+export interface PeekSnapshot {
+  readonly source: OutputSource;
+  /** Followed session content, when the source is a session and the host has answered. */
+  readonly transcript?: Transcript;
+  /** Plain lines a local source already holds, oldest first. */
+  readonly lines?: readonly string[];
+  /** Set when the source could not be read at all. */
+  readonly error?: string;
 }
 
 /** What one operator-driven foreground operation is doing.

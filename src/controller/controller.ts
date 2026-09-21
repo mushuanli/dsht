@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { Client } from '../transport/client.ts';
 import { readText, removeFile, writeHeapSnapshot } from '../storage/index.ts';
-import { errorText, type Json, type ObjectValue } from '../transport/wire.ts';
+import { errorText, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { HostEvent } from '../transport/events.ts';
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from '../session/memory.ts';
 import { layoutStats, type SessionRender } from '../session/history.ts';
@@ -23,7 +23,10 @@ import { latestAssistantText, parseLoopResult, ScoredLoop, type LoopLimits, type
 import { findingsLines } from './loop-contract.ts';
 import { loopRecords as listLoopRecords } from './loop-protocols.ts';
 import { verificationId, verdictFile, type VerifierOutcome, type VerifierPort } from './verifier.ts';
-import type { ClientActivity, ForegroundKind, ForegroundSnapshot, LoopProgress, LoopRecord, LoopTerminalReason } from '../contracts.ts';
+import type { ClientActivity, ForegroundKind, ForegroundSnapshot, LoopProgress, LoopRecord, LoopTerminalReason, OutputSource, PeekSnapshot } from '../contracts.ts';
+import { SessionPeek } from '../session/peek.ts';
+import { costAddresses } from '../cost/scanner.ts';
+import { sessionLabel } from '../session-title.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import { ShellController } from '../shell/index.ts';
@@ -48,6 +51,18 @@ function shellEnv(): NodeJS.ProcessEnv {
 
 /** How many times a verifier outage is retried before the run reports verification unavailable. */
 const VERIFIER_RETRIES = 2;
+
+/** Sources this client registers before it forgets the oldest; a session list can still find them. */
+const SOURCE_LIMIT = 50;
+
+/** The tag every verifier session title starts with, so a reader can tell it apart in a list. */
+const VERIFIER_TAG = '[dsht-verify] ';
+
+/** What the read-only view calls a verifier's session: its title without the marker prefix. */
+function verifierLabel(title: string): string {
+  const stripped = title.startsWith(VERIFIER_TAG) ? title.slice(VERIFIER_TAG.length) : title;
+  return stripped.trim() === '' ? title : stripped.trim();
+}
 
 /** How long a finished turn may take to commit its final assistant message.
  *
@@ -91,6 +106,10 @@ export interface Actions {
   foreground<T>(kind: ForegroundKind, label: string, work: (signal: AbortSignal) => Promise<T>, wait?: boolean): Promise<T | undefined>;
   /** Cancel the operation that owns the slot; false when none is running. */
   cancelForeground(): boolean;
+  /** Open one output source read-only, at full screen; unknown ids are ignored. */
+  openPeek(id: string): void;
+  /** Close the read-only view and release whatever it was following. */
+  closePeek(): void;
   switchWorkspace(workspaceId?: string): Promise<boolean>;
   switchSession(query?: string): Promise<boolean>;
   selectSession(sessionId: string): Promise<boolean>;
@@ -183,6 +202,10 @@ export interface Queries {
   readonly activity: ClientActivity | undefined;
   /** The one operation that owns the client, when one does; the view renders its label and clock. */
   readonly foreground: ForegroundSnapshot | undefined;
+  /** Every readable output source this client knows: verifier sessions, `!` runs, host children. */
+  readonly sources: readonly OutputSource[];
+  /** The read-only view's content, when one is open; undefined while it is closed. */
+  readonly peek: PeekSnapshot | undefined;
   /** Every `loop.yaml` record, so the picker can offer names and their defaults without a lookup. */
   readonly loopRecords: readonly LoopRecord[];
   /** Why the saved prompts could not be read, when the file was malformed. */
@@ -337,6 +360,12 @@ export class Controller implements ControllerStore, ConnectionListener {
   private foregroundSeq = 0;
   /** Which operation the current async continuation belongs to, so a nested call never re-claims. */
   private readonly foregroundOwner = new AsyncLocalStorage<number>();
+  /** Read-only follower for the full-screen view; it borrows the connection and never selects. */
+  readonly peek: SessionPeek;
+  /** Sources this client created, keyed by session id; the host cannot record that lineage itself. */
+  private readonly createdSources = new Map<string, OutputSource>();
+  /** The source the read-only view is showing, when one is open. */
+  private peekId: string | undefined;
 
   constructor(options: ControllerOptions) {
     const { base, token, initialSession, costs } = options;
@@ -353,6 +382,8 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.deadlineMs = options.deadlineMs;
     const connectionOptions: ConnectionOptions = { base, token, initialSession, makeClient, authenticate };
     this.connection = new ConnectionController(this, connectionOptions, this);
+    // The view follows other sessions over the same connection; it never becomes a second writer.
+    this.peek = new SessionPeek(this.connection);
     // Every session write is admitted in order; the trace records that order, which is what answers
     // "who dispatched first" when two mutations of one session compete.
     this.session = new SessionController(this, this.connection, this.connection, historyLimits,
@@ -421,6 +452,9 @@ export class Controller implements ControllerStore, ConnectionListener {
     // transiently clears the selection — must not, or a long review could never finish.
     if (next.sessionId !== undefined && next.sessionId !== this.state.sessionId && this.loop?.sessionId !== next.sessionId) {
       this.forgetLoop();
+      // The read-only view belongs to the conversation that opened it; leaving that conversation
+      // closes it, and the session switch that follows is never left rendering someone else's rows.
+      this.dropPeek();
     }
     this.state = next;
     this.traceTransition(previous, next);
@@ -486,13 +520,19 @@ export class Controller implements ControllerStore, ConnectionListener {
     return {
       foreground: (kind, label, work, wait) => this.claimForeground(kind, label, work, wait),
       cancelForeground: () => this.cancelForeground(),
+      openPeek: id => this.openPeek(id),
+      closePeek: () => this.closePeek(),
       switchWorkspace: id => this.runAction('navigation', 'Switching workspace…', () => this.switchWorkspace(id)),
       switchSession: query => this.runAction('navigation', 'Switching session…', () => this.switchSession(query)),
       selectSession: id => this.runAction('navigation', 'Loading session…', () => this.selectSession(id)),
       createWorkspace: path => this.runAction('navigation', 'Registering workspace…', () => this.createWorkspace(path)),
       createSession: () => this.runAction('navigation', 'Creating session…', () => this.createSession()),
-      createVerifierSession: title => this.runActionValue('verifier', 'Creating verifier session…', () => this.session.createNamedSession(title)),
-      cancelVerifierSession: sessionId => this.runAction('verifier', 'Stopping verifier…', () => this.session.cancelNamedSession(sessionId)),
+      createVerifierSession: title => this.runActionValue('verifier', 'Creating verifier session…', () => this.createVerifierSession(title)),
+      cancelVerifierSession: sessionId => this.runAction('verifier', 'Stopping verifier…', async () => {
+        await this.session.cancelNamedSession(sessionId);
+        // The run is over even though its transcript stays readable; the list should say so.
+        this.endSource(sessionId, Date.now());
+      }),
       showPicker: screen => this.runAction('picker', 'Listing…', () => this.showPicker(screen)),
       removeTarget: target => this.runAction('removal', 'Removing…', () => this.removeTarget(target)),
       removalTarget: (kind, query) => this.runActionValue('removal', 'Reading target…', () => this.removalTarget(kind, query)),
@@ -572,6 +612,8 @@ export class Controller implements ControllerStore, ConnectionListener {
       get promptsError() { return controller.promptStore.error; },
       get loop() { return controller.loop?.progress; },
       get foreground() { return controller.foreground; },
+      get sources() { return controller.outputSources(); },
+      get peek() { return controller.peekSnapshot(); },
       get activity() { return controller.activity; },
       get loopRecords() { return listLoopRecords(); },
       pendingCounts: () => controller.pendingCounts(),
@@ -597,6 +639,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     // Nobody waits forever for a slot that will never be handed out again.
     this.foregroundClosed = true;
     for (const wake of this.foregroundWaiters.splice(0)) wake();
+    this.dropPeek();
     await this.shell.stop();
     await this.connection.stop();
     await this.session.settle();
@@ -902,6 +945,122 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** @returns Sessions accounted to the selected workspace, minus archived identities. */
   private get visibleSessions(): ObjectValue[] { return this.session.visibleSessions; }
+
+  /** Every readable output source, newest activity first.
+   *
+   * Three origins feed one list, because a reader asking "what is that session" does not care which
+   * layer knows about it: sessions this client created (the host cannot record that link), local `!`
+   * runs it already holds, and host-created subagent children, whose only lineage is their list row.
+   * A client-created source wins over the list row for the same session, since it says more.
+   * @returns Sources to offer, running ones first.
+   */
+  private outputSources(): OutputSource[] {
+    const sources: OutputSource[] = [];
+    const seen = new Set<string>();
+    for (const [id, source] of this.createdSources) { sources.push(source); seen.add(id); }
+    for (const block of this.state.shell.blocks) {
+      const id = `shell:${block.id}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      sources.push({
+        id, kind: 'local', label: `! ${block.command}`,
+        state: block.status === 'running' ? 'running' : 'ended',
+        startedAt: block.startedAt,
+        ...(block.endedAt === undefined ? {} : { endedAt: block.endedAt }),
+        createdBy: 'shell',
+        ...(this.state.sessionId === undefined ? {} : { parentSessionId: this.state.sessionId }),
+      });
+    }
+    for (const row of this.visibleSessions) {
+      const sessionId = string(row.sessionId);
+      const parent = typeof row.parentSessionId === 'string' ? row.parentSessionId : '';
+      if (sessionId === '' || parent === '' || row.origin !== 'subagent' || seen.has(sessionId)) continue;
+      seen.add(sessionId);
+      sources.push({
+        id: sessionId, kind: 'session', label: sessionLabel(row), state: 'ended',
+        ...(typeof row.updatedAt === 'number' ? { startedAt: row.updatedAt } : {}),
+        createdBy: 'agent', parentSessionId: parent,
+      });
+    }
+    return sources.sort((a, b) => a.state === b.state
+      ? (b.startedAt ?? 0) - (a.startedAt ?? 0)
+      : a.state === 'running' ? -1 : 1);
+  }
+
+  /** Register a session this client created for a verifier, so the list can explain it. */
+  private async createVerifierSession(title: string): Promise<string | undefined> {
+    const sessionId = await this.session.createNamedSession(title);
+    if (sessionId === undefined) return undefined;
+    const parent = this.state.sessionId;
+    this.createdSources.set(sessionId, {
+      id: sessionId, kind: 'session', label: verifierLabel(title), state: 'running', startedAt: Date.now(),
+      createdBy: 'verifier',
+      ...(parent === undefined ? {} : { parentSessionId: parent }),
+      ...(this.verifier === undefined ? {} : { detail: `verifier ${this.verifier.name}` }),
+    });
+    // A long-lived client runs many reviews; the registry is a convenience list, not a ledger, and a
+    // dropped session is still reachable by selecting it. Insertion order is the age order.
+    while (this.createdSources.size > SOURCE_LIMIT) {
+      const oldest = this.createdSources.keys().next().value;
+      if (oldest === undefined) break;
+      this.createdSources.delete(oldest);
+    }
+    this.update({});
+    return sessionId;
+  }
+
+  /** Mark a source this client created as finished, keeping it readable. */
+  private endSource(id: string, at: number): void {
+    const source = this.createdSources.get(id);
+    if (source === undefined || source.state === 'ended') return;
+    this.createdSources.set(id, { ...source, state: 'ended', endedAt: at });
+    this.update({});
+  }
+
+  /** Open one source read-only at full screen; a session source starts following it. */
+  private openPeek(id: string): void {
+    const source = this.outputSources().find(candidate => candidate.id === id);
+    if (source === undefined || this.peekId === id) return;
+    this.peekId = id;
+    this.traceEvent('peek begin', { source: id, kind: source.kind });
+    if (source.kind === 'session') {
+      const row = this.visibleSessions.find(candidate => string(candidate.sessionId) === id);
+      // The list row is the only place that knows a child needs its parent in the address.
+      this.peek.open(row === undefined ? [{ kind: 'session', sessionId: id }] : costAddresses(row), () => this.update({}));
+    }
+    this.update({});
+  }
+
+  /** Close the read-only view and release whatever it followed. */
+  private closePeek(): void {
+    if (this.peekId === undefined) return;
+    this.traceEvent('peek end', { source: this.peekId });
+    this.peek.close();
+    this.peekId = undefined;
+    this.update({});
+  }
+
+  /** Release the view without publishing; the caller is already inside an update. */
+  private dropPeek(): void {
+    if (this.peekId === undefined) return;
+    this.traceEvent('peek end', { source: this.peekId });
+    this.peek.close();
+    this.peekId = undefined;
+  }
+
+  /** What the read-only view renders, or undefined while it is closed. */
+  private peekSnapshot(): PeekSnapshot | undefined {
+    if (this.peekId === undefined) return undefined;
+    const source = this.outputSources().find(candidate => candidate.id === this.peekId);
+    if (source === undefined) return undefined;
+    if (source.kind === 'local') {
+      const block = this.state.shell.blocks.find(candidate => `shell:${candidate.id}` === source.id);
+      return { source, lines: block?.lines ?? [] };
+    }
+    const followed = this.peek.snapshot;
+    if (followed === undefined) return { source };
+    return { source, transcript: followed.transcript, ...(followed.error === undefined ? {} : { error: followed.error }) };
+  }
 
   /** @returns Unanswered interactions by session, for the state each list row reports. */
   private pendingCounts(): ReadonlyMap<string, number> { return this.session.pendingCounts(); }

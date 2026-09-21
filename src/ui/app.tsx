@@ -5,7 +5,7 @@ import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement
 import { useMouseWheel } from './input/mouse.ts';
 import { TextInput } from './input/input.tsx';
 import { ReferenceMenu } from './input/references.tsx';
-import type { CommandResult, PanelName, PanelState, Reasoning, ViewEffect } from '../contracts.ts';
+import type { CommandResult, HistoryRow, PanelName, PanelState, Reasoning, ViewEffect } from '../contracts.ts';
 import type { CostTotal } from '../contracts.ts';
 import { costText } from './status/model.ts';
 import { toolLine } from '../text.ts';
@@ -16,12 +16,13 @@ import { StatusBar, type StatusSource } from './chat/status.tsx';
 import { ChatHeader } from './chat/header.tsx';
 import { LoopStatus } from './chat/loop-status.tsx';
 import { ChatViewport } from './chat/viewport.tsx';
-import { mergeShellRuns } from './chat/shell-view.ts';
+import { mergeShellRuns, plainRows } from './chat/shell-view.ts';
 import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
 import type { Choice } from './dialogs/picker.tsx';
 import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
 import { LoopDialog, LoopMenu, type LoopRun } from './dialogs/loop.tsx';
+import { PeekPanel } from './dialogs/peek.tsx';
 import { COMMAND_HINTS, argumentHint, completeCommand as completeDraft, suggestedCommands } from '../slash/registry.ts';
 import { interpret, normalize, authorize, type DeferReason, type LineCommand, type Verdict } from '../slash/index.ts';
 import { loopNameQuery } from '../slash/parse.ts';
@@ -38,6 +39,15 @@ const PANEL_LIFETIME_MS = 10_000;
 
 /** Pages one boundary recall press may walk before it reports that nothing older holds a prompt. */
 const RECALL_PAGE_SCAN = 20;
+
+/** No folds: the read-only view has no expand state of its own, and one empty set keeps layout cached. */
+const NO_FOLDS: ReadonlySet<number> = new Set();
+
+/** Every surface name: the panels a command may open, and the read-only view only this front end owns. */
+type SurfaceName = PanelName | 'peek';
+
+/** Rows one PgUp/PgDn moves in the read-only view. */
+const PEEK_PAGE = 10;
 
 /** A command that borrows the composer to edit something: Enter commits, Esc abandons.
  *
@@ -63,8 +73,8 @@ interface ComposerIntent {
 interface QueuedLine { command: LineCommand; defer: DeferReason; sessionId: string | undefined }
 
 interface Surface {
-  /** Panel identity a `ViewEffect` may name. */
-  name: PanelName;
+  /** Panel identity a `ViewEffect` may name, or a surface this front end owns alone (`peek`). */
+  name: SurfaceName;
   /** Whether the surface currently owns part of the screen. */
   open: boolean;
   /** Whether it takes ↑/↓ from composer recall while open. */
@@ -195,6 +205,20 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const loopRecord = loopForm === undefined ? undefined
     : controller.queries.loopRecords.find(record => record.name === loopForm.name);
   const queued = controller.queries.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
+  // The read-only view: the application owns which source is followed and what it holds, the front end
+  // owns only the reader's position in it.
+  const peek = controller.queries.peek;
+  const [peekScroll, setPeekScroll] = useState(0);
+  const peekBox = useRef<DOMElement>(null);
+  const [peekRows, setPeekRows] = useState(20);
+  useLayoutEffect(() => {
+    if (peekBox.current) {
+      const height = Math.floor(measureElement(peekBox.current).height);
+      if (height !== peekRows) setPeekRows(height);
+    }
+  });
+  // A new source is a new document: it opens at its newest row rather than wherever the last one was.
+  useEffect(() => { setPeekScroll(0); }, [peek?.source.id]);
   useEffect(() => {
     setPanels({ thoughts: false, queue: false }); setReferenceIndex(0); setDismissedReference(undefined);
     setInputValue(''); setCursor(0); parkedDraft.current = ''; setComposerIntent(undefined);
@@ -222,6 +246,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const loopMenuCursor = Math.min(loopMenuIndex, Math.max(0, loopCandidates.length - 1));
   // The queue dialog is not rendered while an answer is waiting, so it is not "open" then either.
   const surfaces: readonly Surface[] = [
+    // The read-only view is a whole screen, so its rule leads: any other panel open under it is
+    // unreachable until it closes, and it is the only surface the reader can see.
+    { name: 'peek', open: !!peek, arrows: true, blocksKeys: true, close: () => controller.actions.closePeek() },
     { name: 'queue', open: queueOpen && !pending, reserved: ['d'], close: () => openQueue(false) },
     { name: 'prompts', open: !!promptsOpen, arrows: true, blocksKeys: true, reserved: ['d', 'e'], close: () => openPrompts(false) },
     { name: 'removal', open: !!removal, arrows: true, blocksKeys: true, close: () => setRemoval(undefined) },
@@ -367,7 +394,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         // Esc also leaves a history list that was already on screen when the load was aborted.
         if (historyQuery !== undefined) setHistoryPanel(undefined);
       } },
-      // 4 An approval or a question owns the keyboard until it is settled.
+      // 4 The read-only view sits on top of the conversation it was opened from.
+      { when: peek !== undefined, run: () => controller.actions.closePeek() },
+      // 5 An approval or a question owns the keyboard until it is settled.
       { when: pending !== undefined, run: () => {
         controller.actions.setApproval(undefined);
         setRemoval(undefined); setModelPanel(undefined); openThoughts(false); setSearchPanel(undefined);
@@ -385,7 +414,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         }
         controller.actions.setOption({ ...choiceState, custom: false });
       } },
-      // 5 The panels a command opened.
+      // 6 The panels a command opened.
       { when: queueOpen === true, run: () => openQueue(false) },
       { when: promptsOpen === true, run: () => openPrompts(false) },
       { when: removal !== undefined, run: () => setRemoval(undefined) },
@@ -393,7 +422,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       { when: thoughtList === true, run: () => { openThoughts(false); if (controller.queries.running) void controller.actions.interrupt(true); } },
       { when: searchResults !== undefined, run: () => { setSearchPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); } },
       { when: historyQuery !== undefined, run: () => { setHistoryPanel(undefined); if (controller.queries.running) void controller.actions.interrupt(true); } },
-      // 6 Screens. The typed host path is one of them: the picker behind it is disabled while a draft
+      // 7 Screens. The typed host path is one of them: the picker behind it is disabled while a draft
       // exists, so a leftover path would leave no way back at all.
       { when: state.screen === 'path', run: () => { setInput(''); operate(() => controller.actions.showPicker('workspaces')); } },
       // A picker opened over a conversation is a detour, so Esc returns to that conversation; from the
@@ -401,23 +430,38 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       // only thing behind the startup picker.
       { when: state.screen === 'sessions', run: () => { if (!controller.actions.showChat()) operate(() => controller.actions.showPicker('workspaces')); } },
       { when: state.screen === 'workspaces', run: () => { controller.actions.showChat(); } },
-      // 7 The composer's own menus: hiding one never undoes the choice it was offering.
+      // 8 The composer's own menus: hiding one never undoes the choice it was offering.
       { when: loopMenuOpen === true, run: () => setDismissedLoopMenu(input) },
       { when: referenceOpen === true, run: () => { setDismissedReference(input); if (controller.queries.running) void controller.actions.interrupt(true); } },
-      // 8 The read-only surfaces.
+      // 9 The read-only surfaces.
       { when: help || costExpanded || statusExpanded || notice !== undefined, run: () => {
         setHelp(false); setCostExpanded(false); setStatusExpanded(false); setStatusScroll(0); setNotice(undefined);
         if (controller.queries.running) void controller.actions.interrupt(true);
       } },
-      // 9 A local command in the transcript is more immediate than the agent behind it.
+      // 10 A local command in the transcript is more immediate than the agent behind it.
       { when: state.shell.running && input === '' && !panelBlocksKeys && pending === undefined && state.screen === 'chat',
         run: () => controller.shell.cancel() },
-      // 10 Anything left on the conversation screen cancels whatever the agent is doing.
+      // 11 Anything left on the conversation screen cancels whatever the agent is doing.
       { when: state.screen === 'chat', run: () => { void controller.actions.interrupt(true); } },
     ];
     if (key.escape) {
       const rule = escapeRules.find(candidate => candidate.when);
       if (rule !== undefined) { rule.run(); return; }
+    }
+    // The read-only view owns the arrows and paging: it is a document the reader scrolls, so its keys
+    // must not fall through to prompt recall or to the conversation behind it.
+    if (peek !== undefined && !key.ctrl && !key.meta) {
+      if (key.pageUp) { setPeekScroll(value => value + PEEK_PAGE); return; }
+      if (key.pageDown) { setPeekScroll(value => Math.max(0, value - PEEK_PAGE)); return; }
+      if (key.upArrow) { setPeekScroll(value => value + 1); return; }
+      if (key.downArrow) { setPeekScroll(value => Math.max(0, value - 1)); return; }
+    }
+    // Ctrl+O opens the read-only view on the newest source — the work most likely worth watching — so
+    // the view is reachable without a list. Clicking a transcript row opens a specific source.
+    if (key.ctrl && _value === 'o' && state.screen === 'chat' && pending === undefined) {
+      const source = controller.queries.sources[0];
+      if (source !== undefined) controller.actions.openPeek(source.id);
+      return;
     }
     // Ctrl+C is not Esc: it never dismisses a dialog, and when nothing is pending it stops the agent
     // and then exits. The branches below keep that order.
@@ -698,7 +742,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   }
 
   /** Close every panel except the one a result keeps open. */
-  function closePanelsExcept(keep?: PanelName): void {
+  function closePanelsExcept(keep?: SurfaceName): void {
     for (const surface of surfaces) if (surface.name !== keep) surface.close?.();
   }
 
@@ -764,6 +808,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     () => controller.queries.render({ transcript: displayTranscript, width, folds: reasoningOverrides, liveReasoning }),
     [controller, displayTranscript, displayTranscript.version, width, reasoningOverrides, liveReasoning]);
   const { length, first } = layout;
+  // The read-only view lays out its own transcript, so its fold mode never leaks into the
+  // conversation's, and a local source needs no layout at all: it already holds plain lines.
+  const peekLayout = useMemo(() => peek?.transcript === undefined ? undefined
+    : controller.queries.render({ transcript: peek.transcript, width, folds: NO_FOLDS, liveReasoning: 'row' }),
+    [controller, peek?.transcript, peek?.transcript?.version, width]);
+  const peekPlainRows = useMemo((): HistoryRow[] => peek?.lines === undefined ? []
+    : peek.lines.flatMap(line => plainRows(line, width, 'shell')), [peek?.lines, width]);
   // Local `!` blocks live at the end of the transcript: not host records, not persisted, but they
   // scroll with the conversation and are counted into its total so the viewport math stays honest.
   const merged = useMemo(() => mergeShellRuns(layout, state.shell.blocks, width),
@@ -877,10 +928,28 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       setScroll(Math.max(0, current.length - pageSize - row));
     });
   }
-  useMouseWheel(direction => { if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3)); else scrollHistory(direction * 3); }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
+  useMouseWheel(direction => {
+    // The read-only view scrolls itself; the conversation behind it must not move.
+    if (peek !== undefined) { setPeekScroll(value => Math.max(0, value + direction * 3)); return; }
+    if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3));
+    else scrollHistory(direction * 3);
+  }, !copyMode && state.screen === 'chat', () => { if (!dialogOpen) setCopyMode(true); });
   const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
   const end = Math.max(pageSize, totalRows - position - trailingGap);
   const visible = useMemo(() => merged.viewport(Math.max(0, end - pageSize), end), [merged, end, pageSize]);
+  // The read-only view's own window: `peekScroll` counts rows back from the newest, like the
+  // conversation's scroll, so new output keeps arriving at the bottom unless the reader looked away.
+  const peekTotal = peekLayout?.length ?? peekPlainRows.length;
+  const peekMaxScroll = Math.max(0, peekTotal - Math.max(1, peekRows));
+  const peekPosition = Math.min(peekScroll, peekMaxScroll);
+  const peekEnd = Math.max(0, peekTotal - peekPosition);
+  const peekStart = Math.max(0, peekEnd - Math.max(1, peekRows));
+  const peekVisible = peekLayout === undefined ? peekPlainRows.slice(peekStart, peekEnd) : peekLayout.viewport(peekStart, peekEnd);
+  // Clamp the stored offset once the source's length is known, so scrolling back down starts moving
+  // immediately instead of burning the overshoot first.
+  useLayoutEffect(() => {
+    if (peekPosition !== peekScroll) setPeekScroll(peekPosition);
+  }, [peekPosition, peekScroll]);
   const liveThought = thoughtList && !historyWindow ? state.session.record.liveParts(width).find(part => part.kind === 'reasoning') : undefined;
   const thoughtEntries = thoughtList ? displayTranscript.thoughts : undefined;
   const thoughtChoices = useMemo(() => [...(thoughtEntries ?? [])].reverse().map(entry => ({
@@ -968,15 +1037,19 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     {foreground && <Text dimColor>{foreground.label} · Esc / Ctrl+C cancel</Text>}
     <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
     {state.lastFailure && <Text color={theme.colors.error}>{state.lastFailure}</Text>}
-      {state.screen === 'chat' && <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
+      {state.screen === 'chat' && (peek === undefined ? <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
         historyWindow={!!historyWindow} frozen={displayPaused}
-        identity={`${width}:${state.sessionId}:${position}:${pageSize}`} boxRef={conversationBox} />}
+        identity={`${width}:${state.sessionId}:${position}:${pageSize}`} boxRef={conversationBox} />
+        : <PeekPanel source={peek.source} {...(peek.error === undefined ? {} : { error: peek.error })} rows={peekVisible}
+          position={peekPosition} total={peekTotal} width={width} now={Date.now()} boxRef={peekBox} />)}
     </Box>
     <Box flexDirection="column" flexShrink={0}>
       {notice && <Text dimColor>{safeText(notice)}</Text>}
       {composerIntent && <Text color={theme.colors.context}>{composerIntent.hint}</Text>}
       {loop && <LoopStatus progress={loop} />}
-      <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
+      {/* The read-only view is the whole screen: while it is open the composer is gone, and Esc is
+          the one way back. Its own keys never reach the draft, which stays parked untouched. */}
+      {peek === undefined && <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
     {loopForm && loopRecord ? <LoopDialog key={loopForm.name} record={loopRecord}
       enabled={state.online && !controller.queries.foreground !== undefined}
@@ -1068,7 +1141,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           focus={state.online && !copyMode && !answerPending && !loopForm} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
       {loopMenuOpen && <LoopMenu records={loopCandidates} index={loopMenuCursor} />}
-      </Box>
+      </Box>}
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
       {commandHint && <Text dimColor><Text color={theme.accent}>{commandHint.command}{commandHint.usage === undefined ? '' : ` ${commandHint.usage}`}</Text> · {commandHint.description}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
