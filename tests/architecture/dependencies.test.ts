@@ -194,6 +194,10 @@ test('the front end applies effects but starts no business request of its own', 
   // that no invariant covers.
   assert.ok(!source.includes('refreshCosts'), 'the cost refresh must start in the command, not in the UI');
   assert.ok(!/\.answer\s*\(/.test(source), 'completing a question must go through the application pipeline');
+  // Admission is the pipeline's answer, not the front end's: the UI must not read the policy table to
+  // decide whether a line may run while the client is busy (§3.4).
+  assert.ok(!source.includes('isControlCommand') && !source.includes('COMMAND_POLICY'),
+    'the UI must not decide admission from the policy table');
   // A result is applied by iterating its effects, never by branching on the command that produced it.
   assert.ok(source.includes('for (const effect of result.effects)'), 'the root must apply effects in order');
 });
@@ -208,6 +212,10 @@ test('the foreground slot has one owner, so the front end keeps no operation sta
   }
   assert.ok(source.includes('controller.queries.foreground'), 'the UI renders the controller\'s slot');
   assert.ok(source.includes('controller.actions.cancelForeground'), 'the UI cancels through the controller');
+  // D2: one fact for "something is running" and one internal line for the last failure. The old
+  // `state.operation` envelope carried both and let them drift apart.
+  assert.ok(!source.includes('operation.busy') && !source.includes('operation.error'),
+    'the operation envelope is gone; the slot and lastFailure are the facts');
 });
 
 test('Escape is decided by one ordered table, not by a chain of guards', () => {

@@ -18,8 +18,9 @@
 > `CommandResult` + 判别联合 `ViewEffect[]`（两个 UI 触发业务效果的实例已消除）、`duringTurn`/`duringLoop`
 > 按 kind 的 `run`/`deny`（含 headless）、Esc 表驱动、composer 在 busy 期间保持可编辑（13.2-D1）、
 > **`ForegroundOperation` 归 controller（槽位 / AbortSignal / 取消入口合一）**是【现状】。
-> 剩下的【目标】只有两处明确写出的"本期不做"：`during*` 的 `queue` 取值、前台槽位的排队（现在拒绝第二个）。
-> §7.3 的隐私边界（结构化 reason + `sanitizeTraceText()` + `--trace-verbose`）已补齐。
+> 前台槽位排队（A1）、`during*` 的 `queue`（A2）、`dsht trace` 汇总、§7.3 的隐私边界
+> （结构化 reason + `sanitizeTraceText()` + `--trace-verbose`）也都是【现状】；
+> 【目标】另见 §13.1 里仍标 ◐ 的条目（`/loop answer`、`/loop abort` 与 `needs-human` 的 PAUSED 化）。
 
 ---
 
@@ -96,6 +97,8 @@
 /loop <name> [score] [tries] [--from N] [--to N] [--score X] [--tries N]
 /loop                      → {kind:'loops'}（请求记录列表）
 /loop stop                 → {kind:'loopStop'}（控制泳道，结束当前 LoopRun）
+/loop abort                → {kind:'loopStop'}（同一动作的暂停期拼写）
+/loop answer <text>        → {kind:'loopAnswer', text}（回答一个暂停中的 run，见 §8.3）
 ```
 
 `stop` 是 `/loop` 自己的子命令，所以 `RESERVED_PROTOCOL_NAMES`（`loop-prompts-schema.ts`）包含它：
@@ -126,7 +129,7 @@
 | `/queue` | `queue` | ✓ | ✓ | 待发输入列表 |
 | `/plan` `/goal` `/permission` `/feedback` | `hostCommand` | ✓ | ✓ | 原样交给 host 命令注册表 |
 | `/handoff` | `handoff` | ✓ | ✓ | 删本地 HANDOFF.md 后发一轮 |
-| `/loop [name\|stop] [score] [tries]` | `loop` / `loops` / `loopStop` | ✓ | ✓ / — | 无参 → 记录列表；`<name>` → 表单或直接运行；`stop` → 结束当前 LoopRun |
+| `/loop [name\|stop] [score] [tries]` | `loop` / `loops` / `loopStop` / `loopAnswer` | ✓ | ✓ / — | 无参 → 记录列表；`<name>` → 表单或直接运行；`stop`/`abort` → 结束当前 LoopRun；`answer <text>` → 回答暂停中的 run |
 | `/export [local.zip]` | `export` | ✓ | | 保存会话 ZIP |
 | `/export-html [local.html]` | `exportHtml` | ✓ | | 保存离线 HTML |
 | `/coredump [tag]` | `coredump` | | | 本机写 V8 堆快照 |
@@ -226,6 +229,7 @@ headless 也有这些事实（`runStartup` 先选/建会话，所以 `requiresSe
 |---|---|---|---|
 | `requiresSession` | `chatOnly` | 命令作用于"当前选中的会话" | `Select a session first` |
 | `requiresNoInteraction` | `blockedByPending` | 选中会话没有未处理 interaction | `Answer the pending question or approval first` |
+| `whileBusy: 'run'\|'queue'\|'deny'` | —— | 前台槽位被别的 operation 占用时可否执行 | `Wait for the running operation to finish` |
 | `duringTurn: 'run'\|'deny'` | —— | turn 运行期间可否执行 | 拒绝 |
 | `duringLoop: 'run'\|'deny'` | —— | loop 运行期间可否执行 | 拒绝 |
 
@@ -245,23 +249,46 @@ headless 也有这些事实（`runStartup` 先选/建会话，所以 `requiresSe
 host 自己的命令都不需要为"我在运行"单独开一条：
 
 ```ts
-const CONFLICTS_WITH_RUNNING = { duringTurn: 'deny', duringLoop: 'deny' };  // compact / handoff / loop / loops
-const ANSWERS_WHILE_RUNNING  = { duringTurn: 'run',  duringLoop: 'run'  };  // panel / copy / think / cancel / approval / loopStop
+const QUEUES_WHILE_RUNNING   = { duringTurn: 'queue', duringLoop: 'queue' };  // compact / handoff / loop
+const CONFLICTS_WITH_RUNNING = { duringTurn: 'deny',  duringLoop: 'deny'  };  // loops（裸 /loop 的记录列表）
+const ANSWERS_WHILE_RUNNING  = { duringTurn: 'run',   duringLoop: 'run'   };  // panel / copy / think / cancel / approval / loopStop / loopAnswer
+const ANSWERS_WHILE_BUSY     = { whileBusy: 'run' };                          // cancel / approval / loopStop
 ```
 
-* **deny 的只有四个 kind**：`compact`、`handoff`、`loop`、`loops`——它们都会向同一会话提交自己的写入，
-  与正在跑的 turn 争同一个写者；
+* **`queue` 的是操作者自己的写入**：`compact`、`handoff`、`loop`（启动一次评审）。它们与正在跑的 turn
+  写同一个会话，但"下一件事做这个"是操作者明确按下 Enter 表达的意图，直接拒绝等于让这句话无法表达；
+  所以它们被**接受并持有**，等 turn（或 loop）结束后运行；
+* **仍然 deny 的是"此刻提供也没有意义"的**：裸 `/loop` 的记录列表是给正在敲的草稿用的面，
+  turn 结束时操作者早已不在那个上下文里；
 * **`hostCommand`（`/plan`、`/goal`、`/permission`、`/feedback`）不 deny**：host 自己拥有这些命令的
   busy 规则，客户端替它拒绝只会与 host 的实际行为矛盾（这条是被现有测试逼出来的）；
 * **`models`（`/model`）也不 deny**：它改的是后续请求的默认值，面板在 turn 期间照样能开；
 * **`cancel`/`approval` 明确 `run`**：取消与解决 interaction 恰恰是 turn 期间最需要能用的两条；
-* 判定顺序是 `requiresSession` → `requiresNoInteraction` → `during`：等待中的互动是更可操作的理由，
-  而且它通常就意味着 turn 也在跑；
+* 判定顺序是 `requiresSession` → `requiresNoInteraction` → `during` → `whileBusy`：等待中的互动是更可操作的理由，
+  而且它通常就意味着 turn 也在跑；turn/loop 的红线比"前台槽位被占"更长期、也更能说明要停什么；
+* **前台槽位的默认是 deny**（D1：长操作期间 Enter 拒绝提交并保留 draft），只有声明 `whileBusy: 'run'` 的
+  命令放行：`cancel`、`approval`、`loopStop`——它们的存在意义就是打断或了结占用槽位的那件事。
+  `control: true`（只有 `loopStop`）说的是**另一件事**：它在 §6.3 的会话写 gate 里属于控制泳道、可抢等待队列；
+  `/loop answer` 也一样放行——一个暂停中的 run 正在等这条命令，把它排到 turn 后面等于永远答不上；
+  两个字段都在，因为"前台槽位"和"会话写次序"本来就是两个事实；
 * 拒绝文案按事实区分：turn → `Wait for the running turn to finish`；loop → `Stop the running loop first`
   （停 loop 才是操作者要先做的事）。
 
 **前端怎么给出这个事实**：`loop.active ? 'loop' : queries.running ? 'turn' : 'idle'`——只有 **`active`** 参与判断，
 所以一个已经终止、只是残留进度行的 loop 不会 deny 任何东西（§13.3-Q3）。
+
+**`queue` 由谁履行**【现状】：`authorize` 返回 `{allow:true, command, defer:'turn'|'loop'|'busy'}`，
+`defer` 就是"要等哪个事实"。TUI 把这一行放进一个**前端持有的 FIFO**（`ui/app.tsx` 的 `queuedLines`），
+条件满足时按到达顺序重新授权并运行——端口与效果都属于前端，所以队列也只能由前端履行；
+运行前会再授权一次，若事实又变了就放回队首继续等，会话已经切换的行会被丢弃并说明原因。
+脚本前端（`cli/startup.ts`）没有输入框可持有，于是**等待同一个事实**（上限 `STEP_TIMEOUT_MS`）后运行，
+因为"只要客户端在跑 turn，`--command` 就失败"会让自动化在它最需要的时候不可用。
+`command` 事件在入队时写一条 `phase:'queued'`（带 `reason`），真正执行时照旧写 `begin`/`end`，
+所以"这一行被接受但还没跑"在 trace 里是可见的；`dsht trace` 不把 `queued` 计入执行次数。
+
+**优先级**：`during` 的 `deny` > `during` 的 `queue` > `whileBusy` 的 `deny` > `whileBusy` 的 `queue`。
+即：会被拒的事实先拒；只要有一个事实是"排队"就排队（反正要等，此刻槽位忙不忙不改变结论）；
+只有都不排队时才轮到前台槽位说话。
 
 `/loop stop`（`loopStop`）是例外中的例外：它是**控制泳道**（§6.3.2），并且显式 `during*: 'run'`——
 "停止正在跑的东西"没有可以被判 deny 的理由，判 deny 只会在最需要它的时候让它不可用。
@@ -396,6 +423,8 @@ interface CommandResult {
 | `handoff` | 删本地 HANDOFF.md 后发一轮 | `[closePanels, live, scroll:0, notice]` |
 | `loops` | 无（纯交互命令） | `retain+rejected`：`[closePanels, error]`（列出可用记录） |
 | `loop` | 查记录、校验变量、解析 limits、启动 | `[closePanels, loop:{name}]` / `[closePanels, live, scroll:0, notice]` / `retain+rejected: [closePanels, error]`；`not-started` 只给 `[error]`，表单留在屏上 |
+| `loopStop` | 结束运行中的 run（`stop`/`abort` 同一分支） | `[closePanels, live, scroll:0, notice]`；没有 run 时只给 `notice` |
+| `loopAnswer` | 回答暂停中的 run，重新判断当前产出物 | `[closePanels, live, scroll:0, notice]`；不是暂停中的 verdict 请求 → `retain+rejected: [error]`（并说明该答什么） |
 
 ### 4.4 返回约定与 `ViewEffect`【现状】
 
@@ -607,7 +636,10 @@ interface ForegroundOperation extends ForegroundSnapshot { readonly abort: Abort
   `historyAbort`/`historyLoading` 这类影子状态（架构守卫禁止它们再出现），Esc 的第 3 条规则
   就是"取消当前 operation"（§5.4）。
 * **两种认领方式，一个事实**：`actions` 的每个入口自带 `kind`/`label` 并在内部认领；前端自己编排的工作
-  （历史分页、跳转）走 `actions.foreground(kind, label, work)`。**嵌套不重复认领**：用
+  （历史分页、跳转）走 `actions.foreground(kind, label, work, wait)`。
+  **`wait: true` 是 A1 的排队**：槽位被占时按到达顺序等待（`foreground phase:'queued'` 记录它等过），
+  释放时把槽位**直接交给队首**（`foregroundGranted` 防止新来的插队），客户端停止时唤醒所有等待者并放弃。
+  默认 `wait` 为假＝拒绝，因为操作者主动提交的那一行由 `authorize` 决定（D1：默认拒绝并保留草稿）。**嵌套不重复认领**：用
   `AsyncLocalStorage` 记录"当前 continuation 属于哪个 operation"，所以分页循环里调 `older`、
   `/cost` 的 effect 里调 `refreshCosts` 都不会因为"client busy"被自己拒掉——普通布尔标志做不到这一点。
 * **UI 里唯一剩下的 `AbortController`** 是 `@` 引用查找：它逐键触发、随组件卸载取消，是查询而不是一次
@@ -714,14 +746,14 @@ Gate 要消除的是"两个并发决定基于同一份陈旧状态"，而不是"
 
 | event | phase（典型） | 谁写 | 记录什么 |
 |---|---|---|---|
-| `command` | `begin`/`end` | `runCommand` | 每条被执行的命令：同一 `commandId` 的 `begin`（副作用之前）与 `end`（副作用之后：`kind`、`accepted`、`outcome`、失败时的 `error`） |
+| `command` | `queued`/`begin`/`end` | 前端（`queued`）+ `runCommand` | `queued`：被策略持有的一行（`kind`、`reason`）；`begin`/`end`：真正执行的一行，同一 `commandId`，`end` 带 `kind`、`outcome`、`disposition`、失败时的 `error` |
 | `mutation` | `admit` | `SessionMutationGate`（`SessionController` 注入的观察者） | 每次会话写准入：`session`、`lane`（`normal`/`control`）、`waited`；**行的先后就是 dispatch 先后** |
 | `foreground` | `begin`/`end` | `Controller` | 前台槽位的一次认领：`id`、`kind`；end 带 `cancelled` |
 | `action` | — | `Controller` | `showPicker`/`pickWorkspace`/`switchWorkspace`/`switchSession`/`selectSession`/`createWorkspace`/`createSession`/`enterPath`/`removeTarget`/`showChat` |
 | `generation` | `begin`/`ready`/`settled`/`ended` | controller | 一次连接代际的生命周期 |
 | `picker` / `adopt` / `resolve` | — | controller | 选择器请求 / 采用本地目录 / 代际结束时的会话决定（含 loop 重挂） |
 | `state` | — | controller | 具体状态字段变化（`online`/`screen`/`session`/`workspace`…） |
-| `loop` | `command`/`form`/`rejected`/`not-started`/`begin`/`verify-first`/`sent`/`refused`/`failed` | commands + controller | `/loop` 的决策与启动 |
+| `loop` | `command`/`form`/`rejected`/`not-started`/`begin`/`verify-first`/`sent`/`answered`/`end` | commands + controller | `/loop` 的决策、启动与回答；`answered` 只记 `judged` 与 `chars`，**绝不记答案正文** |
 | `loop-ui` | `choose`/`open`/`start` | app | 菜单选了哪条记录、表单是否打开、Start 提交的值 |
 | `verify` | `begin`/`verified`/`retry`/`unavailable`/`fallback`/`needs-human`/`cancelled`/`stale`/`abandoned` | controller | 每次 fork 验证的生命周期 |
 | `artifact` | `missing` | controller | 验证给分但产出物缺本轮小节（硬判不通过） |
@@ -795,6 +827,14 @@ verify  verified    runId=…, score=…   |  verify unavailable runId=…, reas
 * "循环没启动"看 `loop` 的 `refused`/`failed`/`not-started`；"循环为何结束"看 `loop end` 的 `reason`（= `terminalReason`）；
 * "验证没有结论"看 `verify` 的 `unavailable`（结构化字段 + 可选正文）。
 
+**`dsht trace`：把同一份文件读回几行事实。** trace 是给机器的 JSONL，而人读它只问固定几个问题，
+所以把它们写进了 `src/cli/trace-summary.ts`（纯函数，可单测）并由 `dsht trace [--trace <path>] [--json]` 打印：
+命令按 outcome/kind 计数、会话写入按 lane/session、前台槽位的次数/取消数/最长一次、
+每个 loop run 的 `sent` 次数与结局（含 `terminalReason`）、验证的 `begin` 与各类收尾（含 `stderrClass`），
+以及所有 begin/end 不配对的 span（含"end without begin"——那说明窗口淘汰或写入端出了问题）。
+它需要 host、凭据、终端都为零，因为读自己的日志本来就不该需要这些；老格式（没有 `runId`、没有
+`command begin/end`）也能读，只是把同一段历史归到一个无 identity 的 run 上（显示为 `<no-run-id>`）。
+
 ---
 
 ## 8. 生命周期模型
@@ -835,8 +875,8 @@ App / runtime
 | 分类 | 取值 | 含义 |
 |---|---|---|
 | ACTIVE | `running` | 还会发送/结算 |
-| TERMINAL | `passed` `exhausted` `stalled` `blocked` `unavailable` `cancelled` `needs-human` `deadline` | 已经结束，不会再有迁移 |
-| PAUSED | （暂无） | 等 `/loop answer` 落地后，`needs-human` 才迁到这里 |
+| PAUSED | `needs-human` **且没有 `terminalReason`** | 判断要一个人：run 仍持有会话（不可被静默替换），`/loop answer` 继续、`/loop abort` 结束；不消耗任何预算 |
+| TERMINAL | `passed` `exhausted` `stalled` `blocked` `unavailable` `cancelled` `needs-human`（有 `terminalReason`）`deadline` | 已经结束，不会再有迁移 |
 
 **为什么必须显式**：只说"phase = 结局"是不准确的（`running` 不是结局），而 `needs-human` 是否终态
 决定了"回答后能否继续"这一整条路径；模糊会让状态机出现无法判定的分支。
@@ -846,8 +886,11 @@ App / runtime
 终态进度行会继续显示（D3），所以 `state` 里"有一份 loop 进度"并不等于"loop 在跑"。必须只用一个谓词：
 
 ```ts
-loop.active === (loop.phase === 'running')
+loop.active === (loop.phase === 'running' || (loop.phase === 'needs-human' && loop.terminalReason === undefined))
 ```
+
+即 `active` = "这一轮 run 还没结束"。暂停算未结束：它还在等操作者，**不能被静默替换**（新的 `/loop` 必须显式
+先结束它）；但它也不在"工作"，所以 `progress.activity` 缺失，界面据此显示 `⏸ needs you` 而不是时钟。
 
 `active` 是所有**并发与授权判断**的唯一入口：
 
@@ -892,7 +935,9 @@ LoopRun { id, parentSessionId, verifierSessionId?, step, attempt, phase, activit
 |---|---|---|
 | `/cancel` | `cancelTurn()` 第一行就是 `stopLoop()` → **loop 一起停** | 保持；语义 = 取消当前 turn（若在 loop 中，同时终止 loop） |
 | Esc / Ctrl+C | `interrupt()` 同样先 `stopLoop()` | 保持；Esc 是上下文相关的"取消当前最紧急的东西" |
-| `/loop stop` | 已实现：`parseCommand` 认 `stop` 为子命令（`loopStop`），`execute` 调 `stopLoop()`；`stop` 已进 `RESERVED_PROTOCOL_NAMES` | 保持；无运行时给 `No loop is running` 而不是报错，终态进度行保留（D3） |
+| `/loop stop` / `/loop abort` | 已实现：`parseCommand` 认 `stop`/`abort`（同一 `loopStop`），`execute` 调 `stopLoop()`；两者都在 `RESERVED_PROTOCOL_NAMES` | 保持；无运行时给 `No loop is running` 而不是报错，终态进度行保留（D3）；暂停中的 run 用 `abort` 拼写更自然 |
+| 判断者弃权 | 已实现：`ScoredLoop.settle()` 收到 `abstained` → `pause()`（phase `needs-human`、**不写** `terminalReason`） | `/loop answer <text>` 只补充判断条件、用**新的 verificationId** 重新判断当前产出物（不进入工作阶段、不结算任何计数）；`/loop abort` 结束它 |
+| 验证进程/host 要人 | 保持终态：`human(request, 'verifier-needs-human')`——验证子进程自己的会话提问，本客户端无法代答 | 保持终态；操作者处理完外部阻塞后重跑（§4.2 二期语义不变） |
 
 **结论**："用户取消 turn 后 loop 立刻 retry"在现状**不成立**（`/cancel`、Esc、Ctrl+C 都先停 loop）。
 但"终止原因进入状态机"仍然缺，真实实例有两个：
@@ -957,8 +1002,9 @@ type LoopTerminalReason =
 
 1. **语法**：`slash/parse.ts` 加 `Command` 变体与分支；
 2. **广告**：`registry.ts` 的 `COMMAND_HINTS` 加一行；
-3. **授权**：需要会话 → `requiresSession`；需要无待答 → `requiresNoInteraction`；需要 turn/loop 期间特殊处理 →
-   `duringTurn`/`duringLoop`（缺省即 `run`）；**不需要**声明执行位——走 `controller.actions.*` 自动占 foreground，
+3. **授权**：需要会话 → `requiresSession`；需要无待答 → `requiresNoInteraction`；需要在 turn/loop 或前台槽位被占时
+   特殊处理 → `duringTurn`/`duringLoop`/`whileBusy`（缺省即 `run`／前台缺省是 `deny`）；**不需要**声明执行位——走
+   `controller.actions.*` 自动占 foreground，
    纯 UI 命令自动成为可被 `closePanels` 替换的面；
 4. **效果**：`commands.ts` 的 `execute` 加 `case` 返回结果；需要等人操作时用 `port.interactive`；
 5. **展示**：只有需要**新表现动词**时才动 `ViewEffect` 与 `surfaces`；
@@ -979,12 +1025,21 @@ type LoopTerminalReason =
 | 归一化九条顺序、授权谓词、前缀/exactOnly | `tests/ui/commands.test.ts` | "一行含义唯一"是下游全部推理的前提 |
 | 每条命令的 kind → effects（数组顺序即契约） | `tests/controller/commands.test.ts` | 应用策略 |
 | `duringTurn`/`duringLoop` 只拒会写同一会话的命令；pending 的理由优先 | `tests/ui/commands.test.ts` | §3.4 |
+| 前台槽位被占时由 `authorize` 拒绝并给理由，只有 `whileBusy: 'run'` 的命令放行 | `tests/ui/commands.test.ts`、`tests/ui/app.test.tsx` | §3.4/D1 |
+| turn/loop 期间 `queue` 的命令被接受并持有；`defer` 的事实与优先级 | `tests/ui/commands.test.ts` | §3.4/A2 |
+| 前端队列按到达顺序在事实清零后运行；脚本前端等待同一事实 | `tests/ui/app.test.tsx`、`tests/cli/startup.test.ts` | §3.4/A2 |
+| 前台槽位 FIFO：`wait` 的认领按到达顺序被服务，新来的不插队 | `tests/controller/foreground.test.ts` | §6.2/A1 |
+| `queued` 不计入 `dsht trace` 的执行次数 | `tests/cli/trace-summary.test.ts` | §7 |
+| 弃权 → 暂停（active、无 terminalReason、不消耗 attempt）；`/loop answer` 以新 identity 重判；`/loop abort` 结束 | `tests/controller/loop.test.ts`、`tests/controller/loop-verify.test.ts`、`tests/ui/app.test.tsx` | §8.3/D4 |
+| `stop`/`abort`/`answer` 的语法、保留名与策略 | `tests/ui/commands.test.ts` | §2.4/§3.4 |
+| 前端不得读 policy 表自行判断准入 | `tests/architecture/dependencies.test.ts` | I10/§3.4 |
 | headless 也走 normalize → authorize（忙时拒绝而不是交给 host） | `tests/cli/startup.test.ts` | §3.4/§5.1 |
 | Esc 由一张有序表决定，别处不得出现 `key.escape &&` | `tests/architecture/dependencies.test.ts` | §5.4 |
 | D1：busy 期间草稿可写、Enter 被拒、结束不自动发送、也不清别人写的草稿 | `tests/ui/app.test.tsx` | §13.2-D1 |
 | loop 的下一次发送在前台占位时被持有而不是让运行失败 | `tests/controller/loop-run.test.ts` | §7.1/P4 |
 | 前台槽位：一次一个、发布 id/kind/label、取消只 abort 持有者、嵌套动作不被自己拒绝、begin/end 入 trace | `tests/controller/foreground.test.ts` | §6.2 |
 | 前端不留 operation 影子状态（`historyAbort`/`historyLoading`），渲染 `queries.foreground`、取消走 `cancelForeground` | `tests/architecture/dependencies.test.ts` | §6.2 |
+| 运行态只有一个事实：`state.operation` 不再存在，失败是 `state.lastFailure`，运行是 `queries.foreground` | `tests/architecture/dependencies.test.ts` | D2 |
 | 表单 Start 重新授权：表单打开期间开跑的 turn 会让 Start 被拒且表单留在屏上 | `tests/ui/app.test.tsx` | §3.4 |
 | 验证失败原因只有结构化字段；类别判定；`--trace-verbose` 下的脱敏 | `tests/cli/verifier.test.ts`、`tests/session/sanitize.test.ts` | §7.3 |
 | `CommandResult` 的两个维度：拒绝保留草稿、成功清空草稿 | `tests/ui/app.test.tsx`（`retain`/`consume` 用例） | §4.2 |
@@ -1038,7 +1093,7 @@ type LoopTerminalReason =
 | **P1** ✅ | `command begin/end` + 关联 ID（含 `LoopProgress.runId`）；trace 压缩成对淘汰；`/loop stop` + 保留名 | 已实现；`loopStop` 带 `control: true`，`ui/app.tsx` 照此让它在运行期间也能提交；配合 D1（P4）后，启动那一刻的 busy 信封期间也能把这一行打进去 |
 | **P2** ✅ | **`SessionMutationGate(sessionId)`**：显式化 host 单 turn 语义 + client 写串行；关闭 `promptInternal` 与 foreground 写的重叠 | 已实现（`src/session/mutation-gate.ts`）：**admission/dispatch serializer，不是 long-running mutex**；`cancel`/`interrupt`/`cancelNamedSession` 走控制泳道，可抢占普通等待队列；每个写入口都被 `mutation` 事件记录（§6.3.1/§6.3.2）。**仍未做**：`runAction` 的 busy 信封仍是"拒绝第二个"而不是排队（P4 未完成部分） |
 | **P3** ✅ | `CommandResult` + 判别联合 `ViewEffect`（数组即顺序）；消除两个 UI 触发效果（`answer`、`/cost` 的 `refreshCosts`）；按 13.2-D2 收敛错误通道 | 已实现：`CommandIntent` 删除；提问瀑布搬进 `Controller.answerQuestion`（键路径与命令行共用）；`/cost` 的刷新由 `execute` 经 `port.run` 起；`runCommand` 在本行已报告失败后清掉 action 信封里的同一次失败。**仍未做**：`state.operation.error` 仍是连接/动作信封的字段（未进一步删除或改名） |
-| **P4** ✅ | `ForegroundOperation` 归 controller（含 AbortSignal）；`duringTurn`/`duringLoop` 按 kind（一期 `run/deny`）；Esc 表驱动；LoopRun 显式对象与 loop 发送排队；composer 聚焦策略（13.2-D1） | 已实现（§6.2/§3.4/§5.4/§13.2-D1）：槽位 + abort + `id/kind/label` 归 controller，`queries.foreground` 与 `actions.cancelForeground()` 是唯一读/取消入口；UI 的 `historyAbort`/`historyLoading` 已删除并由架构守卫禁止回归；嵌套认领用 `AsyncLocalStorage` 精确判定；loop 发送排队由用例固定；表单 Start 与命令行走同一套 `authorize`。**本期不做（已在正文写明）**：前台槽位的排队（现在是拒绝第二个）、`during*` 的 `queue` 取值 |
+| **P4** ✅ | `ForegroundOperation` 归 controller（含 AbortSignal）；`duringTurn`/`duringLoop` 按 kind（一期 `run/deny`）；Esc 表驱动；LoopRun 显式对象与 loop 发送排队；composer 聚焦策略（13.2-D1） | 已实现（§6.2/§3.4/§5.4/§13.2-D1）：槽位 + abort + `id/kind/label` 归 controller，`queries.foreground` 与 `actions.cancelForeground()` 是唯一读/取消入口；UI 的 `historyAbort`/`historyLoading` 已删除并由架构守卫禁止回归；嵌套认领用 `AsyncLocalStorage` 精确判定；loop 发送排队由用例固定；表单 Start 与命令行走同一套 `authorize`。A1（前台槽位排队）、A2（`during*` 的 `queue`）、A3（`state.lastFailure`）、A5（`/loop answer`、`/loop abort`、PAUSED）均已完成；D15（`dsht trace`）另见 §7.4 |
 
 **每期先写不变量测试，再改实现**——否则"目标态"只会成为下一次事故的来源。
 
@@ -1046,10 +1101,11 @@ type LoopTerminalReason =
 
 | # | 决策 | 结论 | 理由 |
 |---|---|---|---|
-| D1 | foreground 期间 composer | **保持可编辑；Enter 拒绝提交并保留 draft；完成时绝不自动发送** | 核心场景是远程 SSH/手机控制：长 operation 期间用户完全可以把下一句先写好；失焦会明显变差。自动发送则等于替用户提交，违背其只编辑的意图。**已实现**：composer 的 `focus` 不再看 `busy`；被拒的行保留草稿（控制命令除外，见 P1）；一条命令结束时**只清掉它提交的那一行**——如果操作期间用户已经改了草稿，那是他的内容，不是这条结果的 |
-| D2 | 错误/提示 owner | **业务失败事实归 `CommandResult.outcome` + trace；UI 只拥有展示生命周期**；`state.operation.error` 最终删除或降级为内部 `lastFailure` | 否则会出现三套"用户可见错误事实"，必然互相矛盾。**进度**：前两条已实现（结果 + trace 同源，且命令自行报告失败后不再在信封里留一份）；降级为内部 lastFailure 已按此语义使用，字段名与连接错误路径未动 |
+| D1 | foreground 期间 composer | **保持可编辑；Enter 拒绝提交并保留 draft；完成时绝不自动发送** | 核心场景是远程 SSH/手机控制：长 operation 期间用户完全可以把下一句先写好；失焦会明显变差。自动发送则等于替用户提交，违背其只编辑的意图。**已实现**：composer 的 `focus` 不再看 `busy`；被拒的行保留草稿（`whileBusy: 'run'` 的命令除外，见 §3.4）；一条命令结束时**只清掉它提交的那一行**——如果操作期间用户已经改了草稿，那是他的内容，不是这条结果的。
+**【补充·不是例外】**：D1 禁止的是"把**被拒的草稿**在操作结束后自动发出去"。操作者按下 Enter、策略因 turn/loop 而 `queue` 的那一行不是草稿：它已经提交，前端在入队时就用掉了草稿，等到事实清零再执行——这是执行操作者的 Enter，而不是替他提交一段文本。 |
+| D2 | 错误/提示 owner | **业务失败事实归 `CommandResult.outcome` + trace；UI 只拥有展示生命周期**；`state.operation.error` 最终删除或降级为内部 `lastFailure` | 否则会出现三套"用户可见错误事实"，必然互相矛盾。**已完成**：结果 + trace 同源；命令自行报告失败后不再留第二份（`clearFailure()`）；`state.operation` 这个信封整体删除——失败只剩 `state.lastFailure` 一条内部记录（连接、会话流、动作信封写它），"是否有操作在跑"不再有第二个布尔，唯一事实是 `queries.foreground`（`ControllerStore.busy()` 供领域层读取） |
 | D3 | `/loop stop` 后显示 | **保留 terminal progress，直到下一次 loop 或显式清除** | 终态是最需要被看到的结果；配合 §8.3.1，只有 `active` 参与并发判断，终态残留不会污染授权 |
-| D4 | `needs-human` | **当前保持 TERMINAL**；真正实现 `/loop answer` 时再升级为 PAUSED | 现状无 answer 通道，标成 PAUSED 会暗示一个不存在的恢复路径 |
+| D4 | `needs-human` | **已升级为 PAUSED**（`/loop answer` 落地后）：判断者弃权 = 暂停 + 可回答；验证进程/host 要人仍按终态（`terminalReason` 存在） | 暂停态必须真的能恢复，否则标成 PAUSED 只是暗示一个不存在的路径 |
 
 ### 13.3 实现后必须能回答的问题（验收口径）
 

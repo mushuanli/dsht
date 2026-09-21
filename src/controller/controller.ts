@@ -88,7 +88,7 @@ export interface Actions {
    * the work and renders `queries.foreground`. Returns undefined when the client is busy with another
    * operation or when this one was cancelled.
    */
-  foreground<T>(kind: ForegroundKind, label: string, work: (signal: AbortSignal) => Promise<T>): Promise<T | undefined>;
+  foreground<T>(kind: ForegroundKind, label: string, work: (signal: AbortSignal) => Promise<T>, wait?: boolean): Promise<T | undefined>;
   /** Cancel the operation that owns the slot; false when none is running. */
   cancelForeground(): boolean;
   switchWorkspace(workspaceId?: string): Promise<boolean>;
@@ -113,6 +113,8 @@ export interface Actions {
   startLoop(protocol: LoopProtocol, limits: LoopLimits): Promise<boolean>;
   /** Stop a running loop; the terminal progress stays visible for the reader. */
   stopLoop(): void;
+  /** Answer a paused run: re-judge the current artifact with what the operator supplied. */
+  answerLoop(text: string): Promise<boolean>;
   cancelTurn(): Promise<boolean>;
   answer(value: AnswerValue): Promise<boolean>;
   /** Answer the current sub-question of the pending set, advancing the waterfall or sending it. */
@@ -136,8 +138,8 @@ export interface Actions {
   refreshCosts(signal?: AbortSignal): Promise<boolean>;
   /** Local, immediate setters: no request, so they keep the synchronous contract. */
   loadPresetNames(): void;
-  /** Drop the action envelope's last failure, once the fact has been reported elsewhere. */
-  clearOperationError(): void;
+  /** Drop the internal last failure, once the fact has been reported elsewhere. */
+  clearFailure(): void;
   enterPath(): void;
   pickWorkspace(workspaceId?: string): void;
   /** Leave a picker and return to the selected conversation; false when none is selected. */
@@ -293,6 +295,8 @@ export class Controller implements ControllerStore, ConnectionListener {
   private readonly deadlineMs?: number;
   /** Consecutive verifier outages in this attempt, so a broken verifier is retried then reported. */
   private loopVerifierMisses = 0;
+  /** What the operator answered when a verifier abstained; consumed by the next judgment. */
+  private loopAnswer?: string;
   /** Whether a reply block may stand in for a missing verdict; off unless asked for. */
   private readonly allowSelfFallback: boolean;
   /** Client-side directory verdict files are written under. */
@@ -324,6 +328,12 @@ export class Controller implements ControllerStore, ConnectionListener {
   private commandSeq = 0;
   /** The operation that owns the client right now, when one does; the single foreground slot. */
   private foreground?: ForegroundOperation;
+  /** Callers waiting for the slot, oldest first; woken one at a time so nobody barges in. */
+  private readonly foregroundWaiters: (() => void)[] = [];
+  /** True while a waiter has been promised the slot but has not taken it yet. */
+  private foregroundGranted = false;
+  /** Set when the client stops, so a waiter never starts work on a closed connection. */
+  private foregroundClosed = false;
   private foregroundSeq = 0;
   /** Which operation the current async continuation belongs to, so a nested call never re-claims. */
   private readonly foregroundOwner = new AsyncLocalStorage<number>();
@@ -395,6 +405,11 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Publish a state patch, re-deriving the visible pending interactions.
    * @param patch - Fields to replace on the current state.
    */
+  /** Whether an operation owns the client's foreground slot right now.
+   * @returns True while an operation is running.
+   */
+  busy(): boolean { return this.foreground !== undefined; }
+
   update(patch: Partial<State>): void {
     const previous = this.state;
     const next = { ...this.state, ...patch, version: this.state.version + 1 };
@@ -469,7 +484,7 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private buildActions(): Actions {
     return {
-      foreground: (kind, label, work) => this.claimForeground(kind, label, work),
+      foreground: (kind, label, work, wait) => this.claimForeground(kind, label, work, wait),
       cancelForeground: () => this.cancelForeground(),
       switchWorkspace: id => this.runAction('navigation', 'Switching workspace…', () => this.switchWorkspace(id)),
       switchSession: query => this.runAction('navigation', 'Switching session…', () => this.switchSession(query)),
@@ -488,6 +503,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       handoff: () => this.runAction('handoff', 'Requesting handoff…', () => this.handoff()),
       startLoop: (protocol, limits) => this.runAction('loop', 'Starting loop…', () => this.startLoop(protocol, limits)),
       stopLoop: () => this.stopLoop(),
+      answerLoop: text => this.runAction('loop', 'Answering the verifier…', () => this.answerLoop(text)),
       cancelTurn: () => this.runAction('interaction', 'Cancelling…', () => this.cancelTurn()),
       answer: value => this.runAction('interaction', 'Answering…', () => this.answer(value)),
       answerQuestion: input => this.runAction('interaction', 'Answering…', async () => {
@@ -500,15 +516,15 @@ export class Controller implements ControllerStore, ConnectionListener {
       historyThrough: (target, signal) => this.runAction('history', 'Loading history…', () => this.historyThrough(target, signal)),
       removeQueued: itemId => this.runAction('command', 'Removing queued input…', () => this.removeQueued(itemId)),
       savePrompt: text => this.runAction('local', 'Saving prompt…', async () => {
-        await this.promptStore.save(text); this.update({ operation: { ...this.state.operation, error: '' } });
+        await this.promptStore.save(text); this.update({ lastFailure: '' });
       }),
       updatePrompt: (id, text) => this.runAction('local', 'Saving prompt…', async () => {
         if (!await this.promptStore.update(id, text)) throw new Error('That saved prompt no longer exists');
-        this.update({ operation: { ...this.state.operation, error: '' } });
+        this.update({ lastFailure: '' });
       }),
       deletePrompt: id => this.runAction('local', 'Deleting prompt…', async () => {
         if (!await this.promptStore.remove(id)) throw new Error('That saved prompt no longer exists');
-        this.update({ operation: { ...this.state.operation, error: '' } });
+        this.update({ lastFailure: '' });
       }),
       command: (line, signal) => this.runActionValue('command', 'Running command…', () => this.command(line, signal)),
       exportLog: (path, signal) => this.runActionValue('export', 'Exporting session log…', () => this.exportLog(path, signal)),
@@ -517,7 +533,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       modelCatalog: () => this.runActionValue('model', 'Loading models…', () => this.modelCatalog()),
       refreshCosts: signal => this.runAction('cost', 'Refreshing costs…', () => this.refreshCosts(signal)),
       loadPresetNames: () => this.loadPresetNames(),
-      clearOperationError: () => this.clearOperationError(),
+      clearFailure: () => this.clearFailure(),
       enterPath: () => this.enterPath(),
       pickWorkspace: id => this.pickWorkspace(id),
       showChat: () => this.showChat(),
@@ -578,6 +594,9 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** Cancel retries and HTTP, close the socket, and release session and catalog work. */
   async stop(): Promise<void> {
+    // Nobody waits forever for a slot that will never be handed out again.
+    this.foregroundClosed = true;
+    for (const wake of this.foregroundWaiters.splice(0)) wake();
     await this.shell.stop();
     await this.connection.stop();
     await this.session.settle();
@@ -608,20 +627,20 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private async runAction(kind: ForegroundKind, label: string, operation: () => Promise<void>): Promise<boolean> {
     if (!this.state.online) return false;
-    if (!this.ownsForeground() && this.state.operation.busy) return false;
+    if (!this.ownsForeground() && this.foreground !== undefined) return false;
     return await this.claimForeground(kind, label, async () => {
       try { await operation(); return true; }
-      catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return false; }
+      catch (error) { this.update({ lastFailure: errorText(error) }); return false; }
     }) === true;
   }
 
   /** Same slot, for an operation that produces a value the caller needs. */
   private async runActionValue<T>(kind: ForegroundKind, label: string, operation: () => Promise<T>): Promise<T | undefined> {
     if (!this.state.online) return undefined;
-    if (!this.ownsForeground() && this.state.operation.busy) return undefined;
+    if (!this.ownsForeground() && this.foreground !== undefined) return undefined;
     return await this.claimForeground(kind, label, async () => {
       try { return await operation(); }
-      catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return undefined; }
+      catch (error) { this.update({ lastFailure: errorText(error) }); return undefined; }
     });
   }
 
@@ -646,14 +665,23 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param work - The work, handed the signal that `cancelForeground` aborts.
    * @returns What the work returned, or undefined when the slot was taken or the work was cancelled.
    */
-  private async claimForeground<T>(kind: ForegroundKind, label: string, work: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> {
+  private async claimForeground<T>(kind: ForegroundKind, label: string, work: (signal: AbortSignal) => Promise<T>, wait = false): Promise<T | undefined> {
     const owner = this.foreground;
     // Nested: the operation that owns the slot supplies the signal and keeps the identity.
     if (owner !== undefined && this.ownsForeground()) return await work(owner.abort.signal);
-    if (owner !== undefined) return undefined;
+    if (owner !== undefined || this.foregroundGranted) {
+      // A caller that does not want to wait is told no; one that does waits its turn in arrival order.
+      if (!wait) return undefined;
+      this.traceEvent('foreground', { phase: 'queued', kind, label });
+      await new Promise<void>(resolve => this.foregroundWaiters.push(resolve));
+      // The release handed this caller the slot; clearing the flag and taking it is one synchronous
+      // step, so a later arrival cannot slip in between.
+      this.foregroundGranted = false;
+      if (this.foregroundClosed) return undefined;
+    }
     const operation: ForegroundOperation = { id: ++this.foregroundSeq, kind, label, startedAt: Date.now(), abort: new AbortController() };
     this.foreground = operation;
-    this.update({ operation: { busy: true, error: '' } });
+    this.update({ lastFailure: '' });
     this.traceEvent('foreground', { phase: 'begin', id: operation.id, kind, label });
     try {
       return await this.foregroundOwner.run(operation.id, () => work(operation.abort.signal));
@@ -661,8 +689,12 @@ export class Controller implements ControllerStore, ConnectionListener {
       // Only the owner releases the slot; a nested claim never reaches this branch.
       if (this.foreground === operation) {
         this.foreground = undefined;
-        this.update({ operation: { ...this.state.operation, busy: false } });
+        this.update({});
         this.traceEvent('foreground', { phase: 'end', id: operation.id, kind, cancelled: operation.abort.signal.aborted });
+        // Hand the slot to the oldest waiter, if any: the occupant is gone before the next one takes
+        // it, and `foregroundGranted` keeps a fresh arrival from overtaking the promise already made.
+        const next = this.foregroundWaiters.shift();
+        if (next !== undefined) { this.foregroundGranted = true; next(); }
       }
     }
   }
@@ -685,7 +717,7 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private async runLocalAction(operation: () => Promise<void>): Promise<boolean> {
     try { await operation(); return true; }
-    catch (error) { this.update({ operation: { ...this.state.operation, error: errorText(error) } }); return false; }
+    catch (error) { this.update({ lastFailure: errorText(error) }); return false; }
   }
 
   /** Read the counters one memory sample records; content never leaves as text.
@@ -757,7 +789,7 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** The event stream is ready and the control baseline is applied. */
   async ready(): Promise<void> {
     this.catalog.refresh();
-    this.update({ online: true, status: 'Connected', pending: [], operation: { ...this.state.operation, error: '' } });
+    this.update({ online: true, status: 'Connected', pending: [], lastFailure: '' });
     const screen = this.state.screen;
     this.traceEvent('generation', { phase: 'ready', screen });
     const picker = screen === 'sessions' ? 'sessions' : 'workspaces';
@@ -857,7 +889,13 @@ export class Controller implements ControllerStore, ConnectionListener {
       return { kind: 'turn', ...(this.workingSince === undefined ? {} : { since: this.workingSince }) };
     }
     const progress = this.loop?.progress;
-    if (progress === undefined || !progress.active || progress.activity === undefined) return undefined;
+    if (progress === undefined || !progress.active) return undefined;
+    // A paused run is still the client's work, but nothing is running: the bar must ask for the reader
+    // rather than claim a clock.
+    if (progress.phase === 'needs-human') {
+      return { kind: 'paused', title: progress.title, step: progress.step, total: progress.total };
+    }
+    if (progress.activity === undefined) return undefined;
     return { kind: 'loop', activity: progress.activity, title: progress.title,
       step: progress.step, total: progress.total, startedAt: progress.startedAt };
   }
@@ -944,9 +982,9 @@ export class Controller implements ControllerStore, ConnectionListener {
    */
   private setAnswers(answers: Record<string, AnswerValue['answers']>): void { this.session.setAnswers(answers); }
 
-  /** Clear the action envelope's last failure; a no-op when there is none. */
-  private clearOperationError(): void {
-    if (this.state.operation.error !== '') this.update({ operation: { ...this.state.operation, error: '' } });
+  /** Clear the internal last failure; a no-op when there is none. */
+  private clearFailure(): void {
+    if (this.state.lastFailure !== '') this.update({ lastFailure: '' });
   }
 
   /** Replace the pending question's option keyboard state.
@@ -1184,7 +1222,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     loop.human({ kind: 'send', text }, 'send-rejected');
     this.traceLoopEnd(loop);
     this.loopPrompt = undefined;
-    this.update({ operation: { ...this.state.operation, error: text } });
+    this.update({ lastFailure: text });
   }
 
   /** Record the end of one run once, with the phase it stopped in and why.
@@ -1229,6 +1267,28 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.loopDeadlineTimer.unref();
   }
 
+  /** Answer a paused run, so the current artifact is judged again with what the operator supplied.
+   *
+   * The answer is not a work order: it only adds a condition to the judgment, so nothing is sent to the
+   * agent and no attempt is consumed. The verification that follows is a new task with a new identity,
+   * which is what keeps a late verdict from the paused one from deciding the attempt.
+   * @param text - What the operator added; never written to the trace.
+   */
+  private async answerLoop(text: string): Promise<void> {
+    const loop = this.loop;
+    if (loop === undefined || !loop.active) throw new Error('No loop is waiting for an answer');
+    this.loopAnswer = text;
+    const judged = this.verifier !== undefined && loop.protocol.verify !== undefined;
+    loop.resume(judged ? 'verify' : 'turn');
+    this.update({});
+    this.traceEvent('loop', { phase: 'answered', runId: loop.progress.runId, judged, chars: text.length });
+    if (judged) { this.verifyStep(loop); return; }
+    // Without a forked verifier the answer is the next attempt's instruction: the agent is asked again
+    // with the addition, and the attempt budget still decides how many times that may happen.
+    this.loopPrompt = loop.answerPrompt(text);
+    void this.flushLoop();
+  }
+
   /** Stop a running review; the terminal progress stays visible for the reader.
    * @param reason - Why it stopped; the default is an operator action.
    */
@@ -1263,6 +1323,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.loopVerifySeq = 0;
     this.loopVerifyIdentity = undefined;
     this.loopVerifierMisses = 0;
+    this.loopAnswer = undefined;
     this.loop = undefined;
     this.loopPrompt = undefined;
     this.loopEndedAt = undefined;
@@ -1329,6 +1390,9 @@ export class Controller implements ControllerStore, ConnectionListener {
     const file = verdictFile(this.verdictRoot, runId, kind, step, attempt, seq);
     const identity = verificationId(runId, kind, step, attempt, seq);
     const prompt = loop.protocol.verify!(loop.progress, step, attempt, { file, verificationId: identity }, this.loopPrevious);
+    // An answer the operator gave after an abstention only adds a condition: the same artifact is
+    // judged again, under a fresh identity, and no attempt is consumed for it.
+    const answered = this.loopAnswer === undefined ? prompt : `${prompt}\n\n## 操作者的补充判断\n${this.loopAnswer}`;
     this.loopVerifying = true;
     this.loopVerifyIdentity = identity;
     // The sub-state is a fact on the loop, not a note: the progress line and the status bar both read
@@ -1342,7 +1406,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     try {
       // The reviewed workspace is declared here, where it is known, so the verifier's artifact check
       // never has to infer it from whatever directory the process happens to run in.
-      outcome = await verifier.verify({ verificationId: identity, kind, step, attempt, prompt, file,
+      outcome = await verifier.verify({ verificationId: identity, kind, step, attempt, prompt: answered, file,
         workspace: this.localDirectory,
         ...(loop.protocol.artifact === undefined ? {} : { artifact: loop.protocol.artifact }),
         title: `[dsht-verify] ${loop.protocol.title} · ${step}/${attempt}` }, abort.signal);
@@ -1451,7 +1515,10 @@ export class Controller implements ControllerStore, ConnectionListener {
   private settleWith(loop: ScoredLoop, result: LoopResult | undefined, note = ''): void {
     const before = loop.progress;
     const step = loop.settle(result);
-    if (step.kind !== 'continue') {
+    // The answer was the condition for this judgment, so it is spent once the verdict is in.
+    this.loopAnswer = undefined;
+    // A pause is not an end: the run keeps its span (and its deadline) until it is answered or ended.
+    if (step.kind !== 'continue' && !loop.active) {
       this.clearLoopDeadline();
       // A decision ended the run: close its trace span with the phase and reason it stopped in.
       this.traceLoopEnd(loop);
@@ -1525,7 +1592,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     // the verdict lands (or dropped with the run), never interleaved with the verification.
     if (this.loopVerifying) return;
     if (this.state.sessionId !== loop.sessionId) return;
-    if (!this.state.online || this.state.operation.busy || this.state.pending.length) return;
+    if (!this.state.online || this.foreground !== undefined || this.state.pending.length) return;
     // Consume before awaiting, so a re-entrant update cannot send the same prompt twice.
     this.loopPrompt = undefined;
     loop.sent();

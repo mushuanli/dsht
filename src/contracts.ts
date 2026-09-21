@@ -117,7 +117,9 @@ export type LoopActivity = 'turn' | 'verify' | 'settle';
  */
 export type ClientActivity =
   | { kind: 'turn'; since?: number }
-  | { kind: 'loop'; activity: LoopActivity; title: string; step: number; total: number; startedAt: number };
+  | { kind: 'loop'; activity: LoopActivity; title: string; step: number; total: number; startedAt: number }
+  /** A run that stopped to ask the operator something: nothing is working, so there is no clock. */
+  | { kind: 'paused'; title: string; step: number; total: number };
 
 /** Why one loop run reached a terminal phase.
  *

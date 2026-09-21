@@ -37,10 +37,10 @@ test('workspace search preserves global truncation and validates host responses'
   assert.equal((await controller.actions.searchSessions('one', false, signal))!.items.length, 2);
   fixture.searchResult = { items: [{ sessionId: 1, snippet: 'bad' }], hasMore: false };
   assert.equal(await controller.actions.searchSessions('one', false, signal), undefined);
-  assert.match(controller.state.operation.error, /Invalid session search item/);
+  assert.match(controller.state.lastFailure, /Invalid session search item/);
   fixture.searchResult = { items: [], hasMore: 'false' };
   assert.equal(await controller.actions.searchSessions('one', false, signal), undefined);
-  assert.match(controller.state.operation.error, /Invalid session search response/);
+  assert.match(controller.state.lastFailure, /Invalid session search response/);
 });
 
 test('paging stops on an unadvancing host page and respects cancellation', async t => {
@@ -51,10 +51,10 @@ test('paging stops on an unadvancing host page and respects cancellation', async
   t.after(() => controller.stop()); controller.start();
   await until(() => controller.queries.record.ready);
   assert.equal(await controller.actions.historyThrough('first', new AbortController().signal), false);
-  assert.match(controller.state.operation.error, /did not advance/);
+  assert.match(controller.state.lastFailure, /did not advance/);
   const abort = new AbortController(); abort.abort();
   assert.equal(await controller.actions.historyThrough('first', abort.signal), false);
-  assert.match(controller.state.operation.error, /abort/i);
+  assert.match(controller.state.lastFailure, /abort/i);
 });
 
 test('stream frames reuse the history index, bound row caching, and retrieve evicted rows on demand', () => {

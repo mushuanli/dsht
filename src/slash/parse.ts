@@ -33,8 +33,10 @@ export type Command =
   | { kind: 'loop'; name: string; options: LoopOptions }
   /** Offer the `loop.yaml` records so one can be chosen instead of typed. */
   | { kind: 'loops' }
-  /** Stop the running loop; the one `/loop` subcommand that takes no record. */
+  /** Stop the running loop, running or paused. */
   | { kind: 'loopStop' }
+  /** Answer a paused run, so the current artifact is judged again with the operator's addition. */
+  | { kind: 'loopAnswer'; text: string }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
   | { kind: 'hostCommand'; line: string }
@@ -110,9 +112,12 @@ export function loopNameQuery(line: string): string | undefined {
   const rest = line.slice('/loop'.length);
   if (rest === '') return '';
   const match = /^[ \t]+(\S*)[ \t]*$/.exec(rest);
-  // `stop` is a subcommand, never a record, so the menu must not filter records by it.
-  return match?.[1] === 'stop' ? undefined : match?.[1];
+  // The subcommands are never records, so the menu must not filter records by them.
+  return match?.[1] !== undefined && LOOP_SUBCOMMANDS.includes(match[1]) ? undefined : match?.[1];
 }
+
+/** Names `/loop` itself owns, so the record menu never treats one as the start of a record name. */
+const LOOP_SUBCOMMANDS = ['stop', 'abort', 'answer'];
 
 /** The one message every malformed `/loop` line receives. */
 export const LOOP_USAGE = 'Use /loop <name> [score] [tries] [--from N] [--to N] [--score X] [--tries N]';
@@ -120,13 +125,19 @@ export const LOOP_USAGE = 'Use /loop <name> [score] [tries] [--from N] [--to N] 
 /** The one message a malformed `/loop stop` line receives. */
 export const LOOP_STOP_USAGE = 'Use /loop stop (no arguments)';
 
+/** The one message a `/loop answer` line without an answer receives. */
+export const LOOP_ANSWER_USAGE = 'Use /loop answer <text>';
+
+/** The one message a malformed `/loop abort` line receives. */
+export const LOOP_ABORT_USAGE = 'Use /loop abort (no arguments)';
+
 /** Parse `/loop <name> [score] [tries] [flags]`.
  *
  * The name is a record in `loop.yaml`; the syntax layer cannot know which records exist, so it only
  * requires a name that is not a flag and leaves the lookup (and its error, which lists the available
  * names) to the application. Score and tries may be positional or flagged; the last one wins. A line
- * with no name at all is the request to be offered the records instead of typing one, and the name
- * `stop` is `/loop`'s own subcommand rather than a record.
+ * with no name at all is the request to be offered the records instead of typing one; `stop`, `abort`
+ * and `answer <text>` are `/loop`'s own subcommands rather than records.
  * @param value - Trimmed line that starts with `/loop`.
  * @returns The command, or the usage error.
  */
@@ -134,8 +145,13 @@ function loopCommand(value: string): Command {
   const words = value.slice('/loop'.length).trim().split(/\s+/).filter(Boolean);
   const name = words[0];
   if (name === undefined) return { kind: 'loops' };
-  // `stop` belongs to `/loop` itself, which is why a record may not take that name.
+  // `stop`, `answer` and `abort` belong to `/loop` itself, which is why a record may not take them.
   if (name === 'stop') return words.length === 1 ? { kind: 'loopStop' } : { kind: 'error', message: LOOP_STOP_USAGE };
+  if (name === 'abort') return words.length === 1 ? { kind: 'loopStop' } : { kind: 'error', message: LOOP_ABORT_USAGE };
+  if (name === 'answer') {
+    const text = words.slice(1).join(' ').trim();
+    return text === '' ? { kind: 'error', message: LOOP_ANSWER_USAGE } : { kind: 'loopAnswer', text };
+  }
   if (name.startsWith('--')) return { kind: 'error', message: LOOP_USAGE };
   const options: LoopOptions = {};
   let positionals = 0;

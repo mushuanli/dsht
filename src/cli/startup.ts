@@ -11,7 +11,7 @@ import { ensureDirectory, renameFile, writePrivateFile } from '../storage/index.
 import { latestAssistantText } from '../controller/loop.ts';
 import { parseVerdict } from '../controller/loop-contract.ts';
 import { needsHumanLine, type VerificationHumanRequest } from '../controller/verifier.ts';
-import { authorize, normalize } from '../slash/index.ts';
+import { authorize, normalize, type LineCommand } from '../slash/index.ts';
 
 /** What the operator asked the client to do before/while taking over. */
 export interface StartupPlan {
@@ -103,15 +103,11 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
       pending: controller.state.pending.length > 0,
     });
     if (command.kind === 'error') throw new Error(command.message);
-    const verdict = authorize(command, {
-      sessionSelected: controller.state.sessionId !== undefined,
-      pending: controller.state.pending.length > 0,
-      during: controller.queries.loop?.active === true ? 'loop' : controller.queries.running ? 'turn' : 'idle',
-    });
+    const verdict = await authorizeWhenReady(controller, command);
     if (!verdict.allow) throw new Error(verdict.error.message);
     const result = await runCommand(controller, verdict.command, port);
     if (result === undefined) {
-      const reason = controller.state.operation.error;
+      const reason = controller.state.lastFailure;
       throw new Error(`Command was not accepted: ${line}${reason ? ` (${reason})` : ''}`);
     }
     if (result.outcome !== 'ok') {
@@ -146,6 +142,30 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
     return outcome;
   }
   return 'idle';
+}
+
+/** Authorize one startup line, waiting out a fact the policy queues behind.
+ *
+ * There is no composer here to hold a line, and failing a scripted run because the client happened to
+ * be mid-turn would make `--command` unusable in exactly the automation it exists for; so the scripted
+ * caller waits for the same fact the UI queue waits for, bounded by the step timeout.
+ * @param controller - Connected facade whose facts decide.
+ * @param command - Normalized line to run.
+ * @returns The verdict once the line may run, or the refusal it will never outlive.
+ */
+async function authorizeWhenReady(controller: Controller, command: LineCommand) {
+  const deadline = Date.now() + STEP_TIMEOUT_MS;
+  for (;;) {
+    const verdict = authorize(command, {
+      sessionSelected: controller.state.sessionId !== undefined,
+      pending: controller.state.pending.length > 0,
+      during: controller.queries.loop?.active === true ? 'loop' : controller.queries.running ? 'turn' : 'idle',
+      foreground: controller.queries.foreground !== undefined,
+    });
+    if (!verdict.allow || verdict.defer === undefined) return verdict;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for the client to be free: ${command.kind}`);
+    await new Promise(resolve => setTimeout(resolve, POLL_MS));
+  }
 }
 
 /** Persist the verdict this session's reply just produced.
@@ -258,7 +278,7 @@ async function waitForLoop(controller: Controller, timeoutMs: number, log: (line
     const progress = controller.queries.loop;
     if (progress === undefined || progress.phase !== 'running') {
       // A cancelled loop usually means the connection ended; say so, or the exit code is a mystery.
-      const why = controller.state.operation.error || controller.state.status;
+      const why = controller.state.lastFailure || controller.state.status;
       const interaction = progress?.interaction;
       // `passed` only claims the rounds that ran, so a headless reader is told which ones.
       const scope = progress?.phase === 'passed' ? ` · ${progress.scope}` : '';

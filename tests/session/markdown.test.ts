@@ -123,6 +123,6 @@ test('offline HTML export includes inert SVG and MathJax math, preserves files, 
   const line = interpret({ line: '/export-html', referenceOpen: false, copyMode: false, screen: 'sessions' });
   assert.equal(line.kind, 'line');
   const command = normalize(line as Extract<typeof line, { kind: 'line' }>, { sessionSelected: false, question: false, pending: false });
-  assert.deepEqual(authorize(command, { sessionSelected: false, pending: false, during: 'idle' }),
+  assert.deepEqual(authorize(command, { sessionSelected: false, pending: false, during: 'idle', foreground: false }),
     { allow: false, error: { kind: 'error', message: 'Select a session first' } });
 });

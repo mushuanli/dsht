@@ -146,10 +146,10 @@ export class ConnectionController implements HostAccess, ConnectionView {
         if (!this.abort.signal.aborted) throw error;
       } catch (error) {
         if (error instanceof AuthenticationRequired || error instanceof HttpError && [401, 403].includes(error.status)) {
-          this.store.update({ operation: { ...this.store.state.operation, error: `${errorText(error)}. Set DSH_TOKEN and restart to log in.` }, status: 'Login required' });
+          this.store.update({ lastFailure: `${errorText(error)}. Set DSH_TOKEN and restart to log in.`, status: 'Login required' });
           return;
         }
-        if (!this.abort.signal.aborted) this.store.update({ operation: { ...this.store.state.operation, error: errorText(error) }, status: 'Reconnecting…' });
+        if (!this.abort.signal.aborted) this.store.update({ lastFailure: errorText(error), status: 'Reconnecting…' });
       } finally {
         this.generationFailed = undefined;
         this.store.update({ online: false, pending: [] });

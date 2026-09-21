@@ -18,9 +18,10 @@ import type { VerifierPort } from '../controller/verifier.ts';
 import { Controller } from '../controller/controller.ts';
 import { endpoint } from '../transport/endpoint.ts';
 import { errorText, object, string } from '../transport/wire.ts';
+import { formatTraceSummary, summarizeTrace } from './trace-summary.ts';
 import { safeText } from '../text.ts';
 
-const HELP = `Usage: dsht [options] [list workspaces|list sessions]
+const HELP = `Usage: dsht [options] [list workspaces|list sessions|trace]
 
 With no command, choose a workspace and session interactively.
 
@@ -41,10 +42,11 @@ With no command, choose a workspace and session interactively.
   --memory-log <path>   Append runtime memory samples; a failing log stops itself
   --no-memory-log       Disable the runtime memory log (default: enabled)
   --trace <path>        Append connection/screen/selection events (default: <state>/trace.log)
+                        With the trace command, read that file instead of appending to it
   --no-trace            Disable the transition trace
   --trace-verbose       Quote sanitized child output in verifier failure reasons
   --no-shell            Disable ! local commands (DSHT_NO_SHELL=1)
-  --json               Print machine-readable list output
+  --json               Print machine-readable list or trace output
   --version            Print the package version and exit
   --help               Show this help
 
@@ -63,7 +65,28 @@ Examples:
   npx @itookit/dsht
   dsht list workspaces --json
   dsht list sessions --workspace <id> --json
+  dsht trace --json
 `;
+
+/** State root this client reads and writes logs under, honouring the same overrides as the client. */
+function stateRoot(): string {
+  return process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht');
+}
+
+/** Read one trace file back as a few lines of facts.
+ *
+ * Needs no host and no credentials: the trace is the client's own record of what it did, and reading
+ * it is the whole point of having written it.
+ * @param requested - `--trace` value, when given.
+ * @param json - Print the summary as JSON instead of lines.
+ */
+async function printTrace(requested: string | undefined, json: boolean): Promise<void> {
+  const path = requested ?? process.env.DSHT_TRACE ?? join(stateRoot(), 'trace.log');
+  const text = await readText(path);
+  if (text === undefined) { process.stdout.write(`No trace at ${path}\n`); return; }
+  const summary = summarizeTrace(text.split('\n').filter(line => line !== ''), path);
+  process.stdout.write(json ? `${JSON.stringify(summary, null, 2)}\n` : `${formatTraceSummary(summary).join('\n')}\n`);
+}
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
@@ -81,12 +104,15 @@ async function main(): Promise<void> {
   // a string in this file; like `--help` it needs no host, no credentials and no terminal.
   if (values.version) { process.stdout.write(`${await packageVersion()}\n`); return; }
   const list = positionals[0] === 'list' && ['workspaces', 'sessions'].includes(positionals[1] ?? '') && positionals.length === 2;
-  if (positionals.length && !list) throw new Error('Unknown command. Use --help.');
-  if (!list && (values.json || values.workspace)) throw new Error('--json and --workspace apply to list commands');
-  if (list && values.session) throw new Error('--session applies to interactive mode');
-  if (list && (values.ws || values.command?.length || values.prompt !== undefined || values.wait || values.headless || values.deadline)) {
+  const trace = positionals[0] === 'trace' && positionals.length === 1;
+  if (positionals.length && !list && !trace) throw new Error('Unknown command. Use --help.');
+  if (!list && !trace && (values.json || values.workspace)) throw new Error('--json and --workspace apply to list or trace commands');
+  if ((list || trace) && values.session) throw new Error('--session applies to interactive mode');
+  if ((list || trace) && (values.ws || values.command?.length || values.prompt !== undefined || values.wait || values.headless || values.deadline)) {
     throw new Error('--ws, --command, --prompt, --wait, --deadline and --headless apply to interactive mode');
   }
+  // Reading a trace needs no host, no credentials and no terminal, so it runs before any of them.
+  if (trace) { await printTrace(values.trace, values.json === true); return; }
   const limits = historyLimits(values['history-records'], values['history-mb']);
   const { url, token } = endpoint(values.url, process.env.DSH_TOKEN);
   const store = new CookieStore(values['auth-dir']);

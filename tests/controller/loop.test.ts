@@ -217,7 +217,20 @@ test('an early stop needs a reason, and an explanation never changes control', (
   assert.equal(human.settle(readResultFields({ status: 'abstained', reason: '需要人' })).kind, 'needs-human');
   assert.equal(human.progress.phase, 'needs-human');
   assert.deepEqual(human.progress.interaction, { kind: 'verdict', text: '需要人' });
+  // An abstention pauses rather than ends: the run still owns the session, says why it waits, and can
+  // be answered or aborted — both without consuming an attempt.
+  assert.equal(human.active, true);
+  assert.equal(human.progress.terminalReason, undefined);
+  assert.equal(human.progress.activity, undefined);
+  assert.equal(human.progress.attempt, 1);
+  human.resume();
+  assert.equal(human.progress.phase, 'running');
+  assert.equal(human.progress.interaction, undefined);
+  assert.equal(human.progress.activity, 'verify');
+  assert.equal(human.settled, true, 'the resumed attempt is outstanding again, so its verdict decides it');
+  human.cancel();
   assert.equal(human.active, false);
+  assert.equal(human.progress.terminalReason, 'user-cancelled');
 
   const blocked = new ScoredLoop('run-1', 's1', protocol, limits);
   blocked.start(); blocked.sent();
@@ -286,8 +299,11 @@ test('a terminal run records why it stopped, and active is the only running pred
   const blocked = finish(make(), readResultFields({ status: 'blocked', reason: 'no' }));
   assert.equal(blocked.progress.terminalReason, 'blocked');
 
+  // An abstention is a pause: the phase is `needs-human` yet the run is still active, and only the
+  // absence of a terminal reason tells the two apart.
   const abstained = finish(make(), readResultFields({ status: 'abstained', reason: '需要人' }));
-  assert.equal(abstained.progress.terminalReason, 'verifier-needs-human');
+  assert.equal(abstained.progress.terminalReason, undefined);
+  assert.equal(abstained.progress.active, true);
 
   const exhausted = finish(new ScoredLoop('run-x', 's1', PROTOCOL, { from: 1, to: 1, score: 8, tries: 1 }), readResultFields({ score: 1 }));
   assert.equal(exhausted.progress.terminalReason, 'exhausted');
@@ -297,10 +313,11 @@ test('a terminal run records why it stopped, and active is the only running pred
   assert.equal(stalled.progress.phase, 'stalled');
   assert.equal(stalled.progress.terminalReason, 'stalled');
 
-  // The one predicate: no caller may infer "running" from the phase string, and a retained snapshot
-  // of a finished run is never active.
+  // The one predicate: no caller may infer "running" from the phase string, a paused run is active
+  // without working, and a retained snapshot of a finished run is never active.
   for (const loop of [fresh, cancelled, turned, unavailable, expired, human, rejected, passed, blocked, abstained, exhausted, stalled]) {
-    assert.equal(loop.progress.active, loop.progress.phase === 'running');
-    if (loop.progress.phase !== 'running') assert.notEqual(loop.progress.terminalReason, undefined);
+    const progress = loop.progress;
+    assert.equal(progress.active, progress.phase === 'running' || (progress.phase === 'needs-human' && progress.terminalReason === undefined));
+    if (!progress.active) assert.notEqual(progress.terminalReason, undefined);
   }
 });

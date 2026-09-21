@@ -143,7 +143,7 @@ test('paged search keeps live history unchanged, bounds matches, and loads only 
   window.dispose();
   const abort = new AbortController(); abort.abort();
   assert.equal(await controller.actions.searchHistory('needle', abort.signal), undefined);
-  assert.match(controller.state.operation.error, /abort/i);
+  assert.match(controller.state.lastFailure, /abort/i);
 });
 
 test('unused projection bodies are not retained by the controller', () => {

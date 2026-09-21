@@ -117,6 +117,12 @@ export interface AuthorizeFacts {
   sessionSelected: boolean;
   /** An interaction of that conversation is waiting. */
   pending: boolean;
+  /** Another operation already owns the client's single foreground slot.
+   *
+   * A front end reads this from the controller, so "may this line run while something else is running"
+   * is answered here — with a reason — instead of by each front end dropping the line in silence.
+   */
+  foreground: boolean;
   /** Whether the selected conversation has a turn or a loop in flight.
    *
    * A loop is reported as `loop` rather than as the turn it runs, because stopping the loop is what
@@ -125,10 +131,19 @@ export interface AuthorizeFacts {
   during: 'idle' | 'turn' | 'loop';
 }
 
-/** Whether one command may run now, and what to execute instead when it may not. */
-/** The refusal a front end reports is always the error line, never an arbitrary command. */
+/** Why a line the policy accepted is not running yet.
+ *
+ * The fact that has to clear: the foreground slot, a turn, or a whole loop. One fact, because a line is
+ * held behind the longest-lived of them and a front end only needs to know what to watch for.
+ */
+export type DeferReason = 'busy' | 'turn' | 'loop';
+
+/** Whether one command may run now, may run later, or may not run at all.
+ *
+ * A refusal is always the error line, never an arbitrary command.
+ */
 export type Verdict =
-  | { allow: true; command: LineCommand }
+  | { allow: true; command: LineCommand; defer?: DeferReason }
   | { allow: false; error: Extract<Command, { kind: 'error' }> };
 
 /** Apply one command's declared policy to the current application facts.
@@ -154,9 +169,22 @@ export function authorize(command: LineCommand, facts: AuthorizeFacts): Verdict 
   // `during` is checked last: "answer what is waiting" is a more actionable reason than "something is
   // running", and a pending interaction usually means a turn is running too.
   const during = facts.during === 'loop' ? policy?.duringLoop : facts.during === 'turn' ? policy?.duringTurn : undefined;
+  const whileBusy = policy?.whileBusy ?? 'deny';
   if (during === 'deny') {
     return { allow: false, error: { kind: 'error',
       message: facts.during === 'loop' ? 'Stop the running loop first' : 'Wait for the running turn to finish' } };
+  }
+  // A queue behind a turn or a loop is decided first: the line runs later anyway, so the slot being
+  // busy right now says nothing about whether it should. The held line waits for both facts.
+  if (during === 'queue') return { allow: true, command, defer: facts.during === 'loop' ? 'loop' : 'turn' };
+  // Only the commands declared to answer the operator or the host are admitted while the client is
+  // busy (§3.4); everything else waits for a reason the operator can read, because running it now
+  // would interleave with the operation they are watching.
+  if (facts.foreground) {
+    if (whileBusy === 'deny') {
+      return { allow: false, error: { kind: 'error', message: 'Wait for the running operation to finish' } };
+    }
+    if (whileBusy === 'queue') return { allow: true, command, defer: 'busy' };
   }
   return { allow: true, command };
 }

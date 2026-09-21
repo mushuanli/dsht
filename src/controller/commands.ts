@@ -100,7 +100,7 @@ export async function runCommand(controller: Controller, command: RunnableComman
   controller.traceNote('command', { phase: 'begin', commandId, kind: command.kind });
   // What the action envelope said before this line ran: a failure it records during the line is this
   // line's own, and the result below is where the operator reads it.
-  const envelopeBefore = controller.state.operation.error;
+  const envelopeBefore = controller.state.lastFailure;
   let result: CommandResult | undefined;
   try {
     result = await execute(controller, command, port);
@@ -119,8 +119,8 @@ export async function runCommand(controller: Controller, command: RunnableComman
   // One fact, one channel (13.2-D2): a failure this line already reported in its result must not stay
   // in the action envelope and be shown a second time in the status bar. An unaccepted line keeps it —
   // there the envelope is the only explanation the operator has.
-  if (result !== undefined && result.outcome !== 'ok' && controller.state.operation.error !== envelopeBefore) {
-    controller.actions.clearOperationError();
+  if (result !== undefined && result.outcome !== 'ok' && controller.state.lastFailure !== envelopeBefore) {
+    controller.actions.clearFailure();
   }
   return result;
 }
@@ -263,6 +263,23 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
       // The record list is a composer surface the UI offers while the name is typed; a line that
       // still reaches here has nobody to choose for it, so it is told to name one.
       return refused(`Use /loop <name> · available: ${loopProtocolNames().join(', ')}`);
+    case 'loopAnswer': {
+      const progress = controller.queries.loop;
+      const interaction = progress?.interaction;
+      // The answer only means something to a judgment that asked for one; a host question is answered
+      // in its own dialog, and a rejected send retries on its own. Saying which is which beats a
+      // command that appears to do nothing.
+      if (progress === undefined || !progress.active || progress.phase !== 'needs-human' || interaction?.kind !== 'verdict') {
+        return refused(interaction === undefined
+          ? 'No loop is waiting for an answer'
+          : `This run is waiting for a ${interaction.kind}: ${interaction.text} · answer it, or /loop abort`);
+      }
+      const accepted = await controller.actions.answerLoop(command.text);
+      return accepted
+        ? ok([{ kind: 'closePanels' }, { kind: 'live' }, { kind: 'scroll', position: 0 },
+          { kind: 'notice', text: `Answer added · re-judging step ${progress.step}` }])
+        : undefined;
+    }
     case 'loopStop': {
       // Stopping is a control command, so it is answered from the application's own view of the run
       // rather than refused when nothing runs; a no-op that says so beats silence.
@@ -308,7 +325,7 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
         // `startLoop` already traced its own refusal; this turns the same fact into something the
         // operator can read, instead of a form that appears to ignore Start. The form stays on screen
         // so the values can be retried.
-        const why = controller.state.operation.error
+        const why = controller.state.lastFailure
           || (controller.state.online ? 'the host did not accept the request' : 'the client is offline');
         controller.traceNote('loop', { phase: 'not-started', name: command.name, why: why.slice(0, 200) });
         return refused(`Loop did not start: ${why}`);

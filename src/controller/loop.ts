@@ -291,7 +291,7 @@ export class ScoredLoop {
     const stepLabel = this.protocol.stepLabel?.(this.step);
     return { runId: this.runId, title: this.protocol.title, startedAt: this.startedAt, ...this.limits, total: this.protocol.steps, scope: loopScope({ ...this.limits, total: this.protocol.steps }),
       step: this.step, attempt: this.attempt, best: this.best, phase: this.phase, active: this.active,
-      // Activity describes a run that is still going: a terminal phase has nothing left to wait for.
+      // Activity describes a run that is working: a paused run waits for a person, not for the host.
       ...(this.phase !== 'running' || this.activity === undefined ? {} : { activity: this.activity }),
       ...(this.terminalReason === undefined ? {} : { terminalReason: this.terminalReason }),
       ...(stepLabel === undefined ? {} : { stepLabel }),
@@ -305,8 +305,14 @@ export class ScoredLoop {
    */
   note(text: string): void { this.noteText = text === '' ? undefined : text; }
 
-  /** Whether the run may still send or settle an attempt. */
-  get active(): boolean { return this.phase === 'running'; }
+  /** Whether the run still owns its session: it may send, settle — or be answered.
+   *
+   * A paused run counts: it is not finished, so a new run must not silently replace it (§8.3.1). What
+   * it is *not* doing is working; `activity` is absent while it waits.
+   */
+  get active(): boolean {
+    return this.phase === 'running' || (this.phase === 'needs-human' && this.terminalReason === undefined);
+  }
 
   /** Whether a prompt was sent and its reply is still outstanding. */
   get settled(): boolean { return this.awaiting; }
@@ -330,13 +336,11 @@ export class ScoredLoop {
   settle(result: LoopResult | undefined): LoopStepResult {
     this.awaiting = false;
     this.activity = 'settle';
-    // A verifier that cannot judge asks for a person. Phase 1 has no answer path, so the request is
-    // carried on the progress and the run stops instead of spending the attempt budget on it.
+    // A verifier that cannot judge asks for a person. The run pauses rather than ending: the operator
+    // can answer it (`/loop answer`) or end it (`/loop abort`), and no attempt is consumed either way.
     if (result?.abstained === true) {
-      this.phase = 'needs-human';
-      this.terminalReason = 'verifier-needs-human';
-      this.interaction = { kind: 'verdict', text: result.reason ?? 'the verifier needs a person',
-        ...(result.needs === undefined ? {} : { needs: result.needs }) };
+      this.pause({ kind: 'verdict', text: result.reason ?? 'the verifier needs a person',
+        ...(result.needs === undefined ? {} : { needs: result.needs }) });
       return { kind: 'needs-human' };
     }
     // A verifier that proved the task impossible ends the run instead of burning the budget.
@@ -372,7 +376,8 @@ export class ScoredLoop {
    * @param reason - Who ended it, so a cancellation is not confused with a verdict.
    */
   cancel(reason: LoopTerminalReason = 'user-cancelled'): void {
-    this.phase = 'cancelled'; this.awaiting = false; this.terminalReason = reason;
+    this.phase = 'cancelled'; this.awaiting = false; this.activity = undefined;
+    this.interaction = undefined; this.terminalReason = reason;
   }
 
   /** End the run because independent verification was impossible.
@@ -382,7 +387,8 @@ export class ScoredLoop {
    * @param reason - Which verification failure ended it.
    */
   unavailable(reason: LoopTerminalReason = 'verifier-unavailable'): void {
-    this.phase = 'unavailable'; this.awaiting = false; this.terminalReason = reason;
+    this.phase = 'unavailable'; this.awaiting = false; this.activity = undefined;
+    this.interaction = undefined; this.terminalReason = reason;
   }
 
   /** End the run because the whole-run deadline expired.
@@ -390,19 +396,60 @@ export class ScoredLoop {
    * A budget stop, not a verdict: it bounds the sum of all steps, attempts and verifier retries, so
    * no attempt is consumed and `best` is untouched.
    */
-  deadline(): void { this.phase = 'deadline'; this.awaiting = false; this.terminalReason = 'deadline'; }
+  deadline(): void {
+    this.phase = 'deadline'; this.awaiting = false; this.activity = undefined;
+    this.interaction = undefined; this.terminalReason = 'deadline';
+  }
 
-  /** Stop because a human is needed, whether a verdict abstained or the host is blocked.
+  /** Pause the run because a judgment asked for a person.
    *
-   * Phase 1 has no answer path (`/loop answer` is future work), so this ends the run with the
-   * request attached: spending the attempt budget on a blocked verifier helps nobody. No attempt is
-   * consumed and `best` is untouched.
+   * Deliberately not terminal: no `terminalReason` is written, so the run still owns its session and
+   * the progress line can offer `/loop answer` or `/loop abort` instead of a summary.
+   * @param request - What is being asked, and what the answer has to supply.
+   */
+  pause(request: { kind: string; text: string; needs?: string }): void {
+    this.phase = 'needs-human';
+    this.awaiting = false;
+    this.activity = undefined;
+    this.interaction = request;
+  }
+
+  /** Resume a paused run after the operator supplied what the judgment was missing.
+   *
+   * No attempt is consumed: the answer only adds a condition, and the current artifact is judged again
+   * under a new verification identity. The attempt counts as outstanding, so that verdict may decide it.
+   */
+  resume(activity: LoopActivity = 'verify'): void {
+    this.phase = 'running';
+    this.awaiting = true;
+    this.activity = activity;
+    this.interaction = undefined;
+    this.noteText = undefined;
+  }
+
+  /** The prompt that asks again with the operator's addition.
+   *
+   * Used when no forked verifier judges this run: the answer becomes the next attempt's instruction
+   * instead of a condition for a judgment, and asking again costs no attempt by itself.
+   * @param answer - What the operator supplied.
+   * @returns The prompt to send.
+   */
+  answerPrompt(answer: string): string {
+    return `${this.protocol.followUp(this.limits, this.step, this.attempt)}\n\n## 操作者的补充判断\n${answer}`;
+  }
+
+  /** End the run because the request cannot be answered from here.
+   *
+   * Used for the cases the operator cannot unblock through this client — a verifier child whose own
+   * session asked a question, or a prompt the host refused to accept — as opposed to `pause`, where
+   * `/loop answer` supplies what the judgment was missing. No attempt is consumed in either case.
    * @param request - The approval or question the host is waiting for, or a verdict's request.
    * @param reason - Which kind of human request this is.
    */
   human(request: { kind: string; text: string }, reason: LoopTerminalReason = 'verifier-needs-human'): void {
     this.phase = 'needs-human';
     this.awaiting = false;
+    this.activity = undefined;
     this.terminalReason = reason;
     this.interaction = request;
   }

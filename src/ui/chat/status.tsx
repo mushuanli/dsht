@@ -352,6 +352,7 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
     const phaseSegment: StatusSegment | undefined = !busy ? undefined
       : phaseLabel !== undefined ? { text: phaseLabel }
       : activity?.kind === 'loop' ? { text: `${activity.activity} ${activity.step}/${activity.total}` }
+      : activity?.kind === 'paused' ? { text: 'needs you' }
       : undefined;
     // The state token reports a fact and never guesses: a paused clock is named, offline and errors
     // take the token over, and an unknown phase simply leaves the phase group empty. An answer this
@@ -364,6 +365,7 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
           ? { text: '? Needs you', color: theme.status.critical }
           : pauseReason !== undefined
             ? { text: `⏸ ${pauseReason}${clock}`, color: theme.colors.muted }
+            : activity?.kind === 'paused' ? { text: '⏸ needs you', color: theme.status.critical }
             : busy ? { text: `◐${clock}`, color: theme.status.working } : { text: '● Ready', color: theme.status.ready };
     // One marker covers both scopes, because either an unpriceable record or a scan that has not
     // covered every session makes the pair inexact as a reading.
@@ -437,7 +439,9 @@ const StatusDetails = memo(function StatusDetails({ source, theme, width, now, s
         ? `◐ Working · ${duration}${source.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
         : activity?.kind === 'loop'
           ? `◐ ${activity.activity} ${activity.step}/${activity.total} · ${duration} · Ctrl+C Stop`
-          : '● Ready · Ctrl+C exit' },
+          : activity?.kind === 'paused'
+            ? `⏸ ${activity.title} · needs you · /loop answer <text> or /loop abort`
+            : '● Ready · Ctrl+C exit' },
     { key: 'host', text: `${safeText(source.host)} · ${safeText(state.status)}${!source.online ? ' · offline, last known status' : ''}` },
     ...source.sessionId
       ? [{ key: 'session', text: `Session ${safeText(source.sessionId)}${source.sessionMode ? ` · ${safeText(source.sessionMode)}` : ''}` }] : [],

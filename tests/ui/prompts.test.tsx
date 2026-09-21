@@ -95,7 +95,7 @@ test('/prompt TEXT saves a shortcut prompt that the list then offers', async t =
   const app = await mount(t);
   await app.press('/prompt Fix this bug and add tests'); await app.press('\r');
   await until(() => app.controller.promptStore.list.some(item => item.text === 'Fix this bug and add tests'));
-  await until(() => !app.controller.state.operation.busy);
+  await until(() => app.controller.queries.foreground === undefined);
   await app.press('/prompt'); await app.press('\r');
   await until(() => app.frame().includes('Fix this bug and add tests'));
 });

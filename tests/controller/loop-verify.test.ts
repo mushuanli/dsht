@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { Controller, loopProtocolFor } from '../../src/controller/index.ts';
 import type { LoopProtocol } from '../../src/controller/loop.ts';
 import { runStartup } from '../../src/cli/startup.ts';
+import { runCommand } from '../../src/controller/commands.ts';
+import { parseCommand } from '../../src/slash/index.ts';
 import { readTrace } from '../../src/controller/trace-log.ts';
 import type { VerifierOutcome, VerifierRequest } from '../../src/controller/verifier.ts';
 import { array, object } from '../../src/transport/wire.ts';
@@ -98,6 +100,70 @@ test('a forked verdict decides the round, and the reviewer is told not to self-s
   assert.doesNotMatch(request.prompt, /把结论写入/);
   assert.match(request.prompt, /回复正文的最后输出唯一一个 JSON 对象/);
   assert.equal(controller.queries.loop?.best, 0, 'a new step starts its own best');
+});
+
+test('an abstained verdict pauses the run, and an answer re-judges it without spending an attempt', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // The first judgment abstains and every one after it passes, so the answer is what changed the run.
+  let judged = 0;
+  const verifier = fakeVerifier(() => (judged++ === 0
+    ? { type: 'verified', result: { status: 'abstained', abstained: true, exitReason: 'needs-human',
+        reason: '哪一侧是权威？', needs: '先定权威' }, sessionId: 'session-verifier' }
+    : { type: 'verified', result: { score: 9, status: 'done' }, sessionId: 'session-verifier' }));
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier: verifier.port });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  idle(fixture, 's1');
+
+  // The verifier abstained: the run is paused, not finished. It still owns the session, says what it
+  // needs, and no attempt was consumed by the judgment or by waiting.
+  await until(() => controller.queries.loop?.phase === 'needs-human');
+  const paused = controller.queries.loop!;
+  assert.equal(paused.active, true);
+  assert.equal(paused.terminalReason, undefined);
+  assert.equal(paused.step, 1);
+  assert.equal(paused.attempt, 1);
+  assert.deepEqual(paused.interaction, { kind: 'verdict', text: '哪一侧是权威？', needs: '先定权威' });
+  assert.equal(verifier.requests.length, 1);
+
+  // The operator answers: the same artifact is judged again, under a new task identity, with the
+  // answer in the prompt. Nothing is sent to the agent for it.
+  const promptsBefore = fixture.calls.filter(call => call.method === 'session/prompt').length;
+  void controller.actions.answerLoop('以 tui-design.md 为准');
+  await until(() => verifier.requests.length === 2);
+  const answered = verifier.requests[1]!;
+  assert.equal(answered.verificationId, verifier.requests[0]!.verificationId.replace(/\/1$/, '/2'), 'a new task identity');
+  assert.match(answered.prompt, /操作者的补充判断/);
+  assert.match(answered.prompt, /以 tui-design\.md 为准/);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, promptsBefore, 'an answer is not a work order');
+  // The second verdict decides the attempt normally, and the answer consumed none of the budget.
+  await until(() => controller.queries.loop?.step === 2);
+  assert.equal(controller.queries.loop?.attempt, 1);
+  assert.equal(controller.queries.loop?.interaction, undefined);
+});
+
+test('/loop abort ends a paused run, which is the only way out when nobody answers', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const verifier = fakeVerifier(() => ({ type: 'verified',
+    result: { status: 'abstained', abstained: true, exitReason: 'needs-human', reason: '需要人' }, sessionId: 'session-verifier' }));
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier: verifier.port });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
+  idle(fixture, 's1');
+  await until(() => controller.queries.loop?.phase === 'needs-human');
+  // `/loop stop` and `/loop abort` are the same action; the paused spelling is the natural one here.
+  const port = { run: async () => undefined };
+  await runCommand(controller, parseCommand('/loop abort'), port);
+  assert.equal(controller.queries.loop?.phase, 'cancelled');
+  assert.equal(controller.queries.loop?.terminalReason, 'user-cancelled');
+  assert.equal(controller.queries.loop?.active, false);
 });
 
 test('a verifier outage is retried and never lets the reply block pass', async t => {
@@ -219,7 +285,7 @@ test('a verdict that proves the task impossible ends the run and keeps its reaso
   assert.equal(verifier.requests.length, 1);
 });
 
-test('a verdict that abstains asks for a person and stops the run', async t => {
+test('a verdict that abstains asks for a person and pauses the run', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const verifier = fakeVerifier(() => ({ type: 'verified', sessionId: 'session-verifier',
     result: { status: 'abstained', abstained: true, exitReason: 'needs-human', reason: '需要人决定改哪一侧',
@@ -234,12 +300,15 @@ test('a verdict that abstains asks for a person and stops the run', async t => {
   idle(fixture, 's1');
   await until(() => controller.queries.loop?.phase === 'needs-human');
 
-  // Phase 1 has no answer path, so the request ends the run instead of being retried as an outage.
+  // The request pauses the run instead of being retried as an outage: it keeps its span, its budget
+  // and its session, and only the operator ends or continues it.
   assert.deepEqual(controller.queries.loop?.interaction,
     { kind: 'verdict', text: '需要人决定改哪一侧', needs: '改哪一侧？' });
+  assert.equal(controller.queries.loop?.active, true);
+  assert.equal(controller.queries.loop?.terminalReason, undefined);
   assert.equal(controller.queries.loop?.attempt, 1);
   assert.equal(controller.queries.loop?.best, 0);
-  assert.equal(verifier.requests.length, 1);
+  assert.equal(verifier.requests.length, 1, 'and no retry is started while it waits');
 });
 
 test('a headless run stopped by a host request reports needs-human', async t => {

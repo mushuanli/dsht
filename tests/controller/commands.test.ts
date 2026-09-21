@@ -321,5 +321,5 @@ test('a refused line reports its reason once, not again in the action envelope',
   assert.equal(result?.outcome, 'rejected');
   const failure = result?.effects.find(effect => effect.kind === 'error');
   assert.match(String(failure?.kind === 'error' ? failure.text : ''), /Loop did not start: .*session\/agent-busy/);
-  assert.equal(app.state.operation.error, '');
+  assert.equal(app.state.lastFailure, '');
 });

@@ -80,21 +80,26 @@ test('a malformed or unknown startup line fails instead of running', async t => 
   }, () => {}), /Unknown command/);
 });
 
-test('a startup line the application would refuse fails before it reaches the host', async t => {
+test('a startup line the application holds waits for the turn instead of failing', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token' });
   t.after(async () => { await controller.stop(); });
   controller.start();
-  // The scripted half runs the same authorize the composer does, so a line that needs a settled
-  // conversation is refused here too instead of being handed to a host that is mid-turn.
-  fixture.onPage = async () => { await new Promise<void>(resolve => setTimeout(resolve, 500)); return { records: [], hasMore: false }; };
-  const running = runStartup(controller, {
-    workspace: 'w1', session: 'new', commands: ['/compact'], timeoutSeconds: 5,
+  // The scripted half runs the same authorize the composer does, and it drains the same queue: a line
+  // the policy holds behind a turn waits for it, because a batch of --command lines that failed
+  // whenever the client happened to be mid-turn would be unusable in the automation it exists for.
+  const finished = runStartup(controller, {
+    workspace: 'w1', session: 's1', commands: ['/compact'], timeoutSeconds: 10,
   }, () => {}).then(() => 'finished', error => errorText(error));
   await until(() => controller.state.sessionId !== undefined && controller.queries.record.ready);
   fixture.emit({ type: 'emit', event: 'api-session/status', args: [controller.state.sessionId ?? '', true] });
   await until(() => controller.queries.running);
-  assert.match(String(await running), /Wait for the running turn to finish/);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(fixture.calls.some(call => call.method === 'commands/execute'), false);
+  // The turn ends: the held line runs and the startup run finishes normally.
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: [controller.state.sessionId ?? '', false] });
+  await until(() => fixture.calls.some(call => call.method === 'commands/execute'));
+  assert.equal(await finished, 'finished');
 });
 
 test('a plain prompt waits for its turn so a forked child exits by itself', async t => {

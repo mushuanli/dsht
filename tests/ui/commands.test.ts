@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCommand, loopNameQuery, validLoopOption } from '../../src/slash/parse.ts';
-import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, argumentHint, commandMatches, isControlCommand, resolveCommand, suggestedCommands } from '../../src/slash/registry.ts';
+import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, argumentHint, commandMatches, resolveCommand, suggestedCommands } from '../../src/slash/registry.ts';
 import { interpret, normalize, authorize, type LineCommand, type UiAction } from '../../src/slash/pipeline.ts';
 
 /** Front-end and application facts a test may vary; the defaults describe a live chat screen. */
@@ -11,10 +11,11 @@ interface Facts {
   screen?: 'workspaces' | 'sessions' | 'chat' | 'path';
   question?: boolean; pending?: boolean; sessionSelected?: boolean;
   during?: 'idle' | 'turn' | 'loop';
+  foreground?: boolean;
 }
 const chat: Required<Omit<Facts, 'screen'>> & { screen: 'workspaces' | 'sessions' | 'chat' | 'path' } = {
   referenceOpen: false, copyMode: false, screen: 'chat', question: false, pending: false, sessionSelected: true,
-  during: 'idle',
+  during: 'idle', foreground: false,
 };
 /** The three stages in order: a line's mode, or the command (or refusal) it becomes. */
 function stages(line: string, extra: Facts = {}) {
@@ -22,7 +23,8 @@ function stages(line: string, extra: Facts = {}) {
   const submission = interpret({ line, referenceOpen: facts.referenceOpen, copyMode: facts.copyMode, screen: facts.screen });
   if (submission.kind === 'mode') return { submission };
   const command = normalize(submission, { sessionSelected: facts.sessionSelected, question: facts.question, pending: facts.pending });
-  const verdict = authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending, during: facts.during });
+  const verdict = authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending,
+    during: facts.during, foreground: facts.foreground });
   return { submission, command, verdict };
 }
 /** The command a line executes, or the error a refused line produces. */
@@ -30,6 +32,11 @@ const route = (line: string, extra: Facts = {}): LineCommand => {
   const { verdict } = stages(line, extra);
   assert.ok(verdict !== undefined, line);
   return verdict.allow ? verdict.command : verdict.error;
+};
+/** Why an accepted line is held rather than running now, when it is. */
+const defer = (line: string, extra: Facts = {}) => {
+  const { verdict } = stages(line, extra);
+  return verdict?.allow === true ? verdict.defer : undefined;
 };
 /** The front-end action a line produces, when the front end handles it itself. */
 const ui = (line: string, extra: Facts = {}): UiAction | undefined => {
@@ -65,16 +72,21 @@ test('the pipeline owns the front-end modes while the parser owns the syntax', (
   assert.deepEqual(route('/latest', { sessionSelected: false }), { kind: 'latest' });
 });
 
-test('a running turn or loop refuses only the commands that would write to the same conversation', () => {
-  // A compact, a handoff and a second loop all submit work of their own to the session, so they wait.
-  assert.deepEqual(route('/compact', { during: 'turn' }), { kind: 'error', message: 'Wait for the running turn to finish' });
-  assert.deepEqual(route('/handoff', { during: 'turn' }), { kind: 'error', message: 'Wait for the running turn to finish' });
-  assert.deepEqual(route('/loop design-review 9', { during: 'turn' }), { kind: 'error', message: 'Wait for the running turn to finish' });
-  // During a loop the reason names the loop, because stopping it is what the operator has to do first.
-  assert.deepEqual(route('/compact', { during: 'loop' }), { kind: 'error', message: 'Stop the running loop first' });
-  assert.deepEqual(route('/loop design-review 9', { during: 'loop' }), { kind: 'error', message: 'Stop the running loop first' });
-  // Answering, cancelling, reading and view changes keep working while the agent works.
+test('a running turn or loop queues the operator\'s own writes and refuses the rest', () => {
+  // A compaction, a handoff and a review start are the operator saying "do this next": they are
+  // accepted and held until the turn (or the loop) ends, not refused.
   for (const during of ['turn', 'loop'] as const) {
+    assert.deepEqual(route('/compact', { during }), { kind: 'compact' });
+    assert.equal(defer('/compact', { during }), during);
+    assert.deepEqual(route('/handoff', { during }), { kind: 'handoff' });
+    assert.equal(defer('/handoff', { during }), during);
+    assert.deepEqual(route('/loop design-review 9', { during }), { kind: 'loop', name: 'design-review', options: { score: 9 } });
+    assert.equal(defer('/loop design-review 9', { during }), during);
+    // A record list is a surface for the draft being typed, so offering it later would be noise.
+    assert.deepEqual(route('/loop', { during }), { kind: 'error',
+      message: during === 'loop' ? 'Stop the running loop first' : 'Wait for the running turn to finish' });
+    // Answering, cancelling, reading and view changes keep working while the agent works.
+    assert.equal(defer('/cancel', { during }), undefined);
     assert.deepEqual(route('/cancel', { during }), { kind: 'cancel' });
     assert.deepEqual(route('/help', { during }), { kind: 'panel', panel: 'help' });
     assert.deepEqual(route('/allow', { during }), { kind: 'approval', allowed: true });
@@ -87,6 +99,29 @@ test('a running turn or loop refuses only the commands that would write to the s
   // A pending interaction is the more actionable reason, so it wins over the running turn.
   assert.deepEqual(route('/handoff', { pending: true, during: 'turn' }),
     { kind: 'error', message: 'Answer the pending question or approval first' });
+});
+
+test('the foreground slot is authorize\'s business, with a reason and one control exception', () => {
+  // A second line while something owns the slot is refused with a reason instead of being dropped in
+  // silence by whichever front end noticed first.
+  assert.deepEqual(route('/compact', { foreground: true }),
+    { kind: 'error', message: 'Wait for the running operation to finish' });
+  assert.deepEqual(route('/help', { foreground: true }),
+    { kind: 'error', message: 'Wait for the running operation to finish' });
+  assert.deepEqual(route('hello', { foreground: true }),
+    { kind: 'error', message: 'Wait for the running operation to finish' });
+  // The commands that answer the operator or the host are admitted through: they exist to interrupt
+  // or settle what owns the slot, and waiting for an export before stopping the agent would be absurd.
+  assert.deepEqual(route('/loop stop', { foreground: true }), { kind: 'loopStop' });
+  assert.deepEqual(route('/cancel', { foreground: true }), { kind: 'cancel' });
+  assert.deepEqual(route('/allow', { foreground: true }), { kind: 'approval', allowed: true });
+  // A line the policy queues behind a turn is decided by that fact: the slot being busy right now says
+  // nothing about whether it should run, and the held line waits for both.
+  assert.equal(defer('/compact', { during: 'turn', foreground: true }), 'turn');
+  // A fact the policy refuses is refused whoever else is busy; the message names what to stop.
+  assert.deepEqual(route('/loop', { during: 'loop', foreground: true }),
+    { kind: 'error', message: 'Stop the running loop first' });
+  assert.deepEqual(route('/loop stop', { during: 'loop', foreground: true }), { kind: 'loopStop' });
 });
 
 test('/coredump is advertised with its optional tag', () => {
@@ -124,9 +159,9 @@ test('routing constraints live on the command, so the router enumerates no kinds
   assert.deepEqual(COMMAND_POLICY.hostCommand, { requiresSession: true, requiresNoInteraction: true });
   // A turn or a loop in flight refuses only the commands that would write to the same conversation,
   // and the host keeps deciding for its own registered commands.
-  assert.deepEqual(COMMAND_POLICY.compact, { requiresSession: true, duringTurn: 'deny', duringLoop: 'deny' });
+  assert.deepEqual(COMMAND_POLICY.compact, { requiresSession: true, duringTurn: 'queue', duringLoop: 'queue' });
   assert.deepEqual(COMMAND_POLICY.models, { requiresSession: true });
-  assert.deepEqual(COMMAND_POLICY.cancel, { duringTurn: 'run', duringLoop: 'run' });
+  assert.deepEqual(COMMAND_POLICY.cancel, { duringTurn: 'run', duringLoop: 'run', whileBusy: 'run' });
   // A kind with no policy runs anywhere, even while an answer is pending.
   assert.equal(COMMAND_POLICY.savePrompt, undefined);
   assert.equal(COMMAND_POLICY.coredump, undefined);
@@ -137,7 +172,7 @@ test('/handoff takes no arguments and waits for a pending answer', () => {
   assert.deepEqual(parseCommand('/handoff now'), { kind: 'error', message: 'Use /handoff (no arguments)' });
   assert.deepEqual(parseCommand('/handoffx'), { kind: 'error', message: 'Unknown command. Use /help.' });
   assert.deepEqual(COMMAND_POLICY.handoff, { requiresSession: true, requiresNoInteraction: true,
-    duringTurn: 'deny', duringLoop: 'deny' });
+    duringTurn: 'queue', duringLoop: 'queue' });
   // It sends a turn, so it needs a conversation and a settled approval or question.
   assert.deepEqual(route('/handoff', { sessionSelected: false }), { kind: 'error', message: 'Select a session first' });
   assert.deepEqual(route('/handoff', { pending: true }), { kind: 'error', message: 'Answer the pending question or approval first' });
@@ -199,12 +234,14 @@ test('/loop takes a record name, an optional positional score and tries, and the
   assert.deepEqual(parseCommand('/loop stop'), { kind: 'loopStop' });
   assert.deepEqual(parseCommand('/loop stop 9'), { kind: 'error', message: 'Use /loop stop (no arguments)' });
   assert.deepEqual(parseCommand('/loop stop --to 3'), { kind: 'error', message: 'Use /loop stop (no arguments)' });
-  assert.deepEqual(COMMAND_POLICY.loopStop, { requiresSession: true, control: true, duringTurn: 'run', duringLoop: 'run' });
+  assert.deepEqual(COMMAND_POLICY.loopStop, { requiresSession: true, control: true,
+    whileBusy: 'run', duringTurn: 'run', duringLoop: 'run' });
   // The control lane is what lets `/loop stop` reach the application while the run owns the composer.
-  assert.equal(isControlCommand('loopStop'), true);
-  assert.equal(isControlCommand('loop'), false);
+  // The control lane is data on the command: `authorize` is what reads it (see the busy case below).
+  assert.equal(COMMAND_POLICY.loopStop?.control, true);
+  assert.equal(COMMAND_POLICY.loop?.control, undefined);
   assert.deepEqual(COMMAND_POLICY.loop, { requiresSession: true, requiresNoInteraction: true,
-    duringTurn: 'deny', duringLoop: 'deny' });
+    duringTurn: 'queue', duringLoop: 'queue' });
   // A costly run is typed in full.
   assert.deepEqual(parseCommand('/lo design-review'), { kind: 'error', message: 'Type the full command: /loop' });
   const hint = COMMAND_HINTS.find(item => item.command === '/loop');
@@ -234,6 +271,10 @@ test('the loop-name menu appears only while the draft is still one name', () => 
   assert.equal(loopNameQuery('/loop'), '');
   assert.equal(loopNameQuery('/loop '), '');
   assert.equal(loopNameQuery('/loop des'), 'des');
+  // The subcommands are not records, so the menu never filters by one.
+  assert.equal(loopNameQuery('/loop stop'), undefined);
+  assert.equal(loopNameQuery('/loop abort'), undefined);
+  assert.equal(loopNameQuery('/loop answer'), undefined);
   // A trailing space after a complete name still confirms it rather than hiding the menu.
   assert.equal(loopNameQuery('/loop design-review '), 'design-review');
   // A second word means the operator moved on to the flags.

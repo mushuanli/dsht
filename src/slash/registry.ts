@@ -35,7 +35,7 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/permission', usage: '[preset]', description: 'View or switch the host permission preset' },
   { command: '/feedback', usage: 'text', description: 'Record feedback about the session' },
   { command: '/handoff', description: 'Delete local HANDOFF.md, then have the agent write a handoff' },
-  { command: '/loop', usage: '[name|stop] [score] [tries]', description: 'Run a loop.yaml record; confirm its defaults; stop ends it', exactOnly: true },
+  { command: '/loop', usage: '[name|stop] [score] [tries]', description: 'Run a loop.yaml record; confirm defaults; stop/answer/abort', exactOnly: true },
   { command: '/export', usage: '[local.zip]', description: 'Save the session log ZIP to a new local file' },
   { command: '/export-html', usage: '[local.html]', description: 'Save loaded conversation with diagrams and math as offline HTML' },
   { command: '/coredump', usage: '[tag]', description: 'Write a V8 heap snapshot for memory diagnosis' },
@@ -85,11 +85,10 @@ export function resolveCommand(token: string): string | undefined {
 
 /** What may happen to a command while the selected conversation is busy.
  *
- * Phase one has no queue: a command either runs while a turn or a loop is in flight, or it is refused
- * with a reason. `'queue'` is deliberately absent — the host has no command queue, and a type the
- * system cannot honour would only produce silent drops (see §3.4).
+ * `'queue'` means the line is accepted and held until the fact clears; the front end fulfils it (it
+ * owns the port and the view), and a scripted caller waits for the same fact before running the line.
  */
-export type DuringExecution = 'run' | 'deny';
+export type DuringExecution = 'run' | 'queue' | 'deny';
 
 /** Where one parsed command may run, and what it must wait for.
  *
@@ -103,8 +102,10 @@ export interface CommandPolicy {
   requiresSession?: boolean;
   /** Refused while an approval or a question of that conversation is waiting. */
   requiresNoInteraction?: boolean;
-  /** Belongs to the control lane: admitted while another line owns the controller. */
+  /** Belongs to the control lane of the session write gate: it preempts waiting writes (§6.3.2). */
   control?: boolean;
+  /** While another operation owns the foreground slot, which is what the operator is watching. */
+  whileBusy?: DuringExecution;
   /** While a turn of the selected conversation runs. */
   duringTurn?: DuringExecution;
   /** While a client-driven loop runs, which is what the operator must deal with first. */
@@ -124,10 +125,24 @@ export interface CommandPolicy {
  * host owns the busy rules of its own commands (`/plan`, `/goal`, `/model`, …), and a client-side deny
  * there would contradict what the host would have accepted.
  */
+/** A command that writes to the conversation another turn is writing: it runs when that turn ends.
+ *
+ * These are the operator's own commands — a compaction, a handoff, a review to start — and refusing
+ * them outright would make "I want this next" impossible to express while an agent works.
+ */
+const QUEUES_WHILE_RUNNING: CommandPolicy = { duringTurn: 'queue', duringLoop: 'queue' };
+
+/** A command that must not run while another turn or loop owns the conversation at all. */
 const CONFLICTS_WITH_RUNNING: CommandPolicy = { duringTurn: 'deny', duringLoop: 'deny' };
 
-/** Commands that answer the operator or the host and must reach the session while it is busy. */
+/** Commands that answer the operator or the host and must reach the session while it is busy.
+ *
+ * `whileBusy: 'run'` is the foreground-slot equivalent: cancelling an agent turn or settling the
+ * interaction holding it is independent of whatever long operation the client is showing, and the
+ * operator must never be told to wait for an export before they can stop the agent.
+ */
 const ANSWERS_WHILE_RUNNING: CommandPolicy = { duringTurn: 'run', duringLoop: 'run' };
+const ANSWERS_WHILE_BUSY: CommandPolicy = { whileBusy: 'run' };
 
 export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPolicy>>> = {
   shell: { requiresSession: true },
@@ -141,31 +156,26 @@ export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPol
   panel: { ...ANSWERS_WHILE_RUNNING },
   copy: { ...ANSWERS_WHILE_RUNNING },
   // Cancelling the turn, or settling the interaction that is holding it, must never be refused.
-  cancel: { ...ANSWERS_WHILE_RUNNING },
-  approval: { ...ANSWERS_WHILE_RUNNING },
-  compact: { requiresSession: true, ...CONFLICTS_WITH_RUNNING },
-  handoff: { requiresSession: true, requiresNoInteraction: true, ...CONFLICTS_WITH_RUNNING },
-  loop: { requiresSession: true, requiresNoInteraction: true, ...CONFLICTS_WITH_RUNNING },
+  cancel: { ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
+  approval: { ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
+  compact: { requiresSession: true, ...QUEUES_WHILE_RUNNING },
+  handoff: { requiresSession: true, requiresNoInteraction: true, ...QUEUES_WHILE_RUNNING },
+  loop: { requiresSession: true, requiresNoInteraction: true, ...QUEUES_WHILE_RUNNING },
+  // A record list is a surface for the draft being typed; by the time a turn ends, the operator has
+  // moved on, so offering it later would be noise rather than help.
   loops: { requiresSession: true, requiresNoInteraction: true, ...CONFLICTS_WITH_RUNNING },
   // The host decides whether its own registered commands may run while a turn is in flight.
   hostCommand: { requiresSession: true, requiresNoInteraction: true },
   // Stopping is a control-lane action: it stays allowed while an approval waits, and while the very
   // line it is meant to interrupt still owns the controller, because that is exactly when it is needed.
-  loopStop: { requiresSession: true, control: true, ...ANSWERS_WHILE_RUNNING },
+  loopStop: { requiresSession: true, control: true, ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
+  // Answering a paused run and ending it must both work while the loop is what is running.
+  loopAnswer: { requiresSession: true, ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
   export: { requiresSession: true },
   exportHtml: { requiresSession: true },
 };
 
-/** Whether one line belongs to the control lane, so a front end may admit it ahead of a waiting line.
- *
- * The lane is admission policy, not an effect: this only says "do not make it queue behind the line
- * that already owns the controller". What the command then does is still `runCommand`'s business.
- * @param kind - Parsed command kind.
- * @returns True when the command may be dispatched while another line is in flight.
- */
-export function isControlCommand(kind: string): boolean {
-  return (COMMAND_POLICY as Readonly<Record<string, CommandPolicy | undefined>>)[kind]?.control === true;
-}
+
 
 /** Longest common prefix of the candidate commands, so Tab can extend an ambiguous draft.
  * @param values - Command candidates.

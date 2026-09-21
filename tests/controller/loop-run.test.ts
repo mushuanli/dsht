@@ -96,7 +96,7 @@ test('a loop prompt waits for the foreground slot instead of failing the run', a
   let finish!: (value: ObjectValue) => void;
   fixture.onCommand = () => new Promise(resolve => { finish = resolve; });
   const compact = controller.actions.command('/compact', new AbortController().signal);
-  await until(() => controller.state.operation.busy);
+  await until(() => controller.queries.foreground !== undefined);
   reply(fixture, 10, 'findings…\n' + block(1, 1, 8.5));
   await until(() => controller.queries.record.messages.some(message => message.text.includes('dsht-loop')));
   idle(fixture);

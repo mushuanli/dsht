@@ -43,11 +43,11 @@ test('the slot publishes what owns the client and clears itself when the work en
   assert.ok(snapshot.id > 0);
   assert.ok(snapshot.startedAt > 0);
   // The slot is the same fact the composer guard reads, so one claim makes the client busy.
-  assert.equal(app.state.operation.busy, true);
+  assert.equal(app.queries.foreground !== undefined, true);
   held.release();
   assert.equal(await claimed, 'done');
   await until(() => app.queries.foreground === undefined);
-  assert.equal(app.state.operation.busy, false);
+  assert.equal(app.queries.foreground !== undefined, false);
 });
 
 test('one operation at a time: a second claim is refused while the first runs', async t => {
@@ -60,6 +60,27 @@ test('one operation at a time: a second claim is refused while the first runs', 
   assert.equal(app.queries.foreground?.label, 'First');
   held.release();
   assert.equal(await first, 'first');
+});
+
+test('a caller that waits for the slot is served in arrival order, and never overtakes a promise', async t => {
+  const { app } = await controller(t);
+  const order: string[] = [];
+  const first = gate();
+  const running = app.actions.foreground('history', 'First', async () => { order.push('first'); await first.promise; });
+  await until(() => app.queries.foreground?.label === 'First');
+  // Two callers wait; a third arrives just as the first one finishes, so it must not overtake them.
+  const second = app.actions.foreground('history', 'Second', async () => { order.push('second'); }, true);
+  const third = app.actions.foreground('history', 'Third', async () => { order.push('third'); }, true);
+  first.release();
+  await Promise.all([running, second, third]);
+  assert.deepEqual(order, ['first', 'second', 'third']);
+  // A caller that does not ask to wait is still refused, which is what D1 wants for the operator's line.
+  const held = gate();
+  const blocking = app.actions.foreground('command', 'Blocking', async () => { await held.promise; });
+  await until(() => app.queries.foreground?.label === 'Blocking');
+  assert.equal(await app.actions.foreground('history', 'Impatient', async () => 'never'), undefined);
+  held.release();
+  await blocking;
 });
 
 test('cancelling aborts the running work and settles its claim as undefined', async t => {
@@ -85,7 +106,7 @@ test('work started by the operation that owns the slot is never refused for bein
   const nested = await app.actions.foreground('history', 'Loading history…', async () =>
     await app.actions.older(undefined, app.queries.record));
   assert.equal(nested, true);
-  assert.equal(app.state.operation.error, '');
+  assert.equal(app.state.lastFailure, '');
 });
 
 test('each operation is traced with its kind and whether it was cancelled', async t => {

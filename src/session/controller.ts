@@ -213,7 +213,7 @@ export class SessionController {
    * @param error - Already-normalized error text.
    */
   reportError(sessionId: string, error: string): void {
-    if (sessionId === this.store.state.sessionId) this.store.update({ status: 'Agent error', operation: { ...this.store.state.operation, error } });
+    if (sessionId === this.store.state.sessionId) this.store.update({ status: 'Agent error', lastFailure: error });
   }
 
   /** Stop the selected turn, or allow exit only while idle. Repeated keys share one request.
@@ -223,11 +223,13 @@ export class SessionController {
   interrupt(force = false): Promise<boolean> {
     if (this.interruptTask) return this.interruptTask;
     if (!force && !this.running && !this.admission && this.store.state.pending.length === 0) {
-      return Promise.resolve(!this.store.state.operation.busy);
+      // An idle press may exit only when no operation owns the client; the store's failure line is
+      // not that fact, so the application asks itself.
+      return Promise.resolve(!this.store.busy());
     }
     const sessionId = this.sessionId;
     this.stoppingSession = sessionId;
-    this.store.update({ status: 'Stopping…', operation: { ...this.store.state.operation, error: '' } });
+    this.store.update({ status: 'Stopping…', lastFailure: '' });
     const task = (async () => {
       try {
         // Admission must settle before cancellation can address the newly submitted turn.
@@ -237,7 +239,7 @@ export class SessionController {
         await this.admission?.catch(() => undefined);
         await this.mutations.admit(sessionId, 'control', () => this.host.require().call('session/cancel', { request: { sessionId } }));
         if (this.stoppingSession === sessionId && this.store.state.sessionId === sessionId) this.store.update({ status: 'Cancellation requested · waiting for host' });
-      } catch (error) { this.stoppingSession = undefined; this.store.update({ status: 'Cancellation failed', operation: { ...this.store.state.operation, error: errorText(error) } }); }
+      } catch (error) { this.stoppingSession = undefined; this.store.update({ status: 'Cancellation failed', lastFailure: errorText(error) }); }
       return false;
     })();
     this.interruptTask = task;
@@ -324,7 +326,7 @@ export class SessionController {
       status: target.kind === 'workspace' ? 'Workspace registration removed' : 'Session archived' });
     // A refresh failure must not make a successful mutation look like a rejected deletion.
     try { await this.showPicker(target.kind === 'workspace' ? 'workspaces' : 'sessions'); }
-    catch (error) { this.store.update({ operation: { ...this.store.state.operation, error: `Removal completed; list refresh failed: ${errorText(error)}` } }); }
+    catch (error) { this.store.update({ lastFailure: `Removal completed; list refresh failed: ${errorText(error)}` }); }
   }
 
   /** Pick a workspace, or use all sessions when the identity is omitted.
@@ -469,7 +471,7 @@ export class SessionController {
       end: error => {
         if (selection !== this.store.selection()) return;
         transcript.ready = false;
-        this.store.update({ status: 'Session disconnected', operation: { ...this.store.state.operation, error: errorText(error ?? 'Session stream ended') } });
+        this.store.update({ status: 'Session disconnected', lastFailure: errorText(error ?? 'Session stream ended') });
       },
     });
     this.backfillPrompts(sessionId, selection);

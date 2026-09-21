@@ -368,7 +368,7 @@ retry：followUp 附上验证者的原文意见（findingsLines）
 ## 7. 状态所有权与取消
 
 * loop 状态只存在于 client 内存（`Controller.loop`），host 不感知；进程退出即消失（沿用既有设计）。
-* 取消触发：输入文字、`/loop stop`、`/cancel`、Esc、Ctrl+C、**切换 session**；**重连不取消**（host 还在跑，重连后按 §1#3 重挂 session）。弃权恢复引入后，`/loop answer` 与 `/loop abort` 必须在「输入文字即取消」这条通用规则**之前**被识别，否则恢复命令会先把 loop 取消。
+* 取消触发：输入文字、`/loop stop`／`/loop abort`、`/cancel`、Esc、Ctrl+C、**切换 session**；**重连不取消**（host 还在跑，重连后按 §1#3 重挂 session）。弃权恢复引入后，`/loop answer` 与 `/loop abort` 必须在「输入文字即取消」这条通用规则**之前**被识别，否则恢复命令会先把 loop 取消。
 * 验证进程与该次尝试同生命周期：`stopLoop`/`forgetLoop` 会 abort 本地子进程组，避免孤儿进程继续烧 token。**远端取消是请求 + 有界确认**：`session/cancel` 最多等 `CANCEL_CONFIRM_MS`(1s)，本地回收不等待 host；reason 如实区分 `confirmed / rejected / unconfirmed`，host 不支持取消时写 `host cannot cancel`。创建期取消会取消刚建立的 session 并**不再 spawn**。
 * 子进程凭据：继承父进程环境（含 `DSH_TOKEN`），`--url` 用操作者原始写法，`--auth-dir` 显式透传；子进程额外带 `--no-memory-log`，避免污染父的 memory log。
 
@@ -513,7 +513,7 @@ fork 路径已在 tsx 启动方式（`npx tsx src/cli/index.ts`）下跑通过�
 
 **4) 回到流程**：
 
-- **交互模式（一期已实现的部分）**：进度行显示 `needs-human · <kind>: <text>`（`kind` 对 verdict 是 `verdict`，对 host 交互是 `question`／`approval`），本次 run 结束，操作者处理完外部阻塞后重跑。二期才有 `⏸ needs you · <code> · <needs>` 与 `/loop answer <text>`／`/loop abort`——它们必须在「输入文字即取消」这条通用规则**之前**被识别（§7）。届时语义：`/loop answer` **只补充判断条件并重新验证当前产出物**——生成**新的 `verificationId`**（G1），不进入工作阶段；若回答要求修改产出物，则进入工作阶段，但**修改本身不结算任何计数**——`tries` 是评审次数，消耗它的是修改之后的那次评审。`/loop abort`／Esc／`/cancel` → `cancelled`。
+- **交互模式（已实现）**：进度行显示 `needs you · /loop answer` 并附 `verdict: <text>`（host 交互则是 `question`／`approval`），状态栏显示 `⏸ … needs you`。判断者**弃权**时 run 进入**暂停**（`phase=needs-human` 且**没有** `terminalReason`、`active` 仍为 true）：`/loop answer <text>` **只补充判断条件并重新验证当前产出物**——生成**新的 `verificationId`**（G1）、不进入工作阶段、**不结算任何计数**（`tries` 是评审次数，消耗它的是修改之后的那次评审）；没有 forked verifier 时答案改为作为下一次尝试的指令发给 agent，同样不结算计数。`/loop abort`／Esc／`/cancel` → `cancelled`。验证子进程或 host 自己要求人工（子进程会话提问、发送被拒）仍是**终态** `needs-human`（带 `terminalReason`），因为本客户端无法代答那个 channel；外部条件处理完后重跑即可。
 - **headless 模式（一期已实现）**：不交互。verdict 声明的 `abstained` 结束时打印 `Loop needs-human · verdict: <reason>`；验证者被 host 交互卡住时 `waitForTurn` 打印 `dsht-verify-needs-human:{kind,text}` 行。两者都以**独立退出码 3** 结束（`0` = passed，`1` = failed），verdict 文件保留供审计（沿用决策 D）。**退出前处理仍在等待的远端 turn**：一期不支持跨进程恢复，`ProcessVerifier` 会取消该 verifier session 并报告清理结果（`confirmed / rejected / unconfirmed`），不会留下一个还在烧 token 的 generation。
 - **「用户没回答」不是故障**：交互模式下暂停等待是正常状态，不自动降级成 `unavailable`；只有实现了显式等待超时才允许转换，且必须在 UI 说明。
 - **预算只按 step 清零（二期）**：每个 step 最多 **一次**人工补充；恢复后再次 `needs-human` → 终态 `abstained`，保留 `reason`／`needs`，**不复用 `unavailable`、也不走自动重试**；计数只在 step 前进时清零。`cannot-fix` 不需要人：直接结束为 `blocked`，并带着 `reason` 显示在进度行与 headless 输出里；普通通过只是推进 step，不是结束 run。

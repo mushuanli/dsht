@@ -100,7 +100,7 @@ test('workspace and session commands switch across workspaces without creating o
   assert.equal(controller.state.workspaceId, 'w2');
   assert.equal(controller.state.sessionId, 's2');
   assert.equal(await controller.actions.switchSession('s'), false);
-  assert.match(controller.state.operation.error, /Ambiguous/);
+  assert.match(controller.state.lastFailure, /Ambiguous/);
   assert.equal(controller.state.sessionId, 's2');
   await controller.actions.switchWorkspace('/host/project');
   assert.equal(controller.state.sessionId, undefined);
@@ -141,7 +141,7 @@ test('interrupt cancels a running selected session, coalesces repeated keys, and
   fixture.onCancel = undefined;
   fixture.businessError = true;
   assert.equal(await controller.actions.interrupt(), false);
-  assert.match(controller.state.operation.error, /session\/agent-busy/);
+  assert.match(controller.state.lastFailure, /session\/agent-busy/);
   fixture.businessError = false;
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', false] });
   await until(() => !controller.queries.running);
@@ -223,7 +223,7 @@ test('a claimed queue item cannot be removed or resubmitted by a stale action', 
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' }); t.after(() => controller.stop());
   controller.start(); await until(() => controller.queries.record.ready);
   assert.equal(await controller.actions.removeQueued('already-claimed'), false);
-  assert.match(controller.state.operation.error, /session\/queue-item-not-found/);
+  assert.match(controller.state.lastFailure, /session\/queue-item-not-found/);
   assert.equal(fixture.calls.filter(call => call.method === 'session/updateQueue').length, 1);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
 });

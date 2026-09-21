@@ -22,8 +22,8 @@ import { CopyMode } from './copy-mode.ts';
 import type { Choice } from './dialogs/picker.tsx';
 import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
 import { LoopDialog, LoopMenu, type LoopRun } from './dialogs/loop.tsx';
-import { COMMAND_HINTS, argumentHint, completeCommand as completeDraft, isControlCommand, suggestedCommands } from '../slash/registry.ts';
-import { interpret, normalize, authorize, type LineCommand } from '../slash/index.ts';
+import { COMMAND_HINTS, argumentHint, completeCommand as completeDraft, suggestedCommands } from '../slash/registry.ts';
+import { interpret, normalize, authorize, type DeferReason, type LineCommand, type Verdict } from '../slash/index.ts';
 import { loopNameQuery } from '../slash/parse.ts';
 import { Controller, type HistorySearch, type RemovalTarget } from '../controller/controller.ts';
 import { removalIntent, runCommand, type CommandPort } from '../controller/commands.ts';
@@ -59,6 +59,9 @@ interface ComposerIntent {
  * `open` decides the gates; `name` lets a command's intent close it. Adding a surface is one row
  * here plus its own render.
  */
+/** One line waiting for the fact that deferred it, with the session it was typed in. */
+interface QueuedLine { command: LineCommand; defer: DeferReason; sessionId: string | undefined }
+
 interface Surface {
   /** Panel identity a `ViewEffect` may name. */
   name: PanelName;
@@ -115,6 +118,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const historyWindow = state.session.window;
   /** The operation the controller owns right now; the front end only renders it. */
   const foreground = controller.queries.foreground;
+  /** Lines the policy accepted but held until a turn, a loop or the foreground slot clears (A2). */
+  const [queuedLines, setQueuedLines] = useState<QueuedLine[]>([]);
   const displayTranscript = historyWindow ?? state.session.record;
   const displayRef = useRef(displayTranscript); displayRef.current = displayTranscript;
   const conversationBox = useRef<DOMElement>(null);
@@ -201,7 +206,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   useEffect(() => { if (pending) setLoopForm(undefined); }, [pending?.eventId]);
   // A replayed interaction (same eventId after a reconnect) starts unselected again.
   useEffect(() => { controller.actions.setApproval(undefined); }, [state.sessionId, state.online, pending?.eventId]);
-  const token = state.screen === 'chat' && state.online && !state.operation.busy && !pending
+  const token = state.screen === 'chat' && state.online && !foreground !== undefined && !pending
     && !input.startsWith('/') && dismissedReference !== input && cursor === input.length
     ? activeReference(input) : undefined;
   const referenceOpen = token !== undefined;
@@ -209,7 +214,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // name can be chosen, and every row carries the defaults the form would open with. Once a second
   // word (a flag or value) is typed the operator has decided, so the menu steps aside. The candidates
   // survive a dismissal, because Esc only hides the list — it does not withdraw the choice.
-  const loopDraft = state.screen === 'chat' && state.online && !state.operation.busy && !pending
+  const loopDraft = state.screen === 'chat' && state.online && !foreground !== undefined && !pending
     && !copyMode && !referenceOpen ? loopNameQuery(input) : undefined;
   const loopCandidates = loopDraft === undefined ? []
     : controller.queries.loopRecords.filter(record => record.name.startsWith(loopDraft));
@@ -325,11 +330,14 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       // Start is a second submission (§3.4): the form may have been open while a turn started or a
       // question arrived, so the line is authorized again here rather than trusting the earlier one.
       const verdict = verdictFor({ kind: 'loop', name, options: { ...run.limits, vars: run.vars } });
+      // A turn that started while the form was open holds the run: the values are confirmed, so the
+      // line is queued and the form closes, exactly like a refusal keeps it open.
+      if (holdIfDeferred(verdict, `/loop ${name}`)) { setLoopForm(undefined); return; }
       const result = await runCommand(controller, verdict.allow ? verdict.command : verdict.error, port);
       // A rejected result carries its own error and keeps the form open; only a missing one would leave
       // Start looking ignored, so it says the same thing here.
       if (result === undefined) {
-        setNotice(`Loop did not start: ${controller.state.operation.error || 'the host did not accept the request'}`);
+        setNotice(`Loop did not start: ${controller.state.lastFailure || 'the host did not accept the request'}`);
         return;
       }
       await applyResult(result);
@@ -368,7 +376,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         // button does. The free-text row keeps its own step back: its first Esc returns to the options,
         // and only the next one dismisses. Approval keeps every choice explicit.
         if (pending?.kind === 'question' && !choiceState.custom) {
-          if (controller.state.online && !controller.state.operation.busy && controller.state.pending[0]?.eventId === eventId) {
+          if (controller.state.online && !controller.queries.foreground !== undefined && controller.state.pending[0]?.eventId === eventId) {
             controller.actions.setOption(undefined);
             const rest = { ...controller.queries.interaction.answers }; delete rest[eventId]; controller.actions.setAnswers(rest);
             operate(() => controller.actions.dismissQuestion());
@@ -423,7 +431,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       void controller.actions.interrupt().then(shouldExit => { if (shouldExit) exit(); });
       return;
     }
-    if (approvalKeysActive && !input && controller.state.online && !controller.state.operation.busy
+    if (approvalKeysActive && !input && controller.state.online && !controller.queries.foreground !== undefined
       && controller.state.pending[0]?.eventId === eventId && !key.ctrl && !key.meta) {
       const digit = /^[1-3]$/.test(_value) ? Number(_value) - 1 : -1;
       if (digit >= 0 || key.upArrow || key.downArrow) {
@@ -438,7 +446,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         return;
       }
     }
-    if (questionKeysActive && !input && !controller.state.operation.busy && !key.ctrl && !key.meta) {
+    if (questionKeysActive && !input && !controller.queries.foreground !== undefined && !key.ctrl && !key.meta) {
       const digit = /^[1-9]$/.test(_value) ? Number(_value) - 1 : -1;
       if (key.upArrow || key.downArrow) {
         controller.actions.setOption({ ...choiceState, cursor: Math.max(0, Math.min(options.length, optionCursor + (key.upArrow ? -1 : 1))) }); return;
@@ -485,7 +493,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
     const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
     const recallNext = key.downArrow || key.ctrl && _value === 'n';
-    if ((recallPrevious || recallNext) && state.online && !controller.state.operation.busy && !pending
+    if ((recallPrevious || recallNext) && state.online && !controller.queries.foreground !== undefined && !pending
       && !queueOpen && (!recallBlocked || key.ctrl)
       && (state.screen === 'chat' || input !== '' || key.ctrl)) {
       // The oldest seeded entry is where the session happened to open, not where it began: stepping
@@ -509,16 +517,40 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     return {
       sessionSelected: state.sessionId !== undefined,
       pending: pending !== undefined,
+      foreground: foreground !== undefined,
       // A loop is reported as such because stopping it is what the refusal has to name.
       during: controller.queries.loop?.active === true ? 'loop' as const
         : controller.queries.running ? 'turn' as const : 'idle' as const,
     };
   }
 
+  /** What a held line is waiting for, in the words the notice uses. */
+  function describeDefer(defer: DeferReason): string {
+    return defer === 'busy' ? 'the running operation finishes' : defer === 'loop' ? 'the loop ends' : 'the turn finishes';
+  }
+
+  /** Hold one accepted-but-deferred line, and say whether it was deferred.
+   *
+   * A deferred line is the operator's committed submission, not a draft, so the caller is free to use
+   * up its draft; the queue runs it when the fact it named clears.
+   * @param verdict - What `authorize` said about the line.
+   * @param label - Text the notice shows.
+   * @returns True when the line was queued instead of running now.
+   */
+  function holdIfDeferred(verdict: Verdict, label: string): boolean {
+    if (!verdict.allow || verdict.defer === undefined) return false;
+    const defer = verdict.defer;
+    controller.traceNote('command', { phase: 'queued', kind: verdict.command.kind, reason: defer });
+    setQueuedLines(list => [...list, { command: verdict.command, defer, sessionId: state.sessionId }]);
+    setNotice(`Queued ${label} · runs when ${describeDefer(verdict.defer)}`);
+    return true;
+  }
+
   /** Authorize one already-normalized line against the facts as they are *now*. */
   function verdictFor(command: LineCommand) {
     const facts = applicationFacts();
-    return authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending, during: facts.during });
+    return authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending,
+      during: facts.during, foreground: facts.foreground });
   }
 
   const submit = async (raw: string) => {
@@ -546,31 +578,64 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
     const facts = applicationFacts();
     const command = normalize(submission, { sessionSelected: facts.sessionSelected, question: question !== undefined, pending: facts.pending });
+    // One line completes before the next may start: `authorize` refuses a second submission while the
+    // foreground slot is taken, with a reason the operator can read, and admits a control command
+    // through (its whole purpose is to interrupt whatever owns the slot).
     const verdict = verdictFor(command);
+    // A line the policy holds runs when the fact it named clears (A2). It is accepted here — the
+    // operator pressed Enter, so the draft is used up — and the queue below runs it later; a line that
+    // was *refused* keeps the draft and is never sent on the operator's behalf (D1).
+    if (holdIfDeferred(verdict, line.trim())) { setInput(''); return; }
     const executable = verdict.allow ? verdict.command : verdict.error;
-    // One line completes before the next may start: while a line still owns the controller (its busy
-    // envelope) or a UI-orchestrated request is running, the composer refuses a second submission —
-    // a slash command and an ordinary prompt alike. The focus gate already enforces this; the guard
-    // keeps the rule true if a caller ever submits without passing through the editor. A control
-    // command is the exception: its whole purpose is to interrupt the line that owns the controller,
-    // so it is admitted through while everything else waits (§6.3.2 control lane).
-    if (state.operation.busy && !isControlCommand(executable.kind)) return;
     const value = line.trim();
     if (!pending && !/^\/feedback(?:\s|$)/.test(value)) controller.actions.recordRecall(value);
+    await runLine(executable, raw);
+  };
+
+  /** Run one authorized line under the UI's port and apply what it returns.
+   *
+   * `draft` is the composer text to clear when the line is consumed; a line the UI runs from its own
+   * queue passes none, because that draft was used up when the operator submitted it.
+   */
+  async function runLine(executable: LineCommand, draft?: string): Promise<void> {
     // The application decides what the command does and returns the effects; the UI applies them in
     // order. The port says a surface can be shown, which is what lets `/loop <name>` confirm defaults.
     const port: CommandPort = { interactive: true, run: (label, operation) => controller.actions.foreground('command', label, operation) };
     try {
       const result = await runCommand(controller, executable, port);
-      if (result !== undefined) {
-        await applyResult(result);
-        // Consuming the line is the application's decision, so the composer never guesses it. Only the
-        // line that was submitted is cleared: the operation may have taken long enough for the operator
-        // to write the next one (D1), and that draft is theirs, not this result's to discard.
-        if (result.disposition === 'consume' && inputRef.current === raw) setInput('');
-      }
+      if (result === undefined) return;
+      await applyResult(result);
+      // Consuming the line is the application's decision, so the composer never guesses it. Only the
+      // line that was submitted is cleared: the operation may have taken long enough for the operator
+      // to write the next one (D1), and that draft is theirs, not this result's to discard.
+      if (result.disposition === 'consume' && draft !== undefined && inputRef.current === draft) setInput('');
     } catch (error) { setNotice(errorText(error)); }
-  };
+  }
+
+  /** Drain one held line when the fact that deferred it has cleared.
+   *
+   * One per run, in arrival order: the state update re-runs this effect, so the queue empties without
+   * a loop of its own. A line whose session is gone is dropped rather than run against another
+   * conversation, and one that is deferred again goes back to the front.
+   */
+  useEffect(() => {
+    const next = queuedLines[0];
+    if (next === undefined) return;
+    const facts = applicationFacts();
+    const ready = !facts.foreground && (next.defer === 'busy' || facts.during === 'idle');
+    if (!ready) return;
+    if (next.sessionId !== state.sessionId) {
+      setQueuedLines(list => list.slice(1));
+      setNotice('Dropped a queued line: the selected session changed');
+      return;
+    }
+    const verdict = verdictFor(next.command);
+    if (verdict.allow && verdict.defer !== undefined) return;
+    setQueuedLines(list => list.slice(1));
+    void runLine(verdict.allow ? verdict.command : verdict.error);
+    // The facts that decide readiness are the dependencies; `queuedLines` re-runs the drain per line.
+  }, [queuedLines, foreground !== undefined, state.pending, state.sessionId,
+    controller.queries.loop?.active, controller.queries.running]);
 
   /** Apply one command result: its effects in the order the application emitted them.
    *
@@ -737,7 +802,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     const intent = ++scrollIntent.current;
     const next = Math.max(0, Math.min(maxScroll, scroll + delta));
     setScroll(next);
-    if (delta <= 0 || next < maxScroll || loadingPage.current || state.operation.busy || !state.online || !displayTranscript.ready || !displayTranscript.hasMore) return;
+    if (delta <= 0 || next < maxScroll || loadingPage.current || foreground !== undefined || !state.online || !displayTranscript.ready || !displayTranscript.hasMore) return;
     loadingPage.current = true;
     const transcript = displayTranscript;
     void historyOperation(signal => controller.actions.older(signal, transcript)).then(accepted => {
@@ -902,7 +967,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden">
     {foreground && <Text dimColor>{foreground.label} · Esc / Ctrl+C cancel</Text>}
     <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
-    {state.operation.error && <Text color={theme.colors.error}>{state.operation.error}</Text>}
+    {state.lastFailure && <Text color={theme.colors.error}>{state.lastFailure}</Text>}
       {state.screen === 'chat' && <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
         historyWindow={!!historyWindow} frozen={displayPaused}
         identity={`${width}:${state.sessionId}:${position}:${pageSize}`} boxRef={conversationBox} />}
@@ -914,25 +979,25 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
     {loopForm && loopRecord ? <LoopDialog key={loopForm.name} record={loopRecord}
-      enabled={state.online && !controller.state.operation.busy}
+      enabled={state.online && !controller.queries.foreground !== undefined}
       onStart={run => startLoopFromForm(loopForm.name, run)}
       onBack={() => { setLoopForm(undefined); setInput('/loop '); setDismissedLoopMenu(undefined); }}
       onClose={() => setLoopForm(undefined)} /> : queueOpen && !pending ? <QueueDialog queued={queued} rows={stdout.rows ?? 30} width={width}
       unavailable={!!state.controlError}
-      enabled={!input && !state.operation.busy && state.online}
-      canSelect={() => !input && !controller.state.operation.busy && controller.state.online && !controller.state.pending.length}
+      enabled={!input && !foreground !== undefined && state.online}
+      canSelect={() => !input && !controller.queries.foreground !== undefined && controller.state.online && !controller.state.pending.length}
       onRemove={id => operate(() => controller.actions.removeQueued(id))} /> : removal ? <RemovalDialog removal={removal}
-      enabled={!input && !state.operation.busy && state.online}
-      canSelect={() => !input && !controller.state.operation.busy && controller.state.online}
+      enabled={!input && !foreground !== undefined && state.online}
+      canSelect={() => !input && !controller.queries.foreground !== undefined && controller.state.online}
       onCancel={() => setRemoval(undefined)}
       onConfirm={() => operate(async () => { if (await controller.actions.removeTarget(removal)) setRemoval(undefined); })} /> : models ? <ModelDialog models={models} rows={stdout.rows ?? 30} width={width}
-      enabled={!input && !state.operation.busy && state.online}
-      canSelect={() => !input && !controller.state.operation.busy && controller.state.online}
+      enabled={!input && !foreground !== undefined && state.online}
+      canSelect={() => !input && !controller.queries.foreground !== undefined && controller.state.online}
       onChoose={(provider, model, effort) => operate(async () => { if (await controller.actions.selectModel(provider, model, effort)) setModelPanel(undefined); })}
       onOpen={(provider, model) => setModelPanel({ catalog: models.catalog, provider, model })}
       onBack={() => setModelPanel({ catalog: models.catalog })}
       onClose={() => setModelPanel(undefined)} /> : searchResults ? <SearchResultsDialog query={searchResults.query} items={searchResults.items} hasMore={searchResults.hasMore} width={width}
-      enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy}
+      enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined}
       onOpen={sessionId => operate(() => openSearchSession(sessionId, searchResults.query))}
       onClose={() => setSearchPanel(undefined)} /> : state.screen === 'workspaces' || state.screen === 'sessions' ? <PickerScreen
       title={state.screen === 'workspaces' ? 'Choose workspace' : state.showAllSessions ? 'Choose session · All workspaces' : 'Choose session'}
@@ -940,13 +1005,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       // A rollup of badges is read through the key beside it; spelled-out states need no key, and a
       // terminal too narrow for the whole key gets the badges alone rather than half a legend.
       legend={state.screen === 'workspaces' && rollupStyle === 'badges' && pickerWidth >= 40 ? ROLLUP_LEGEND : undefined}
-      enabled={state.online && !state.operation.busy && !input}
-      canSelect={() => !input && controller.state.online && !controller.state.operation.busy} /> : <>
+      enabled={state.online && !foreground !== undefined && !input}
+      canSelect={() => !input && controller.state.online && !controller.queries.foreground !== undefined} /> : <>
       {thoughtList && <ThoughtsDialog identity={`thoughts:${state.sessionId}`} options={thoughtOptions} empty={!thoughtEntries?.length && !liveThought}
-        rows={stdout.rows ?? 30} enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy} />}
+        rows={stdout.rows ?? 30} enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined} />}
       {promptsOpen && state.screen === 'chat' && <PromptsDialog identity="prompts"
         prompts={controller.queries.prompts} error={controller.queries.promptsError} width={width}
-        enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy}
+        enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined}
         onChoose={text => { setInput(text); openPrompts(false); }}
         onEdit={prompt => {
           setComposerIntent({
@@ -963,7 +1028,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         onRemove={id => operate(async () => { if (await controller.actions.deletePrompt(id)) setNotice('Deleted saved prompt'); })} />}
       {state.screen === 'chat' && historyQuery !== undefined && <HistoryDialog identity={`history:${historyQuery}`}
         contentSearch={contentSearch} matches={historyMatches} query={historyQuery} messages={layout.messages} width={width}
-        enabled={!input && !state.operation.busy} canSelect={() => !input && !controller.state.operation.busy}
+        enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined}
         onJump={seq => operate(() => jumpHistory(seq))}
         onClose={() => setHistoryPanel(undefined)} />}
       {pending && <Box flexShrink={0} flexDirection="column">
