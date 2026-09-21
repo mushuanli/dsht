@@ -872,14 +872,17 @@ composer 换了收件人），所以"看一眼"和"接管"分不开。
 小面板既看不清也不是"读别人输出"的形态。所以它是唯一**替换正文区**的面：打开时 composer 让位，
 `Esc` 是唯一回路（Esc 表第 4 条，早于 pending/面板规则）。键盘入口 `Ctrl+O` 打开"最新的一个源"。
 
-**行级点击（B）**：transcript 里的"本地块"（§7.5 的 `ShellBlock`，`kind: 'shell' | 'note'`）的第一行
-就是它的**标题栏**，也就是点击目标；块下面的输出行不是身份，点它仍进入复制模式。`ShellBlock.source`
-带上这条栏要打开的源：`!` 运行指向自己的 `shell:<id>`，`note` 指向它宣布的那个会话（`link()` 在
-verifier 会话创建时重指，因此一条 `/loop` 栏总是指向**当前**那一次验证）。`mergeShellRuns()` 把每个
-栏所在的合并行号映射到源 id（`sources`），前端再用几何换算把屏幕行换成合并行号：从屏幕顶部数——
-复制模式横幅（0/1 行）+ 实测的 header 高 + 实测的正文前缀（foreground/连接提示/lastFailure）+ viewport
-上边距；正文行是**顶对齐**的，所以某行屏幕位置 = 该和 + 它在 `visible` 里的下标。这条几何是纯前端
-知识（§5.1）：应用只回答"这一行属于哪个源"。
+**行级点击（B）**：transcript 里的"本地块"（§7.5 的 `ShellBlock`，`kind: 'shell' | 'note'`）可点。
+`ShellBlock.source` 是这条块要打开的源：`!` 运行指向自己的 `shell:<id>`，`note` 指向它宣布的那个会话
+（`link()` 在 verifier 会话创建时重指，因此一条 `/loop` 栏总是指向**当前**那一次验证）。**哪些行可点
+由内容决定**：`!` 块只有标题栏可点（下面的输出是内容，点它仍进入复制模式），`note` 没有内容、整体
+是一个指针，所以**它每一行都可点**——它的第二行就是动作本身，写着 `view`。
+`mergeShellRuns()` 把这些行号映射到源 id（`sources`），前端再把屏幕行换算成**合并行号**：
+`transcriptTop`（复制模式横幅 0/1 + 实测 header 高 + 实测正文前缀（foreground/连接提示/lastFailure）
++ viewport 上边距，正文顶对齐）把它变成 `visible` 下标，再加上 `visibleStart` 才是合并行号。
+**【取舍】为什么必须过 `visibleStart`**：viewport 显示的是 `[visibleStart, end)` 这一段；只有当整份记录
+都在屏上时 `visibleStart` 才是 0，把屏幕下标直接当合并行号用——真实会话总是滚动的，那正是"点了没反应"
+的原因。这条几何是纯前端知识（§5.1）：应用只回答"这一行属于哪个源"。
 
 **为什么 `/loop` 要在 transcript 里留一条栏**：循环的进度条（composer 上方）只是状态，不是历史；
 把一次运行回显成块让"它起于哪、当时跑了什么参数"留在原地，也让"点这一行看它的验证会话"有一个
@@ -1106,8 +1109,9 @@ type LoopTerminalReason =
 | 跟随只读：`session/follow` 用正确地址形态（子会话两种都试）、不选中不写入、关闭即 cancel | `tests/controller/sources.test.ts`、`tests/ui/app.test.tsx` | §7.5 |
 | 本地源不需要流：`lines` 直接可读，打开它不发 host 请求 | `tests/controller/sources.test.ts` | §7.5 |
 | 整屏视图：`Ctrl+O` 打开最新源、箭头/PgUp/PgDn/滚轮滚动、`Esc` 关闭并交回 composer | `tests/ui/app.test.tsx` | §7.5/§5.4 |
-| 本地块渲染与源映射：`!` 栏指向自身、`note` 栏指向被 `link` 的会话、只有栏那一行是点击目标 | `tests/ui/shell-blocks.test.ts` | §7.5 |
-| 点击栏打开该源（含 `/loop` 栏打开 verifier 会话），点普通行仍进入复制模式 | `tests/ui/app.test.tsx` | §7.5 |
+| 本地块渲染与源映射：`!` 栏指向自身、`note` 指向被 `link` 的会话；`!` 只有标题栏可点、`note` 整块可点 | `tests/ui/shell-blocks.test.ts` | §7.5 |
+| 点击打开该源（含点 `/loop` 的 `view` 行打开 verifier 会话），点普通行仍进入复制模式 | `tests/ui/app.test.tsx` | §7.5 |
+| 记录滚动（`visibleStart > 0`）时点击仍命中正确的行，而不只是整份记录都在屏上时 | `tests/ui/app.test.tsx` | §7.5 |
 | SGR 左键解码：只有 `\x1b[<0;C;RM` 是点击，其余按键/释放/拖动都不是 | `tests/session/history.test.ts` | §7.5 |
 
 ---

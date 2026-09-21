@@ -2539,15 +2539,15 @@ test('the bar /loop leaves in the transcript opens the verification session', as
   await until(() => controller.queries.loop?.activity === 'verify');
 
   // The run echoed one bar where it started, and it points at the session doing the check.
-  await until(() => ui.lastFrame()?.includes('click this bar to read it') === true);
+  await until(() => /⎿\s+view/.test(ui.lastFrame() ?? '') === true);
   assert.equal(created, 's-new');
   const frame = ui.lastFrame()!;
   assert.match(frame, /\/loop designdoc-review 1–10 · pass 8 · ≤10 tries/);
-  assert.match(frame, /s-new · click this bar to read it/);
-  // The bar itself is the row the reader clicks; SGR rows are one-based.
-  const barRow = frame.split('\n').findIndex(line => line.includes('/loop designdoc-review'));
-  assert.ok(barRow >= 0, frame);
-  await pressKey(ui, `\u001b[<0;5;${barRow + 1}M`);
+  // The row that says `view` is the row the reader clicks: it used to be the one row that did
+  // nothing, which is what "I clicked where it said click" reports. SGR rows are one-based.
+  const viewRow = frame.split('\n').findIndex(line => /⎿\s+view\s*$/.test(line));
+  assert.ok(viewRow >= 0, frame);
+  await pressKey(ui, `\u001b[<0;5;${viewRow + 1}M`);
   await until(() => ui.lastFrame()?.includes('Esc closes') === true);
   const panel = ui.lastFrame()!;
   // The panel is the verifier's session, not the reviewed conversation.
@@ -2557,4 +2557,31 @@ test('the bar /loop leaves in the transcript opens the verification session', as
   assert.match(panel, /First conversation/);
   await pressKey(ui, '\u001b');
   await until(() => ui.lastFrame()?.includes('First conversation') === true);
+});
+
+test('a click lands on the right row when the transcript is scrolled, not just when it is short', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // Enough records that the viewport shows a slice rather than everything: the click geometry must
+  // hold where the first visible row is not the first row of the record.
+  for (let seq = 10; seq < 60; seq++) {
+    fixture.follow({ type: 'event', event: { seq, type: 'assistant/message', surfaceOp: 'append',
+      data: { message: { content: [{ type: 'text', text: `filler ${seq}` }] } } } });
+  }
+  await until(() => ui.lastFrame()?.includes('filler 59') === true);
+  controller.shell.start('echo scrolled-bar');
+  await until(() => controller.shell.runs[0]?.status === 'exited');
+  await until(() => ui.lastFrame()?.includes('! echo scrolled-bar') === true);
+  // The block is anchored after the newest record when it started, so it sits at the bottom here.
+  const frame = ui.lastFrame()!;
+  const barRow = frame.split('\n').findIndex(line => line.includes('! echo scrolled-bar'));
+  assert.ok(barRow >= 0, frame);
+  await pressKey(ui, `\u001b[<0;5;${barRow + 1}M`);
+  await until(() => ui.lastFrame()?.includes('Esc closes') === true);
+  assert.match(ui.lastFrame()!, /! echo scrolled-bar/);
+  assert.match(ui.lastFrame()!, /shell:1 · local process/);
 });

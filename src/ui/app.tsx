@@ -940,7 +940,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   }
   const trailingGap = dialogOpen && length > 0 && layout.viewport(length - 1, length)[0]?.text === '' ? 1 : 0;
   const end = Math.max(pageSize, totalRows - position - trailingGap);
-  const visible = useMemo(() => merged.viewport(Math.max(0, end - pageSize), end), [merged, end, pageSize]);
+  // The first merged row the viewport shows: a short record starts at 0, a scrolled one does not, and
+  // every screen line has to be translated back through this to find its row.
+  const visibleStart = Math.max(0, end - pageSize);
+  const visible = useMemo(() => merged.viewport(visibleStart, end), [merged, visibleStart, end]);
   // The read-only view's own window: `peekScroll` counts rows back from the newest, like the
   // conversation's scroll, so new output keeps arriving at the bottom unless the reader looked away.
   const peekTotal = peekLayout?.length ?? peekPlainRows.length;
@@ -963,7 +966,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     // A bar stands for one readable source, and only its own row is the bar: its output rows below
     // are content, and a press on them still starts a selection. Everything else is copy mode.
     if (dialogOpen) return;
-    const source = merged.sources.get(cell.row - 1 - transcriptTop);
+    const index = cell.row - 1 - transcriptTop;
+    if (index < 0 || index >= visible.length) { setCopyMode(true); return; }
+    // Screen line -> merged row: the viewport starts at `visibleStart`, so a short record's first row
+    // and a scrolled one's are both placed correctly. Reading the index directly only worked when the
+    // whole transcript fit on screen, which is exactly what a real session is not.
+    const source = merged.sources.get(visibleStart + index);
     if (source !== undefined) { controller.actions.openPeek(source); return; }
     setCopyMode(true);
   });

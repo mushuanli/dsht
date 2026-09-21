@@ -26,8 +26,12 @@ export interface RowSource {
   offsets: ReadonlyMap<number, number>;
 }
 
-/** One block's rows, the host row index they follow, and the source its bar opens. */
-interface Placement { at: number; rows: HistoryRow[]; source?: string }
+/** One block's rows, the host row index they follow, and the source its bar opens.
+ *
+ * `whole` marks a block with no content of its own (a note): it is nothing but a pointer, so every
+ * row opens the source, while a `!` block's output rows stay content that a click can select.
+ */
+interface Placement { at: number; rows: HistoryRow[]; source?: string; whole?: boolean }
 
 /** Rows for one run: the command bar, then its wrapped and indented output.
  * @param run - Block from the shell controller.
@@ -38,11 +42,12 @@ export function blockRows(run: ShellBlock, width: number): HistoryRow[] {
   const reserve = Math.max(stringWidth(MARKER), stringWidth(GUTTER));
   const rows: HistoryRow[] = [{ text: run.kind === 'note' ? run.command : `! ${run.command}`,
     kind: 'shell', bold: true, highlight: true }];
-  // A note produced nothing to show; its bar says whether there is a session to read yet, which is
-  // also the only hint that the bar is clickable.
+  // A note produced nothing to show, so its second row is the action itself. The label is the whole
+  // affordance — a sentence saying "click this bar" left the reader clicking a row that was not the
+  // bar — and every row of a note opens the source (see `mergeShellRuns`).
   if (run.kind === 'note') {
-    rows.push({ text: run.source === undefined ? `${GUTTER}no readable session yet` : `${GUTTER}${run.source} · click this bar to read it`,
-      kind: 'muted' });
+    rows.push({ text: run.source === undefined ? `${MARKER}no readable session yet` : `${MARKER}view`,
+      kind: 'shell', bold: true });
     return rows;
   }
   const body = [
@@ -100,7 +105,8 @@ export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], w
   let cursor = 0;
   for (const run of runs) {
     const at = Math.max(cursor, Math.min(layout.length, rowAfter(layout, run.anchor)));
-    placements.push({ at, rows: blockRows(run, width), ...(run.source === undefined ? {} : { source: run.source }) });
+    placements.push({ at, rows: blockRows(run, width), ...(run.source === undefined ? {} : { source: run.source }),
+      ...(run.kind === 'note' ? { whole: true } : {}) });
     cursor = at;
   }
   // Segments alternate host rows and block rows in merged index order.
@@ -111,8 +117,12 @@ export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], w
       segments.push({ from: merged, count: placement.at - host, host });
       merged += placement.at - host; host = placement.at;
     }
-    // Only the block's first row is the bar; the rows under it are its output, not its identity.
-    if (placement.source !== undefined) sources.set(merged, placement.source);
+    // Only a `!` block's first row is its bar; the rows under it are its output, not its identity.
+    // A note has no output, so all of its rows open what it points at.
+    if (placement.source !== undefined) {
+      const opening = placement.whole === true ? placement.rows.length : 1;
+      for (let offset = 0; offset < opening; offset += 1) sources.set(merged + offset, placement.source);
+    }
     segments.push({ from: merged, count: placement.rows.length, rows: placement.rows });
     merged += placement.rows.length;
   }
