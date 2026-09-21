@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ProcessVerifier } from '../../src/cli/verifier.ts';
+import { ProcessVerifier, childFault } from '../../src/cli/verifier.ts';
 import { verdictDirectory } from '../../src/controller/verifier.ts';
 import type { ShellRunOptions } from '../../src/shell/index.ts';
 
@@ -56,6 +56,16 @@ test('a verdict the child writes is read back and tied to its round', async t =>
   // The child is simulated by writing exactly what the prompt asks a verifier session to write.
   const outcome = await fixture.instance.verify({ ...fixture.request, file }, new AbortController().signal);
   assert.deepEqual(outcome, { type: 'unavailable', reason: 'verifier wrote no verdict (exit 0)', sessionId: 'session-verifier' });
+
+  // When the child explains itself on stderr, that explanation is the reason: the keyword classes only
+  // know auth/host/config, so this client's own sentences used to arrive as `stderrClass unknown`.
+  const explained = await verifier({ run: async (_file, _args, io) => {
+    io.onLine('No parsable verdict in the reply; leaving the verdict file untouched (reply tail: [{"verificationId":"<id>","kind":"k","step":1,"attempt":1,"score":8.4,"status":"done","evidence":"全部 \\d+\\.\\d+"}])', 'stderr');
+    return { code: 0, signal: null };
+  } });
+  t.after(() => explained.cleanup());
+  assert.deepEqual(await explained.instance.verify({ ...explained.request, file }, new AbortController().signal),
+    { type: 'unavailable', reason: 'verifier wrote no verdict (exit 0) · no JSON verdict in the reply', sessionId: 'session-verifier' });
 
   const writing = await verifier({ run: async () => {
     await writeFile(file, JSON.stringify({ verificationId: 'run-1/designdoc-review/2/1', kind: 'designdoc-review', step: 2, attempt: 1, score: 7.5, status: 'retry' }));
@@ -342,4 +352,19 @@ test('the output class names the failure an operator can act on', async t => {
     assert.equal(outcome.type === 'unavailable' ? outcome.reason : '', 
       `verifier wrote no verdict (exit 1) · stderrClass ${expected}`, line);
   }
+});
+
+test('a missing verdict names the fault the child reported, not a keyword class', () => {
+  // The child writes these two sentences itself when it cannot produce a file; the keyword classes
+  // only know auth/host/config, so both used to be reported as `stderrClass unknown`.
+  assert.equal(childFault('No parsable verdict in the reply; leaving the verdict file untouched (reply tail: …)'),
+    'no JSON verdict in the reply');
+  assert.equal(childFault('Turn ended but no reply was committed after the prompt; leaving the verdict file untouched'),
+    'no reply committed after the turn');
+  // Anything else the child writes still goes through the keyword classes.
+  assert.equal(childFault('Error: connect ECONNREFUSED 127.0.0.1:3080'), undefined);
+  assert.equal(childFault(''), undefined);
+  // The child's own words about the model reply never become the reported fault.
+  assert.equal(childFault('No parsable verdict in the reply (reply tail: project α secret)'),
+    'no JSON verdict in the reply');
 });

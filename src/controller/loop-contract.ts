@@ -126,6 +126,13 @@ export interface VerdictBrief extends VerificationBrief {
   previous?: PriorVerdict;
   /** Every earlier round's requirements, when this step has to re-check the whole record. */
   coverage?: readonly { title: string; checks: string }[];
+  /** The run's record variables, resolved: what this run is about, e.g. `path` for the reviewed file.
+   *
+   * The verifier cannot see the review conversation, so without these it can only guess the subject
+   * from the artifact — and an artifact left by an earlier run against another document then reads as
+   * this run's (a live run scored the previous document twice).
+   */
+  vars?: Readonly<Record<string, string>>;
 }
 
 /** What a retry must be told, so it answers the verdict instead of guessing.
@@ -154,12 +161,17 @@ export function findingsLines(result: LoopResult): string[] {
  * @returns The prompt as one string.
  */
 export function verdictBrief(brief: VerdictBrief): string {
-  const { verificationId: identity, kind, step, attempt, standard, artifact, focus, previous, coverage } = brief;
+  const { verificationId: identity, kind, step, attempt, standard, artifact, focus, previous, coverage, vars } = brief;
   return [
     `你是独立验证者：验证 kind=${kind} 的第 ${step} 轮第 ${attempt} 次尝试。`,
     '你没有本次评审的对话上下文，也不属于被验证的 session；你的判断只能来自磁盘上的产出物和你自己跑出来的证据。',
     '',
     ...(artifact === undefined ? [] : [`待验证产出物：${artifact}（在工作区中，自行阅读；不要修改它）。`]),
+    ...(vars === undefined || Object.keys(vars).length === 0 ? [] : [
+      `本次 run 的记录变量：${Object.entries(vars).map(([key, value]) => `${key}=${value}`).join('、')}`,
+      '产出物必须属于这次 run 所指的同一个对象（例如同一份被评审文档）。小节内容谈的是别的对象、'
+        + '或明显来自更早的 run 时，本轮按不满足处理。',
+    ]),
     ...(focus === undefined ? [] : [`本轮焦点：${focus}`]),
     ...(coverage === undefined || coverage.length === 0 ? [] : [
       '',
@@ -199,36 +211,101 @@ export function verdictBrief(brief: VerdictBrief): string {
   ].join('\n');
 }
 
+/** Undefined escape sequences made literal, so one backslash cannot discard a whole verdict.
+ *
+ * A model writing a regular expression or a Windows path inside a JSON string emits `\d` or `\C`
+ * without doubling the backslash, and `JSON.parse` then rejects the entire object — spending a review
+ * attempt on a formatting slip (a live run lost a valid `score 8.4 · done` verdict to `\d+\.\d+`
+ * sitting in `evidence`). Only escapes JSON does not define are rewritten, and the identity check
+ * below still decides which round a candidate belongs to, so this cannot admit another round's verdict.
+ * @param text - One candidate object's text.
+ * @returns The same object with undefined escapes doubled.
+ */
+export function repairJsonEscapes(text: string): string {
+  // Written with explicit characters because the whole job is counting backslashes: a `\\` in this
+  // file is one character, and the repair has to produce two.
+  const backslash = String.fromCharCode(92);
+  const defined = `"${backslash}/bfnrt`;
+  let out = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char !== backslash) { out += char; continue; }
+    const next = text[index + 1];
+    if (next === undefined) { out += backslash + backslash; continue; }
+    const valid = defined.includes(next)
+      || next === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(index + 2, index + 6));
+    out += valid ? char + next : backslash + backslash + next;
+    index += 1;
+  }
+  return out;
+}
+
 /** Every top-level JSON object in one reply, last one first.
  *
  * A review reply is prose with evidence in it, so the verdict is not the only braces in the text: a
  * quoted snippet before or after it used to be swallowed by a first-brace-to-last-brace slice and
  * made the whole verdict unparsable. Each balanced top-level object is a candidate instead.
- * Brace counting ignores nesting inside strings, which is enough for a verdict and its evidence.
+ * Braces inside strings are ignored: evidence quotes the record, which is full of `{{placeholders}}`,
+ * and counting those as nesting ended the candidate early, so a complete verdict read as unparsable.
  * @param text - Reply or file contents.
  * @returns Parsed objects, most recent first.
  */
 function jsonObjects(text: string): Record<string, unknown>[] {
-  const spans: string[] = [];
-  let depth = 0;
-  let start = -1;
+  const objects: Record<string, unknown>[] = [];
   for (let index = 0; index < text.length; index += 1) {
+    // A JSON object starts with `{"`, so prose quotes cannot desynchronize the scan and a brace
+    // inside a string (evidence quoting `{{placeholders}}`) cannot end the candidate early.
+    if (text[index] !== '{' || text[index + 1] !== '"') continue;
+    const candidateStart = index;
+    const end = objectEnd(text, candidateStart);
+    if (end === -1) continue;
+    index = end - 1;
+    const span = text.slice(candidateStart, end);
+    const parsed = parseObject(span);
+    if (parsed !== undefined) objects.push(parsed);
+  }
+  return objects.reverse();
+}
+
+/** Index just past the `}` that closes the object opened at `start`, or -1 when it never closes.
+ * @param text - Text to scan.
+ * @param start - Index of the opening `{`.
+ * @returns The exclusive end index, or -1.
+ */
+function objectEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
     const char = text[index];
-    if (char === '{') { if (depth === 0) start = index; depth += 1; } else if (char === '}') {
-      if (depth > 0) {
-        depth -= 1;
-        if (depth === 0 && start !== -1) { spans.push(text.slice(start, index + 1)); start = -1; }
-      }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === '{') depth += 1;
+    else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
     }
   }
-  const objects: Record<string, unknown>[] = [];
-  for (const span of spans.reverse()) {
+  return -1;
+}
+
+/** One candidate object, parsed as written and then with its undefined escapes repaired.
+ * @param span - Text from `{` to its matching `}`.
+ * @returns The object, or undefined when both readings fail.
+ */
+function parseObject(span: string): Record<string, unknown> | undefined {
+  for (const candidate of [span, repairJsonEscapes(span)]) {
     try {
-      const parsed = JSON.parse(span) as unknown;
-      if (typeof parsed === 'object' && parsed !== null) objects.push(parsed as Record<string, unknown>);
-    } catch { /* a quoted non-JSON brace group is not a candidate */ }
+      const parsed = JSON.parse(candidate) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) return parsed as Record<string, unknown>;
+    } catch { /* try the repaired reading, then give up on this candidate */ }
   }
-  return objects;
+  return undefined;
 }
 
 /** Read one forked verifier's verdict.

@@ -39,6 +39,25 @@ export function classifyVerifierOutput(text: string): VerifierStderrClass {
   return 'unknown';
 }
 
+/** The faults this client's own child reports on stderr, named so a missing verdict explains itself.
+ *
+ * These sentences are written by `runStartup` in this same program, so naming them leaks nothing and
+ * needs no model text: the alternative is the keyword class below, which reads our own diagnosis as
+ * `unknown`. Anything else the child writes still goes through that class.
+ */
+const CHILD_FAULTS: readonly { pattern: RegExp; note: string }[] = [
+  { pattern: /no parsable verdict in the reply/i, note: 'no JSON verdict in the reply' },
+  { pattern: /no reply was committed after the prompt/i, note: 'no reply committed after the turn' },
+];
+
+/** Name the fault the child reported about itself, when this client wrote that line.
+ * @param text - Everything the child wrote to stderr.
+ * @returns The fault as one clause, or undefined when nothing recognized is there.
+ */
+export function childFault(text: string): string | undefined {
+  return CHILD_FAULTS.find(fault => fault.pattern.test(text))?.note;
+}
+
 /** Everything a forked verification needs from the client that owns it. */
 export interface ProcessVerifierOptions {
   /** Program and arguments that start this client again: exec path, exec arguments, entry script. */
@@ -197,9 +216,13 @@ export class ProcessVerifier implements VerifierPort {
       };
       /** A missing or unusable verdict stated as facts, with the child's words only on request. */
       const reasonFor = (lead: string): string => {
-        // A child that said nothing on stderr has no class worth naming: "unknown" would be noise on
-        // the ordinary "exited without writing a file" case.
-        const base = stderrText === '' ? lead : `${lead} · stderrClass ${classifyVerifierOutput(stderrText)}`;
+        // What this client's own child said about the failure beats the keyword class: "no JSON in the
+        // reply" and "no reply committed" are different faults with different next steps, and both used
+        // to be reported as `stderrClass unknown`. A child that said nothing gets no class at all,
+        // because "unknown" would be noise on the ordinary "exited without writing a file" case.
+        const fault = childFault(stderrText);
+        const base = fault !== undefined ? `${lead} · ${fault}`
+          : stderrText === '' ? lead : `${lead} · stderrClass ${classifyVerifierOutput(stderrText)}`;
         return this.options.verbose === true && lastLine !== '' ? `${base} · ${sanitizeTraceText(lastLine)}` : base;
       };
       const exit = await run(program, args, {

@@ -1,7 +1,7 @@
 /** The forked verifier's contract: the prompt it receives and the verdict file it returns. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findingsLines, parseVerdict, resultContract, verdictBrief } from '../../src/controller/loop-contract.ts';
+import { findingsLines, parseVerdict, repairJsonEscapes, resultContract, verdictBrief } from '../../src/controller/loop-contract.ts';
 
 const identity = 'run-1/designdoc-review/2/1';
 const expect = { verificationId: identity, kind: 'designdoc-review', step: 2, attempt: 1 };
@@ -31,6 +31,25 @@ test('a verdict for another round, or an unusable one, is refused', () => {
   assert.deepEqual(parseVerdict(verdict({ status: 'passed' }), expect), { score: 4.5, evidence: 'ran the checks' });
 });
 
+test('a verdict survives the two ways a model breaks its own JSON', () => {
+  // Both shapes are from one live run whose verdict was discarded as unparsable, costing an attempt:
+  // a regular expression written as `\d+\.\d+` (undefined escape) and the record's own
+  // `{{placeholder}}` quoted inside `evidence` (braces inside a string).
+  const escaped = '{"verificationId":"run-1/designdoc-review/2/1","kind":"designdoc-review","step":2,"attempt":1,'
+    + '"score":8.4,"status":"done","evidence":"全部 \\d+\\.\\d+ 引用解析","top_findings":["x"]}';
+  assert.deepEqual(parseVerdict(escaped, expect), { score: 8.4, status: 'done', evidence: '全部 \\d+\\.\\d+ 引用解析', findings: ['x'] });
+  const placeholders = '{"verificationId":"run-1/designdoc-review/2/1","kind":"designdoc-review","step":2,"attempt":1,'
+    + '"score":9,"status":"done","evidence":"记录里的 {{step}}/{{title}} 与 {{artifact}} 都在位"}';
+  assert.deepEqual(parseVerdict(placeholders, expect), { score: 9, status: 'done', evidence: '记录里的 {{step}}/{{title}} 与 {{artifact}} 都在位' });
+  // Repairing escapes is not a licence to change meaning: a doubled backslash still means one.
+  assert.equal(JSON.parse(repairJsonEscapes('{"a":"\\\\d"}')).a, '\\d');
+  assert.equal(JSON.parse(repairJsonEscapes('{"a":"x\\ny"}')).a, 'x\ny');
+  assert.equal(JSON.parse(repairJsonEscapes('{"a":"\\u4f60"}')).a, '你');
+  // A quoted sample of the required shape is not the verdict: the identity still has to match.
+  assert.equal(parseVerdict('例如 {"verificationId":"<id>","kind":"k","step":1,"attempt":1}', expect), undefined);
+  assert.equal(parseVerdict('结论 "含引号" 的散文，然后是 ' + verdict({ score: 7 }), expect)?.score, 7);
+});
+
 test('the verifier prompt names the file as the only channel back, and the round it judges', () => {
   const prompt = verdictBrief({ verificationId: 'run-1/designdoc-review/2/1', kind: 'designdoc-review', step: 2, attempt: 1, file: '/w/.dsht/verdict.json',
     standard: '每条断言都要有出处', artifact: 'tui-design.md', focus: '结构与导航' });
@@ -43,6 +62,18 @@ test('the verifier prompt names the file as the only channel back, and the round
   assert.match(prompt, /"step":2,"attempt":1/);
   // The identity is embedded so the parent can reject a stale file.
   assert.match(prompt, /"kind":"designdoc-review"/);
+  // Without the run's variables the verifier can only infer the subject from the artifact, and an
+  // artifact from an earlier run against another document reads as this run's: a live run reviewed
+  // the previous document twice while the prompt never named either file.
+  assert.doesNotMatch(prompt, /path=/);
+  const withVars = verdictBrief({ verificationId: 'run-1/designdoc-review/1/1/1', kind: 'designdoc-review', step: 1, attempt: 1,
+    file: '/w/.dsht/verdict.json', artifact: 'DESIGN-DOC-REVIEW.md', vars: { path: 'loop.md' } });
+  assert.match(withVars, /本次 run 的记录变量：path=loop\.md/);
+  assert.match(withVars, /产出物必须属于这次 run 所指的同一个对象/);
+  // Several variables stay one readable line.
+  const two = verdictBrief({ verificationId: 'r/k/1/1/1', kind: 'k', step: 1, attempt: 1, file: '/f',
+    vars: { path: 'loop.md', scope: 'src' } });
+  assert.match(two, /path=loop\.md、scope=src/);
 });
 
 test('a forked round tells the agent it is not the scorer, and never promises self-scoring', () => {

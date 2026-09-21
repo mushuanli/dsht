@@ -9,6 +9,18 @@ test('the records of loop.yaml are the protocols /loop can run', () => {
   assert.equal(loopProtocolFor('nope'), undefined);
 });
 
+test('the verifier is told the run\'s variables, so it cannot judge another document', () => {
+  const limits = { from: 1, to: 10, score: 8, tries: 10 };
+  const target = { verificationId: 'r/designdoc-review/1/1/1', file: '/w/v.json' };
+  // The record's own default when the operator changed nothing…
+  const byDefault = loopProtocolFor('designdoc-review', true)!.verify!(limits, 1, 1, target);
+  assert.match(byDefault, /本次 run 的记录变量：path=tui-design\.md/);
+  // …and the form's value when they retargeted the run.
+  const retargeted = loopProtocolFor('designdoc-review', true, { path: 'loop.md' })!.verify!(limits, 1, 1, target);
+  assert.match(retargeted, /本次 run 的记录变量：path=loop\.md/);
+  assert.doesNotMatch(retargeted, /path=tui-design\.md/);
+});
+
 test('a record becomes a protocol without any per-record code', () => {
   const design = loopProtocolFor('design-review')!;
   assert.equal(design.kind, 'design-review');

@@ -95,8 +95,11 @@ export function loopProtocolFor(name: string, forked = false, vars?: Readonly<Re
         ...(consolidates(limits, step) ? { final: true } : {}),
       }, forked ? 'forked' : 'subagent'),
     ].join('\n'),
+    // The verifier's only input is this prompt and the artifact, so the run's own variables travel
+    // with it: without `path` it cannot tell which document this run reviews and can only follow the
+    // artifact left by an earlier run against a different one.
     ...(forked ? { verify: (limits: LoopLimits, step: number, attempt: number, target: VerifyTarget, previous?: PriorVerdict) => verdictBrief({
-      ...target, kind: name, step, attempt, previous, standard: standard(step),
+      ...target, kind: name, step, attempt, previous, standard: standard(step), vars: text.vars,
       ...(artifact === undefined ? {} : { artifact }),
       ...(text.focus(step) === undefined ? {} : { focus: text.focus(step) }),
       ...(consolidates(limits, step) ? { coverage: coverage(step) } : {}),
