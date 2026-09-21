@@ -212,6 +212,12 @@ test('the foreground slot has one owner, so the front end keeps no operation sta
   }
   assert.ok(source.includes('controller.queries.foreground'), 'the UI renders the controller\'s slot');
   assert.ok(source.includes('controller.actions.cancelForeground'), 'the UI cancels through the controller');
+  // The slot is compared, never negated into a constant: `!foreground !== undefined` is always true
+  // (a boolean is not undefined), so a whole-file rewrite once left nineteen guards that quietly
+  // stopped guarding anything — menus, keys and dialogs all stayed live while an operation owned the
+  // client. The comparison has to be written the way it reads.
+  assert.equal([...source.matchAll(/![\w.]*foreground !== undefined/g)].length, 0,
+    'the UI must compare the foreground slot, not negate it into an always-true condition');
   // D2: one fact for "something is running" and one internal line for the last failure. The old
   // `state.operation` envelope carried both and let them drift apart.
   assert.ok(!source.includes('operation.busy') && !source.includes('operation.error'),

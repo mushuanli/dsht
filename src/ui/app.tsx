@@ -49,6 +49,9 @@ type SurfaceName = PanelName | 'peek';
 /** Rows one PgUp/PgDn moves in the read-only view. */
 const PEEK_PAGE = 10;
 
+/** How long a Ctrl+C that could not exit stays armed to exit on the next press. */
+const FORCE_EXIT_MS = 5000;
+
 /** A command that borrows the composer to edit something: Enter commits, Esc abandons.
  *
  * The composition root stays generic — it renders the hint, calls `commit`, and clears the draft on
@@ -169,6 +172,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const helpPages = Math.ceil(COMMAND_HINTS.length / helpPageSize);
   const currentHelpPage = Math.min(helpPage, helpPages - 1);
   const [statusScroll, setStatusScroll] = useState(0);
+  /** When the last Ctrl+C that could not exit was armed, so the next one leaves regardless. */
+  const exitArmed = useRef(0);
   const [statusOverflow, setStatusOverflow] = useState(false);
   // The panel owns two border rows and a one-row footer, and the two header rows and the
   // three-row composer above it never shrink, so only the remainder of the screen height shows rows.
@@ -240,7 +245,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   useEffect(() => { if (pending) setLoopForm(undefined); }, [pending?.eventId]);
   // A replayed interaction (same eventId after a reconnect) starts unselected again.
   useEffect(() => { controller.actions.setApproval(undefined); }, [state.sessionId, state.online, pending?.eventId]);
-  const token = state.screen === 'chat' && state.online && !foreground !== undefined && !pending
+  const token = state.screen === 'chat' && state.online && foreground === undefined && !pending
     && !input.startsWith('/') && dismissedReference !== input && cursor === input.length
     ? activeReference(input) : undefined;
   const referenceOpen = token !== undefined;
@@ -248,7 +253,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // name can be chosen, and every row carries the defaults the form would open with. Once a second
   // word (a flag or value) is typed the operator has decided, so the menu steps aside. The candidates
   // survive a dismissal, because Esc only hides the list — it does not withdraw the choice.
-  const loopDraft = state.screen === 'chat' && state.online && !foreground !== undefined && !pending
+  const loopDraft = state.screen === 'chat' && state.online && foreground === undefined && !pending
     && !copyMode && !referenceOpen ? loopNameQuery(input) : undefined;
   const loopCandidates = loopDraft === undefined ? []
     : controller.queries.loopRecords.filter(record => record.name.startsWith(loopDraft));
@@ -415,7 +420,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         // button does. The free-text row keeps its own step back: its first Esc returns to the options,
         // and only the next one dismisses. Approval keeps every choice explicit.
         if (pending?.kind === 'question' && !choiceState.custom) {
-          if (controller.state.online && !controller.queries.foreground !== undefined && controller.state.pending[0]?.eventId === eventId) {
+          if (controller.state.online && controller.queries.foreground === undefined && controller.state.pending[0]?.eventId === eventId) {
             controller.actions.setOption(undefined);
             const rest = { ...controller.queries.interaction.answers }; delete rest[eventId]; controller.actions.setAnswers(rest);
             operate(() => controller.actions.dismissQuestion());
@@ -476,16 +481,31 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     // Ctrl+C is not Esc: it never dismisses a dialog, and when nothing is pending it stops the agent
     // and then exits. The branches below keep that order.
     if (key.ctrl && _value === 'c') {
-      if (controller.queries.foreground !== undefined) { controller.actions.cancelForeground(); return; }
-      if (controller.state.pending.length) { if (input) setInput(''); return; }
+      // Every branch below can fail to end the client: the host may never report the turn idle, an
+      // operation may ignore the abort, an interaction may be waiting. A press that could not exit
+      // arms the next one, so no state can trap the reader. Leaving still asks the host to stop the
+      // selected turn, because every exit path runs `Controller.shutdown`.
+      if (exitArmed.current !== 0 && Date.now() - exitArmed.current < FORCE_EXIT_MS) {
+        exitArmed.current = 0;
+        exit();
+        return;
+      }
+      exitArmed.current = 0;
+      /** Arm the escape after a press that asked for something and did not get to leave. */
+      const offerExit = () => {
+        exitArmed.current = Date.now();
+        setNotice('Press Ctrl+C again to exit without waiting for the host');
+      };
+      if (controller.queries.foreground !== undefined) { controller.actions.cancelForeground(); offerExit(); return; }
+      if (controller.state.pending.length) { if (input) setInput(''); offerExit(); return; }
       if (input === '' && state.shell.running) { controller.shell.cancel(); return; }
       // A draft clears first, exactly like a shell prompt; an empty draft still stops or exits.
       if (input !== '') { setInput(''); return; }
       if (composerIntent) { setComposerIntent(undefined); return; }
-      void controller.actions.interrupt().then(shouldExit => { if (shouldExit) exit(); });
+      void controller.actions.interrupt().then(shouldExit => { if (shouldExit) exit(); else offerExit(); });
       return;
     }
-    if (approvalKeysActive && !input && controller.state.online && !controller.queries.foreground !== undefined
+    if (approvalKeysActive && !input && controller.state.online && controller.queries.foreground === undefined
       && controller.state.pending[0]?.eventId === eventId && !key.ctrl && !key.meta) {
       const digit = /^[1-3]$/.test(_value) ? Number(_value) - 1 : -1;
       if (digit >= 0 || key.upArrow || key.downArrow) {
@@ -500,7 +520,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         return;
       }
     }
-    if (questionKeysActive && !input && !controller.queries.foreground !== undefined && !key.ctrl && !key.meta) {
+    if (questionKeysActive && !input && controller.queries.foreground === undefined && !key.ctrl && !key.meta) {
       const digit = /^[1-9]$/.test(_value) ? Number(_value) - 1 : -1;
       if (key.upArrow || key.downArrow) {
         controller.actions.setOption({ ...choiceState, cursor: Math.max(0, Math.min(options.length, optionCursor + (key.upArrow ? -1 : 1))) }); return;
@@ -547,7 +567,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     }
     const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
     const recallNext = key.downArrow || key.ctrl && _value === 'n';
-    if ((recallPrevious || recallNext) && state.online && !controller.queries.foreground !== undefined && !pending
+    if ((recallPrevious || recallNext) && state.online && controller.queries.foreground === undefined && !pending
       && !queueOpen && (!recallBlocked || key.ctrl)
       && (state.screen === 'chat' || input !== '' || key.ctrl)) {
       // The oldest seeded entry is where the session happened to open, not where it began: stepping
@@ -1084,25 +1104,25 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {peek === undefined && <Box borderStyle="round" borderColor={pending ? theme.colors.context : state.online ? theme.accent : theme.border} paddingX={1} flexDirection="column" flexShrink={1} minHeight={3}>
         <Box flexDirection="column" flexShrink={1} minHeight={0} overflowY="hidden">
     {loopForm && loopRecord ? <LoopDialog key={loopForm.name} record={loopRecord}
-      enabled={state.online && !controller.queries.foreground !== undefined}
+      enabled={state.online && controller.queries.foreground === undefined}
       onStart={run => startLoopFromForm(loopForm.name, run)}
       onBack={() => { setLoopForm(undefined); setInput('/loop '); setDismissedLoopMenu(undefined); }}
       onClose={() => setLoopForm(undefined)} /> : queueOpen && !pending ? <QueueDialog queued={queued} rows={stdout.rows ?? 30} width={width}
       unavailable={!!state.controlError}
-      enabled={!input && !foreground !== undefined && state.online}
-      canSelect={() => !input && !controller.queries.foreground !== undefined && controller.state.online && !controller.state.pending.length}
+      enabled={!input && foreground === undefined && state.online}
+      canSelect={() => !input && controller.queries.foreground === undefined && controller.state.online && !controller.state.pending.length}
       onRemove={id => operate(() => controller.actions.removeQueued(id))} /> : removal ? <RemovalDialog removal={removal}
-      enabled={!input && !foreground !== undefined && state.online}
-      canSelect={() => !input && !controller.queries.foreground !== undefined && controller.state.online}
+      enabled={!input && foreground === undefined && state.online}
+      canSelect={() => !input && controller.queries.foreground === undefined && controller.state.online}
       onCancel={() => setRemoval(undefined)}
       onConfirm={() => operate(async () => { if (await controller.actions.removeTarget(removal)) setRemoval(undefined); })} /> : models ? <ModelDialog models={models} rows={stdout.rows ?? 30} width={width}
-      enabled={!input && !foreground !== undefined && state.online}
-      canSelect={() => !input && !controller.queries.foreground !== undefined && controller.state.online}
+      enabled={!input && foreground === undefined && state.online}
+      canSelect={() => !input && controller.queries.foreground === undefined && controller.state.online}
       onChoose={(provider, model, effort) => operate(async () => { if (await controller.actions.selectModel(provider, model, effort)) setModelPanel(undefined); })}
       onOpen={(provider, model) => setModelPanel({ catalog: models.catalog, provider, model })}
       onBack={() => setModelPanel({ catalog: models.catalog })}
       onClose={() => setModelPanel(undefined)} /> : searchResults ? <SearchResultsDialog query={searchResults.query} items={searchResults.items} hasMore={searchResults.hasMore} width={width}
-      enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined}
+      enabled={!input && foreground === undefined} canSelect={() => !input && controller.queries.foreground === undefined}
       onOpen={sessionId => operate(() => openSearchSession(sessionId, searchResults.query))}
       onClose={() => setSearchPanel(undefined)} /> : state.screen === 'workspaces' || state.screen === 'sessions' ? <PickerScreen
       title={state.screen === 'workspaces' ? 'Choose workspace' : state.showAllSessions ? 'Choose session · All workspaces' : 'Choose session'}
@@ -1110,13 +1130,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       // A rollup of badges is read through the key beside it; spelled-out states need no key, and a
       // terminal too narrow for the whole key gets the badges alone rather than half a legend.
       legend={state.screen === 'workspaces' && rollupStyle === 'badges' && pickerWidth >= 40 ? ROLLUP_LEGEND : undefined}
-      enabled={state.online && !foreground !== undefined && !input}
-      canSelect={() => !input && controller.state.online && !controller.queries.foreground !== undefined} /> : <>
+      enabled={state.online && foreground === undefined && !input}
+      canSelect={() => !input && controller.state.online && controller.queries.foreground === undefined} /> : <>
       {thoughtList && <ThoughtsDialog identity={`thoughts:${state.sessionId}`} options={thoughtOptions} empty={!thoughtEntries?.length && !liveThought}
-        rows={stdout.rows ?? 30} enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined} />}
+        rows={stdout.rows ?? 30} enabled={!input && foreground === undefined} canSelect={() => !input && controller.queries.foreground === undefined} />}
       {promptsOpen && state.screen === 'chat' && <PromptsDialog identity="prompts"
         prompts={controller.queries.prompts} error={controller.queries.promptsError} width={width}
-        enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined}
+        enabled={!input && foreground === undefined} canSelect={() => !input && controller.queries.foreground === undefined}
         onChoose={text => { setInput(text); openPrompts(false); }}
         onEdit={prompt => {
           setComposerIntent({
@@ -1133,7 +1153,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         onRemove={id => operate(async () => { if (await controller.actions.deletePrompt(id)) setNotice('Deleted saved prompt'); })} />}
       {state.screen === 'chat' && historyQuery !== undefined && <HistoryDialog identity={`history:${historyQuery}`}
         contentSearch={contentSearch} matches={historyMatches} query={historyQuery} messages={layout.messages} width={width}
-        enabled={!input && !foreground !== undefined} canSelect={() => !input && !controller.queries.foreground !== undefined}
+        enabled={!input && foreground === undefined} canSelect={() => !input && controller.queries.foreground === undefined}
         onJump={seq => operate(() => jumpHistory(seq))}
         onClose={() => setHistoryPanel(undefined)} />}
       {pending && <Box flexShrink={0} flexDirection="column">

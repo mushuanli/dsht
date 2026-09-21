@@ -2585,3 +2585,28 @@ test('a click lands on the right row when the transcript is scrolled, not just w
   assert.match(ui.lastFrame()!, /! echo scrolled-bar/);
   assert.match(ui.lastFrame()!, /shell:1 · local process/);
 });
+
+test('a second Ctrl+C leaves even when the host never reports the turn idle', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  let exited = false;
+  function MountedApp() {
+    useEffect(() => () => { exited = true; }, []);
+    return <App controller={controller} />;
+  }
+  const ui = render(<MountedApp />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // The host reports a turn and never reports it idle again — the state that used to trap the client:
+  // Ctrl+C kept requesting a cancellation and no press could ever leave.
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.queries.running);
+  await pressKey(ui, '\u0003');
+  await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
+  assert.equal(exited, false, 'the first press asks the host to stop, it does not leave');
+  // The press that could not exit is armed, and says so.
+  await until(() => ui.lastFrame()?.includes('Press Ctrl+C again to exit') === true);
+  await pressKey(ui, '\u0003');
+  await until(() => exited);
+});
