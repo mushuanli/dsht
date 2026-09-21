@@ -10,6 +10,7 @@ import { render } from 'ink-testing-library';
 import { App } from '../../src/ui/app.tsx';
 import { COMMAND_HINTS, commonPrefix } from '../../src/slash/registry.ts';
 import { Controller } from '../../src/controller/controller.ts';
+import { loopProtocolFor } from '../../src/controller/loop-protocols.ts';
 import type { VerifierPort } from '../../src/controller/verifier.ts';
 import { CostLedger } from '../../src/cost/ledger.ts';
 import { array, object, type ObjectValue } from '../../src/transport/wire.ts';
@@ -2609,4 +2610,32 @@ test('a second Ctrl+C leaves even when the host never reports the turn idle', as
   await until(() => ui.lastFrame()?.includes('Press Ctrl+C again to exit') === true);
   await pressKey(ui, '\u0003');
   await until(() => exited);
+});
+
+test('a finished loop line stays readable until the next line runs, then goes', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // A verifier that never answers holds the run in its verification, so the line has a live phase to
+  // end from.
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const verifier: VerifierPort = { name: 'fake', verify: async () => { await gate; return { type: 'cancelled' }; } };
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { release?.(); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await controller.actions.startLoop(loopProtocolFor('design-review', true)!, { from: 1, to: 10, score: 8, tries: 10 });
+  await until(() => ui.lastFrame()?.includes('Design review') === true);
+
+  // The line that ends the run leaves the terminal result on screen — it is the answer to "how did it
+  // end" — because the clearing happens before that line's own effects.
+  await pressKey(ui, '/loop stop'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('· cancelled') === true);
+  await until(() => controller.queries.loop?.active === false);
+
+  // The next line the operator runs means they have read it.
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  await until(() => controller.queries.loop === undefined);
+  await until(() => ui.lastFrame()?.includes('· cancelled') === false);
+  assert.doesNotMatch(ui.lastFrame()!, /attempt \d+\/\d+ · best/);
 });

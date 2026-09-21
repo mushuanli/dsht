@@ -94,6 +94,11 @@ export async function removalIntent(controller: Controller, kind: 'workspace' | 
  * @returns The result, or undefined when the application did not accept the line.
  */
 export async function runCommand(controller: Controller, command: RunnableCommand, port: CommandPort): Promise<CommandResult | undefined> {
+  // A finished run's progress line is a result the reader may still be reading; running this line means
+  // they are done with it. A run that is still active is never dropped here, so `/loop answer` and
+  // `/loop stop` keep their target — and this runs before the line's own effects, so the line that
+  // ends a run still leaves its terminal progress on screen to be read.
+  controller.actions.clearLoopResult();
   // One span per executed line, with the id every other event of this line can name. The begin is
   // written before any effect, so a crash mid-command still shows that the executor was entered.
   const commandId = controller.nextCommandId();

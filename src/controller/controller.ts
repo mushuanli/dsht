@@ -132,6 +132,8 @@ export interface Actions {
   startLoop(protocol: LoopProtocol, limits: LoopLimits): Promise<boolean>;
   /** Stop a running loop; the terminal progress stays visible for the reader. */
   stopLoop(): void;
+  /** Drop a finished run's progress line; a run that is still active is left alone. */
+  clearLoopResult(): void;
   /** Answer a paused run: re-judge the current artifact with what the operator supplied. */
   answerLoop(text: string): Promise<boolean>;
   cancelTurn(): Promise<boolean>;
@@ -543,6 +545,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       handoff: () => this.runAction('handoff', 'Requesting handoff…', () => this.handoff()),
       startLoop: (protocol, limits) => this.runAction('loop', 'Starting loop…', () => this.startLoop(protocol, limits)),
       stopLoop: () => this.stopLoop(),
+      clearLoopResult: () => this.clearLoopResult(),
       answerLoop: text => this.runAction('loop', 'Answering the verifier…', () => this.answerLoop(text)),
       cancelTurn: () => this.runAction('interaction', 'Cancelling…', () => this.cancelTurn()),
       answer: value => this.runAction('interaction', 'Answering…', () => this.answer(value)),
@@ -1464,6 +1467,19 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.loop.cancel(reason);
     this.traceLoopEnd(this.loop);
     this.loopPrompt = undefined;
+    this.update({});
+  }
+
+  /** Drop a finished run's progress line, keeping an active one.
+   *
+   * D3 keeps a terminal result on screen because it is what the reader most needs to see — but it is a
+   * result, not a status: the next line the operator runs means they have read it. An active run is
+   * left alone, so `/loop answer` and `/loop stop` keep the target they were typed for.
+   */
+  private clearLoopResult(): void {
+    const loop = this.loop;
+    if (loop === undefined || loop.active) return;
+    this.forgetLoop();
     this.update({});
   }
 

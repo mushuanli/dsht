@@ -323,3 +323,21 @@ test('a refused line reports its reason once, not again in the action envelope',
   assert.match(String(failure?.kind === 'error' ? failure.text : ''), /Loop did not start: .*session\/agent-busy/);
   assert.equal(app.state.lastFailure, '');
 });
+
+test('the next line clears a finished run, and never an active one', async t => {
+  const { app } = await controller(t);
+  await run(app, '/loop design-review 9');
+  await until(() => app.queries.loop !== undefined);
+  // The run is still active, so a line that is not about it must not take its progress away: `/loop
+  // stop` and `/loop answer` act on exactly this state.
+  await run(app, '/help');
+  assert.equal(app.queries.loop?.active, true, 'an active run keeps its progress line');
+
+  app.actions.stopLoop();
+  await until(() => app.queries.loop?.active === false);
+  // The line that ended the run leaves the terminal result on screen — it is the answer to "how did it
+  // end" — and the next line the operator runs means they have read it.
+  assert.equal(app.queries.loop?.terminalReason, 'user-cancelled');
+  await run(app, '/help');
+  assert.equal(app.queries.loop, undefined, 'a finished run goes when the next line runs');
+});
