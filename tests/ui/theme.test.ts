@@ -69,7 +69,7 @@ const controller = new Controller({ base: 'http://fixture' });
 controller.state = {...controller.state, online:true, sessionId:'s1', sessions:[{sessionId:'s1',running:false}]};
 const frames = [];
 for (const percent of [25,80,95]) {
- controller.queries.telemetry.accept(controlFrame({type:'baseline',value:{projections:{s1:{asOfSeq:0,values:{
+ controller.session.acceptControl(controlFrame({type:'baseline',value:{projections:{s1:{asOfSeq:0,values:{
   modelSelection:{next:{provider:'p',model:'flash',reasoningEffort:'high'}},
   contextPressure:{projectedTokens:percent,contextWindow:100}, sessionStats:{turns:42},
   tokenUsage:{uncachedInputTokens:100,outputTokens:200,cacheReadTokens:0,cacheWriteTokens:0}

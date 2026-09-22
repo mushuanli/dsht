@@ -251,21 +251,9 @@ class LoopExecution {
     const artifact = loop.protocol.artifact;
     const marker = loop.protocol.artifactMarker?.(loop.progress.step);
     if (artifact === undefined || marker === undefined) { void this.verifyRound(loop); return; }
-    // `readText` answers undefined only for a file that is not there and throws for one that cannot be
-    // read, so the two cases are told apart here: a missing file has no section either, while an
-    // unreadable one is a boundary this client cannot decide.
-    let text: string | undefined;
-    try { text = await readText(join(this.localDirectory, artifact)); }
-    catch { void this.verifyRound(loop); return; }
-    // Reading the artifact is I/O, so the run may have moved on before it came back.
+    const section = await this.artifactSection(artifact, marker);
     if (!this.isCurrent(loop)) return;
-    if (text !== undefined && text.includes(marker)) { void this.verifyRound(loop); return; }
-    // A missing file only proves the producer never wrote it when this client can see the workspace at
-    // all. A workspace this machine does not have is a boundary — the same boundary the artifact check
-    // after a verdict already respects — so the verifier's reading decides instead.
-    const visible = text !== undefined || await this.workspaceVisible();
-    if (!this.isCurrent(loop)) return;
-    if (!visible) { void this.verifyRound(loop); return; }
+    if (section !== 'missing') { void this.verifyRound(loop); return; }
     this.traceEvent('loop', { phase: 'work-first', runId: loop.runId, kind: loop.protocol.kind,
       step: loop.progress.step, artifact, reason: 'section-missing' });
     loop.note(`⚠ artifact check · ${artifact} 还没有本轮小节，直接开始工作`);
@@ -276,16 +264,15 @@ class LoopExecution {
     void this.flushLoop();
   }
 
-  /** Whether the directory this client runs in is readable here at all.
-   *
-   * `readText` answers undefined for a missing file and for a file inside a directory this machine does
-   * not have, and the two mean opposite things: the first is a producer that wrote nothing, the second
-   * is a workspace whose verdict cannot be checked from here.
-   * @returns True when the directory can be listed.
-   */
-  private async workspaceVisible(): Promise<boolean> {
-    try { await listEntries(this.localDirectory); return true; }
-    catch { return false; }
+  /** Both preflight and settlement distinguish a missing artifact from an invisible workspace. */
+  private async artifactSection(artifact: string, marker: string): Promise<'present' | 'missing' | 'unavailable'> {
+    try {
+      const text = await readText(join(this.localDirectory, artifact));
+      if (text !== undefined) return text.includes(marker) ? 'present' : 'missing';
+      // An absent file proves a missing section only when this machine can see the workspace.
+      await listEntries(this.localDirectory);
+      return 'missing';
+    } catch { return 'unavailable'; }
   }
 
   /** Arm the whole-run budget, when the operator set one. */
@@ -510,16 +497,13 @@ class LoopExecution {
         ? undefined : loop.protocol.artifactMarker?.(loop.progress.step);
       const artifact = loop.protocol.artifact;
       if (marker === undefined || artifact === undefined || result === undefined) { this.settleWith(loop, result, note); return; }
-      let text: string | undefined;
-      try { text = await readText(join(this.localDirectory, artifact)); }
-      catch {
-        // An unreadable workspace is a client boundary, not a failed artifact verdict.
-        if (this.isCurrent(loop)) this.settleWith(loop, result, note || '⚠ artifact check unavailable · using the verdict');
+      const section = await this.artifactSection(artifact, marker);
+      if (!this.isCurrent(loop) || !loop.settled) return;
+      if (section === 'unavailable') {
+        this.settleWith(loop, result, note || '⚠ artifact check unavailable · using the verdict');
         return;
       }
-      // Reading the artifact is I/O, so the run may have moved on before it came back.
-      if (!this.isCurrent(loop) || !loop.settled) return;
-      if (text === undefined || text.includes(marker)) { this.settleWith(loop, result, note); return; }
+      if (section === 'present') { this.settleWith(loop, result, note); return; }
       this.traceEvent('artifact', { phase: 'missing', artifact, step: loop.progress.step, score: result.score ?? -1 });
       const reported = result.score === undefined ? '没有分数' : `${result.score} 分`;
       this.settleWith(loop, { ...result, score: undefined,

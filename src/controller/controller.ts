@@ -9,7 +9,7 @@ import { layoutStats, type SessionRender } from '../session/history.ts';
 import { markdownCacheStats } from '../session/markdown.ts';
 import { SessionController } from '../session/controller.ts';
 import { CatalogController } from '../catalog/controller.ts';
-import type { Telemetry } from '../session/telemetry.ts';
+import type { Telemetry, TelemetryReader } from '../session/telemetry.ts';
 import type { Transcript } from '../session/transcript.ts';
 import type { CostLedger } from '../cost/ledger.ts';
 import { CostController } from '../cost/controller.ts';
@@ -180,7 +180,7 @@ export interface Queries {
   readonly record: Transcript;
   readonly window: Transcript | undefined;
   readonly interaction: InteractionState;
-  readonly telemetry: Telemetry;
+  readonly telemetry: TelemetryReader;
   readonly recallAtOldest: boolean;
   readonly recallLength: number;
   readonly recallHasOlder: boolean;
@@ -560,7 +560,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       get record() { return controller.record; },
       get window() { return controller.window; },
       get interaction() { return controller.interaction; },
-      get telemetry() { return controller.telemetry; },
+      get telemetry() { return controller.telemetry.reader; },
       get recallAtOldest() { return controller.recallAtOldest; },
       get recallLength() { return controller.recallLength; },
       get recallHasOlder() { return controller.recallHasOlder; },

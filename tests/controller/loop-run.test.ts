@@ -331,5 +331,5 @@ test('a no-verifier workspace this client cannot read keeps its reply score', as
   await until(() => controller.queries.record.messages.some(message => message.text.includes('dsht-loop')));
   idle(fixture);
   await until(() => controller.queries.loop?.step === 2);
-  assert.doesNotMatch(controller.queries.loop?.note ?? '', /artifact check/);
+  assert.match(controller.queries.loop?.note ?? '', /artifact check unavailable/);
 });

@@ -543,7 +543,7 @@ class Controller implements ControllerStore, ConnectionListener {
 `SessionStore` 定义在 `session/state.ts`，只暴露会话域读取和发布能力；应用 State 组合 SessionState，会话域不导入整份应用状态。`HistoryReader`（`session/history-reader.ts`）负责快照等待、翻页、搜索、定位窗口及前缀加载，只接收所选记录、身份检查、传输与刷新通知。每个读取任务拥有取消器；换会话/断线取消旧任务，关闭独立历史窗口取消其翻页。读取结果在发布前再次检查归属，停止时等待任务收尾，不能重新填充已释放的窗口。
 
 `ui/chat/use-history-view.ts` 管理滚动、折叠、布局缓存与读取意图，只接收记录元数据和操作回调。
-新滚动意图取消迟到跳转，卸载取消视图发起的读取；跨会话搜索在结果发布前检查选中身份。
+新滚动意图取消迟到跳转，卸载取消视图发起的读取并释放阅读保护；跨会话搜索在结果发布前检查选中身份。
 UI 通过 `actions.openHistory(target, signal)` 按序号打开记录、通过 `actions.showLatest()` 返回实时尾部，
 不再自行获取和安装临时 Transcript。SessionController 检查归属并负责失败释放；主记录与窗口的只读查询面仍待进一步收窄。
 历史跳转按包含本地 shell 块的合并行索引定位，保留原有分页、折叠与历史保护行为。
@@ -588,15 +588,30 @@ class Transcript {
 
 ```ts
 interface QueuedInput { id: string; placement: 'queued' | 'steering' | 'context'; text: string }
+interface TelemetrySnapshot {
+  readonly values: Readonly<Record<string, ProjectionValue>>
+  readonly queued?: number
+  readonly jobs?: number
+}
+interface TelemetryReader {
+  readonly ready: boolean
+  view(id?: string): TelemetrySnapshot
+  pending(id?: string): readonly Readonly<QueuedInput>[]
+}
 class Telemetry {
   ready: boolean
+  readonly reader: TelemetryReader
   constructor(retainedKeys?: ReadonlySet<string>)
-  accept(value: unknown): void                       // baseline / projection / queue / jobs
-  snapshot(id: string, value: unknown): void         // 合并 follow 快照中的 projections
-  view(id?: string): { values: ObjectValue; queued?: number; jobs?: number }
-  pending(id?: string): readonly QueuedInput[]
+  accept(frame: ControlFrame): void                 // baseline / projection / queue / jobs
+  snapshot(id: string, value: ProjectionSnapshot | undefined): void
+  view(id?: string): TelemetrySnapshot
+  pending(id?: string): readonly Readonly<QueuedInput>[]
 }
 ```
+
+`queries.telemetry` 仅公开冻结的 `reader`，不提供写入方法。投影在接收时复制并递归冻结，
+队列和条目同样复制并冻结；view 按会话缓存并随更新失效，保留的旧快照不随新帧变化。
+嵌套 JSON 目前依靠运行时冻结，尚未全面迁移为递归只读类型。
 
 #### 3.2.5 成本模块（`src/cost/`）
 
@@ -831,7 +846,7 @@ dsht [options] [list workspaces|list sessions]
 
 **提前停下只有两种**，都必须给 `reason`、都不许带 `score`：`status=blocked`（可选 `exit_reason=cannot-fix`）表示任务在当前约束下被证明无法完成，立即以 `blocked` 结束并不再消耗尝试预算；`status=abstained`（可选 `exit_reason=needs-human`，另可带 `needs`）表示必须由人决定——一期没有 `/loop answer`，所以它同样是终态（`needs-human`，headless 退出码 3，进度行显示 `interaction`）。缺 `reason`、两种判断同时给出、`exit_reason` 与 `status` 不一致、或带着 `score`，整个块都按"没有可用判断"处理：独立验证报 `unavailable`（重试 `VERIFIER_RETRIES` 次后结束），**绝不静默当成提前停下**。`explanation` 只是说明（例如"本轮无需改动"），不改变评分，也不跳过任何未验证的范围——`passed` 只表示所选范围通过。
 
-契约还要求把产出物落到工作区，并交给 **fork 出的独立验证进程**打分（自己的 session、自己的上下文，见 `loop.md`）——记录可自带 `standard`（取代已删除的会话级 `/verify`），`loop-protocols.ts` 在装配时把它叠加在每轮 rubric 之上。`resultContract` 接收 `VerificationBrief`（`standard`/`artifact`/`focus`），因此协议可以自带 rubric：`/loop design-review` 与 `/loop designdoc-review` 都用**本轮检查要点**作为标准，要求每轮写入工作区文件（分别是 `DESIGN-REVIEW.md` 与 `DESIGN-DOC-REVIEW.md`；验证者在全新上下文里只能读文件），并通过可选的 `LoopProtocol.stepLabel` 在进度行显示轮次主题。两条记录都声明了 `starts: verify`：每轮先让独立验证者检查产物现状，通过了就不花工作 turn，失败才按要求修改。**`passed` 只声称本次 run 覆盖的轮次**：`LoopProgress` 带 `total` 与 `scope`（`rounds 1–10/10`、`rounds 1–3/10 · selected range`），进度行与 headless 输出在 `passed` 时都打印它；当 `coversWholeProtocol(from, to, steps)` 为真时最后一轮是**收尾轮**，工作 brief 要求不得破坏前序要求，verdict brief 收到前面每一轮的 rubric 全文并被要求逐轮复核——因此「整份产出物通过」只可能由一次覆盖全部轮次的 run 得出。**产出物的归属是显式的**：`VerifierRequest` 携带被评审 workspace（`Controller.localDirectory`）与 artifact，验证前后在该 workspace 上比对 SHA-256 指纹，变化即作废该轮结论并重新验证；`ProcessVerifier` 不再从自己的进程目录推断路径，验证在飞时 loop 也不发送任何写入（`flushLoop` 门禁）。这仍是**检测**而非阻止：独立进程以同一 OS 用户运行，真正的只读需要 OS 级隔离。**验收不是只看分数**：记录可以声明 `artifactMarker`，客户端在采纳一次判定前自己读 `join(localDirectory, artifact)` 核对本轮小节是否存在（`Controller.settleChecked`），缺小节就置空 `score`、按一次失败尝试处理并把缺失项回灌——高分不能覆盖这个硬条件；产出物对本机不可读时不做该检查。
+契约还要求把产出物落到工作区，并交给 **fork 出的独立验证进程**打分（自己的 session、自己的上下文，见 `loop.md`）——记录可自带 `standard`（取代已删除的会话级 `/verify`），`loop-protocols.ts` 在装配时把它叠加在每轮 rubric 之上。`resultContract` 接收 `VerificationBrief`（`standard`/`artifact`/`focus`），因此协议可以自带 rubric：`/loop design-review` 与 `/loop designdoc-review` 都用**本轮检查要点**作为标准，要求每轮写入工作区文件（分别是 `DESIGN-REVIEW.md` 与 `DESIGN-DOC-REVIEW.md`；验证者在全新上下文里只能读文件），并通过可选的 `LoopProtocol.stepLabel` 在进度行显示轮次主题。两条记录都声明了 `starts: verify`：每轮先让独立验证者检查产物现状，通过了就不花工作 turn，失败才按要求修改。**`passed` 只声称本次 run 覆盖的轮次**：`LoopProgress` 带 `total` 与 `scope`（`rounds 1–10/10`、`rounds 1–3/10 · selected range`），进度行与 headless 输出在 `passed` 时都打印它；当 `coversWholeProtocol(from, to, steps)` 为真时最后一轮是**收尾轮**，工作 brief 要求不得破坏前序要求，verdict brief 收到前面每一轮的 rubric 全文并被要求逐轮复核——因此「整份产出物通过」只可能由一次覆盖全部轮次的 run 得出。**产出物的归属是显式的**：`VerifierRequest` 携带被评审 workspace（`Controller.localDirectory`）与 artifact，验证前后在该 workspace 上比对 SHA-256 指纹，变化即作废该轮结论并重新验证；`ProcessVerifier` 不再从自己的进程目录推断路径，验证在飞时 loop 也不发送任何写入（`flushLoop` 门禁）。这仍是**检测**而非阻止：独立进程以同一 OS 用户运行，真正的只读需要 OS 级隔离。**验收不是只看分数**：记录可以声明 `artifactMarker`，客户端在采纳一次判定前自己读 `join(localDirectory, artifact)` 核对本轮小节是否存在（`LoopExecution.settleChecked`），缺小节就置空 `score`、按一次失败尝试处理并把缺失项回灌——高分不能覆盖这个硬条件；工作区可见但文件或其子目录缺失同样按缺小节处理；工作区不可见或文件不可读时采用验证结论，并在没有既有说明时提示检查不可用。
 
 面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由命令结果的 open/toggle 效果确定保留面板，再调用 `closeExcept`）。
 

@@ -52,7 +52,11 @@ export function useHistoryView<S extends HistorySource>(options: HistoryViewOpti
   useEffect(() => {
     if (lifetime.current.signal.aborted) lifetime.current = new AbortController();
     mounted.current = true;
-    return () => { mounted.current = false; intent.current++; lifetime.current.abort(); jumpAbort.current?.abort(); pageAbort.current?.abort(); };
+    return () => {
+      mounted.current = false; intent.current++;
+      lifetime.current.abort(); jumpAbort.current?.abort(); pageAbort.current?.abort();
+      latest.current.pin(false);
+    };
   }, []);
   useEffect(() => {
     invalidate(); pageAbort.current?.abort(); setScroll(0);

@@ -102,3 +102,19 @@ test('an unreadable artifact reports the boundary and settles without an unhandl
   assert.equal(coordinator.progress?.phase, 'passed', 'closing must not rewrite a terminal verdict as cancellation');
   await assert.rejects(coordinator.start(protocol, limits), /Client stopped/);
 });
+
+for (const artifact of ['missing.md', 'missing/review.md']) test(`a missing visible artifact ${artifact} cannot pass on a verifier score`, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-missing-artifact-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { host, sent } = harness();
+  const coordinator = new LoopCoordinator(host, { directory, verifier: {
+    name: 'fixture', verify: async () => ({ type: 'verified', result: { score: 10 }, sessionId: 'v1' }),
+  } });
+  t.after(() => coordinator.close());
+  await coordinator.start({ ...protocol, artifact, artifactMarker: () => '## Round' }, { ...limits, to: 1 });
+  coordinator.idle('s1');
+  await until(() => coordinator.progress?.phase === 'passed' || sent.length === 2);
+  assert.notEqual(coordinator.progress?.phase, 'passed');
+  assert.equal(coordinator.progress?.attempt, 2);
+  assert.match(sent[1]!, /缺少本轮小节/);
+});

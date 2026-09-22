@@ -149,10 +149,10 @@ test('paged search keeps live history unchanged, bounds matches, and loads only 
 
 test('unused projection bodies are not retained by the controller', () => {
   const controller = new Controller({ base: 'http://x1:4096' });
-  controller.queries.telemetry.accept(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
+  controller.session.acceptControl(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
     title: { title: 'Name' }, turnOutline: { turns: ['large body'] },
   } } }, queues: {}, jobs: {} } }));
   assert.deepEqual({ ...controller.queries.telemetry.view('s1').values }, { title: { title: 'Name' } });
-  controller.queries.telemetry.accept(controlFrame({ type: 'projection', sessionId: 's1', key: 'turnOutline', seq: 1, value: { turns: ['new body'] } }));
+  controller.session.acceptControl(controlFrame({ type: 'projection', sessionId: 's1', key: 'turnOutline', seq: 1, value: { turns: ['new body'] } }));
   assert.equal(controller.queries.telemetry.view('s1').values.turnOutline, undefined);
 });

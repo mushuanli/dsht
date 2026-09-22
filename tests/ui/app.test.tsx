@@ -933,7 +933,7 @@ test('an idle bar re-reads the clock so the day subtotal rolls over at midnight'
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
   controller.state = { ...controller.state, sessionId: 's1', online: true };
   // A model makes the row wide enough to carry the day total beside the session slice.
-  controller.queries.telemetry.accept(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
+  controller.session.acceptControl(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
     modelSelection: { lastUsed: { provider: 'p', model: 'deepseek-flash' } } } } }, queues: {}, jobs: {} } }));
   // Nothing else touches the bar, so only the bar's own timer can move the calendar day it reports.
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.parse('2026-09-10T23:59:30+08:00') });
@@ -1031,7 +1031,7 @@ test('title and status fit terminal widths and keep model alignment when working
     sessions: [{ sessionId: 's1', running: true }], workspaceId: 'w1',
     workspaces: [{ workspaceId: 'w1', title: 'Workspace 示例', path: '/workspace' }] };
   controller.queries.record.addPage({ records: [{ type: 'event', event: { seq: 0, type: 'turn/start', time: Date.now() - 8000, data: { turn: 42 } } }], hasMore: false });
-  controller.queries.telemetry.accept(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
+  controller.session.acceptControl(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
     title: { title: '中文会话标题'.repeat(20) },
     modelSelection: { next: { provider: 'p', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' } },
     sessionStats: { turns: 42 }, contextPressure: { projectedTokens: 25, contextWindow: 100 },
@@ -2744,4 +2744,21 @@ test('a cross-session search cannot reopen its panel after a newer session selec
   release(); await until(() => controller.queries.foreground === undefined);
   assert.equal(controller.state.sessionId, 's1');
   assert.doesNotMatch(ui.lastFrame()!, /stale-search-match|Search · session history/);
+});
+
+test('unmounting a scrolled history view releases its memory protection', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 39, hasMore: false, header: { id: 's1' },
+    records: Array.from({ length: 40 }, (_, seq) => ({ type: 'event', event: {
+      seq, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: `retained-${seq}` }] },
+    } })) };
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => ui.lastFrame()?.includes('retained-39') === true);
+  await pressKey(ui, '\u001b[5~');
+  assert.equal(controller.session.pinned, true);
+  ui.unmount();
+  await act(async () => {});
+  assert.equal(controller.session.pinned, false);
 });

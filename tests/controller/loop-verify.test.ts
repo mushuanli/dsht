@@ -731,7 +731,7 @@ test('the artifact check leaves a round alone when the section is there or unrea
   await until(() => remote.state.online && remote.queries.record.ready);
   await remote.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 2 });
   await until(() => remote.queries.loop?.phase === 'passed');
-  assert.doesNotMatch(remote.queries.loop?.note ?? '', /artifact check/);
+  assert.match(remote.queries.loop?.note ?? '', /artifact check unavailable/);
 });
 
 test('a forked round traces its verifier lifecycle, so a missing verdict has a written reason', async t => {
