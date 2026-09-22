@@ -174,7 +174,8 @@ export class ProcessVerifier implements VerifierPort {
       try {
         settled = await Promise.race([
           confirmation.then(() => true),
-          new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), CANCEL_CONFIRM_MS); timer.unref(); }),
+          // This bounded wait is part of verify()/settle(), so it must keep the process alive.
+          new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), CANCEL_CONFIRM_MS); }),
         ]);
       } finally { clearTimeout(timer); }
       if (!settled) return { note: `remote cancel unconfirmed after ${CANCEL_CONFIRM_MS} ms`, stopped: false };

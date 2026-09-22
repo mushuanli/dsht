@@ -274,7 +274,7 @@ PromptRecord 属于 `session/transcript.ts` 的投影输出，提示词索引消
 
 **事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。
 
-**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；草稿、光标、临时编辑和寄存草稿归 `ui/input/use-composer.ts`，提交按会话身份与草稿修订号消费，迟到结果不能清空新草稿。`ui/dialogs/use-panels.ts` 持有面板状态与键盘占用规则；`@` 菜单高亮与阅读视图（滚动、折叠、实时折叠模式）仍是 `ui/app.tsx` 的组件状态，随会话切换清理；`pinned` 是 `SessionController` 的私有标志。`ui/input/use-deferred-lines.ts` 持有已提交命令的等待队列，连接及会话快照就绪后重新授权并逐条执行。
+**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；草稿、光标、临时编辑和寄存草稿归 `ui/input/use-composer.ts`，提交按会话身份与草稿修订号消费，迟到结果不能清空新草稿。`ui/dialogs/use-panels.ts` 持有面板状态与键盘占用规则；`@` 菜单高亮仍在 `ui/app.tsx`；阅读视图（滚动、折叠、实时折叠模式）归 `ui/chat/use-history-view.ts`，随会话切换清理；`pinned` 是 `SessionController` 的私有标志。`ui/input/use-deferred-lines.ts` 持有已提交命令的等待队列，连接及会话快照就绪后重新授权并逐条执行。
 
 **UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。
 
@@ -989,7 +989,7 @@ C4Dynamic
 
 输入框的多行几何：composer 是"绝不吞掉对话区"的一段固定预算，而不是随内容增长的区域。`app.tsx` 由终端行数算出 body 高度（扣除根框、页眉、状态栏与一行瞬时提示），内容窗口取 `clamp(floor(body/3), 2, 5)` 再受 `body - 7` 约束，剩余行永远留给对话；列数不参与高度计算，因此横屏或宽终端只减少折行。输入内容本身保留用户粘贴的换行与制表符：`editInput` 只把 `CRLF`/`CR` 归一为 `LF` 并剥离其他控制字符，制表符在**显示**时按制表位展开、发送时保持原字节。显示行、光标行与折叠块都由 `src/ui/input/viewport.ts` 在每次渲染时从文本推导，不保存 span，因此任何编辑都无需重定位区间——这与"投影与渲染分离"的既有决策一致。多行草稿的**未折叠**视觉行数超过窗口时，仅折叠中间行（`[N lines · X KB]`），首行与末行保持可见，光标所在行因此始终可见；判定读取未折叠高度，折叠不会反过来触发自身。折叠区间对编辑是一个对象：`←`/`→` 一次跨越，区间两端的 Backspace/Delete 一次删除整块，而 Ctrl+K/Ctrl+U 等显式剪除仍按字符工作（区间随后重新推导）。一期不检测粘贴来源、不引入 bracketed paste，也不新增任何按键；↑/↓ 仍归历史回填。
 
-输入回填的覆盖范围：回填由会话级的 `PromptIndex`（`src/session/info.ts`）承担，由 `SessionController` 持有，随 `selectSession` 创建、随 `releaseTranscript` 重置。它在每次 `session/follow` 帧后增量折叠：`Transcript.promptsSince(through)` 只按序号读出比上次折进更新的原始记录并抽取 User 消息，既不重建行投影也不看窗口大小；开屏快照只覆盖最新的一小段，因此 `selectSession` 随后启动**后台回填**（`backfillPrompts`），把窗口之前的 `session/page` 逐页读进临时 `Transcript`、只提取提示词并 `prepend`，走到宿主报告没有更早记录为止（上限 200 页，切换会话即取消，且只保留提示词，所以实时记录、它的内存窗口与行缓存都不增长）。回填完成后 `markComplete()` 让索引知道自己已穷尽，此后边界按键不再发起无谓的翻页；被 200 页上限截断时会话仍可按需惰性补页。于是索引里是**会话开始至今的全部 user prompt**（连续重复合并、超大输入跳过，超出 2,000 条 / 512 KiB 的最旧一段仍可按需取回），而不是某次加载恰好覆盖的窗口；本地提交的 slash 命令不会成为持久记录，因此单独记入同一索引并标记为非持久，持久回声到达时把那一条升级为带序号而不是插入第二份。
+输入回填的覆盖范围：回填由会话级的 `PromptIndex`（`src/session/info.ts`）承担，由 `SessionController` 持有，随 `selectSession` 创建、随 `releaseTranscript` 重置。它在每次 `session/follow` 帧后增量折叠：`Transcript.promptsSince(through)` 只按序号读出比上次折进更新的原始记录并抽取 User 消息，既不重建行投影也不看窗口大小；开屏快照只覆盖最新的一小段，因此 `selectSession` 随后启动**后台回填**（`PromptBackfill.start`），把窗口之前的 `session/page` 逐页读进临时 `Transcript`、只提取提示词并 `prepend`，走到宿主报告没有更早记录为止（上限 200 页，每页合入后执行索引预算；切换会话、断线和停机取消任务，停机等待任务结束；初始快照等待受连接超时约束；只保留提示词，所以实时记录、它的内存窗口与行缓存都不增长）。回填走到起点且未裁剪时，`markComplete()` 标记索引已穷尽；后续裁剪会撤销该标记，此后边界按键不再发起无谓的翻页；被 200 页上限截断时会话仍可按需惰性补页。于是索引里是**会话开始至今的全部 user prompt**（连续重复合并、超大输入跳过，超出 2,000 条 / 512 KiB 的最旧一段仍可按需取回），而不是某次加载恰好覆盖的窗口；本地提交的 slash 命令不会成为持久记录，因此单独记入同一索引并标记为非持久，持久回声到达时把那一条升级为带序号而不是插入第二份。
 
 预算（默认 2,000 条 / 512 KiB）只约束内存、不决定可达性：`↑`/`Ctrl+P` 停在索引最旧一条（或索引为空）时，先由 `refillRecall()` 用读者滚动历史时的**同一份已加载窗口**补回被淘汰的提示词（`Transcript.promptsBefore`），这一步不发请求、不失焦、不显示加载提示；只有窗口本身也用尽时才走 `SessionController.older` 取回窗口之前的一页，整页没有 User 消息时在同一次有界循环里继续向前翻（每次最多 5 页，`historyPaging` 保证同时只有一次请求在飞），不会因为一页只有工具调用而卡住；`controller.perform` 期间输入框失焦，重复按键不会排队。
 
@@ -1294,7 +1294,7 @@ C4Component
 | 跨会话提示词缓存 | `PromptCache`（`session/info.ts`） | `adoptCachedPrompts` | 计费扫描的 `rememberScanPage`／`rememberScanDone`、回填完成时的 `put()` | 按字节 LRU 淘汰最久未用的会话，至少保留一个条目；只接受 `complete` 条目 |
 | 会话草稿、光标、临时编辑与寄存草稿 | `useComposer`（`ui/input/use-composer.ts`） | 输入框、回填、异步提交 | `setInput`／`setCursor`／`setIntent`／`consume`／`interactionChanged` | 随会话重置；消费须匹配会话与修订号；同一编辑意图不会并发保存 |
 | 客户端延迟命令 | `useDeferredLines`（`ui/input/use-deferred-lines.ts`） | 命令执行管线 | `enqueue`、重新授权、逐条执行 | 断线保留；连接与会话快照恢复后执行；换会话丢弃旧会话等待项 |
-| 阅读视图（窗口、滚动、折叠、阅读保护） | `SessionInfo.window`、App 的滚动与折叠状态、SessionController 的 `pinned` | `historyLayout`、视口、`/think` | 历史动作及 UI 状态更新 | `closeWindow()` 与 `releaseTranscript()` 释放独立窗口；UI 状态随会话重置，行缓存仍是 `WeakMap` |
+| 阅读视图（窗口、滚动、折叠、阅读保护） | `SessionInfo.window`、useHistoryView 的滚动与折叠状态、SessionController 的 `pinned` | `historyLayout`、视口、`/think` | 历史动作及 UI 状态更新 | `closeWindow()` 与 `releaseTranscript()` 释放独立窗口；UI 状态随会话重置，行缓存仍是 `WeakMap` |
 | 待答作答与 `@` 菜单选择 | `SessionInfo.interaction`、App 的菜单状态 | 提问／审批对话框、`ReferenceMenu` | `setAnswers`／`setOption`／`setApproval`、UI 菜单回调 | 随会话重置；异步文件查询取消过期请求 |
 | 会话面板可见性与查询 | `usePanels` 内部状态（`ui/dialogs/use-panels.ts`） | `/think`、`/queue`、`/model`、`/history`、`/search`、`/prompt` 面板 | `openThoughts`／`openQueue`／`setModelPanel`／`setHistoryPanel`／`setSearchPanel`／`openPrompts` | 切换会话时整体重置；面板行光标仍在 `Picker` 内（`/prompt` 是唯一的客户端级面板，不读会话记录） |
 | Cookie 与在册订阅 | `Client.cookie/expiresAt/listeners` | `call`、`subscribe` | `restoreCookie`、`authenticate`、`subscribe` | `close()` 结束全部订阅 |
@@ -1900,7 +1900,7 @@ C4Component
   Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "域外共享叶子与只含类型的 UI 契约")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "文件系统操作")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "wire 协议、认证与端点")
-  Component(session, "session/", "controller, state, history-reader, navigator, interactions, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, prompts, index", "记录、投影、提示词索引与回填")
+  Component(session, "session/", "controller, state, history-reader, prompt-backfill, navigator, interactions, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, index", "记录、投影、提示词索引与回填")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "价格、账本与扫描")
   Component(catalog, "catalog/", "controller, index", "模型路由与 preset")
   Component(controller, "controller/", "controller, commands, loop, loop-contract, loop-protocols, loop-prompts, loop-prompts-schema, loop-prompts.generated, verifier, connection, memory-log, trace-log, perf-measures, prompts, index", "门面、命令策略与评分循环")

@@ -1,6 +1,5 @@
 /** Session domain: selection, the follow stream, history, interaction and navigation. */
 import { randomUUID } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import type { Subscription } from '../transport/client.ts';
 import type { HostAccess } from '../transport/host.ts';
 import { array, errorText, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
@@ -25,12 +24,10 @@ import { projectionSnapshot, type ControlFrame, type HostEvent } from '../transp
 import { HistoryReader } from './history-reader.ts';
 import { SessionInteractions } from './interactions.ts';
 import { SessionNavigator } from './navigator.ts';
+import { PromptBackfill } from './prompt-backfill.ts';
 
 /** Built-in preset identifiers and the labels the web session header shows. */
 const BUILT_IN_MODES = new Map([['standard', 'Standard mode'], ['ptc', 'PTC mode'], ['minimal', 'Minimal mode'], ['cordis', 'Creator mode']]);
-
-/** Bounded page count for the prompt backfill that runs once per opened session. */
-const PROMPT_BACKFILL_PAGES = 200;
 
 /** Owns the selected session: its follow stream, transcript, history window and interactions. */
 export class SessionController {
@@ -43,7 +40,7 @@ export class SessionController {
   /** Host runtime mirrors for every session this connection has seen. */
   private readonly runtime = new SessionRuntime();
   /** Cancels the background prompt backfill of the previous selection. */
-  private promptBackfill?: AbortController;
+  private readonly promptBackfill: PromptBackfill;
   /** Prompts of sessions this process has already read, so re-opening one costs no page request. */
   private readonly promptCache = new PromptCache();
   /** Prompt index, record, history window and interaction state of the selected session. */
@@ -58,6 +55,12 @@ export class SessionController {
     private readonly connection: ConnectionView, private readonly historyLimits: HistoryLimits,
     report?: (admission: MutationAdmission) => void) {
     this.mutations = new SessionMutationGate(report);
+    this.promptBackfill = new PromptBackfill({
+      require: () => this.host.require(), signal: () => this.host.signal(), online: () => this.host.online(),
+      current: selection => selection.revision === this.store.selection() && selection.record === this.info.record
+        && selection.sessionId === this.store.state.sessionId,
+      changed: () => this.store.update({}),
+    }, this.promptCache);
     this.navigation = new SessionNavigator({
       require: () => this.host.require(), client: () => this.host.client(),
       online: () => this.host.online(), signal: () => this.host.signal(),
@@ -162,6 +165,7 @@ export class SessionController {
 
   /** Invalidate in-flight work and drop transient interactions when a generation ends. */
   endGeneration(): void {
+    this.promptBackfill.cancel();
     this.navigation.reset();
     this.history.cancel();
     this.store.bumpSelection();
@@ -170,7 +174,7 @@ export class SessionController {
   }
 
   /** Wait for cancellation and foreground history tasks before releasing their records. */
-  async settle(): Promise<void> { await this.interruptTask; await this.history.settle(); await this.interactions.settle(); await this.navigation.settle(); }
+  async settle(): Promise<void> { await this.interruptTask; await this.history.settle(); await this.promptBackfill.settle(); await this.interactions.settle(); await this.navigation.settle(); }
 
   /** Release the selected transcript and its layout caches. */
   release(): void { this.navigation.reset(); this.releaseTranscript(); }
@@ -412,6 +416,7 @@ export class SessionController {
   }
 
   private followSession(sessionId: string, navigate: boolean): void {
+    this.promptBackfill.cancel();
     this.history.cancel();
     this.stoppingSession = undefined;
     this.store.bumpSelection();
@@ -445,7 +450,7 @@ export class SessionController {
         this.store.update({ status: 'Session disconnected', lastFailure: errorText(error ?? 'Session stream ended') });
       },
     });
-    this.backfillPrompts(sessionId, selection);
+    this.promptBackfill.start({ sessionId, revision: selection, record: transcript, prompts: this.prompts });
   }
 
   /** Wait for the selected follow snapshot, failing on disconnect or cancellation.
@@ -669,24 +674,6 @@ export class SessionController {
     return this.prompts.prepend(this.info.record.promptsBefore(oldest)) > 0;
   }
 
-  /** Seed recall from a complete cached entry, so an open that follows a scan costs no request.
-   * @param sessionId - Session being opened.
-   * @returns Whether the cache covered this session.
-   */
-  private adoptCachedPrompts(sessionId: string): boolean {
-    const cached = this.promptCache.get(sessionId);
-    if (!cached?.complete) return false;
-    const oldest = this.prompts.oldest;
-    const older = oldest === undefined ? cached.prompts : cached.prompts.filter(prompt => prompt.seq < oldest);
-    this.prompts.prepend(older);
-    // Same budget as the walk it replaces: `settle` may shed the oldest prefix, and `markComplete`
-    // then refuses, so the lazy backward step stays available for whatever was shed.
-    this.prompts.settle();
-    this.prompts.markComplete();
-    this.store.update({});
-    return true;
-  }
-
   /** Fold one history page the cost scan already read into the prompt cache.
    *
    * The scan reads every session's whole history on connect, so this is where two readers stop
@@ -703,64 +690,6 @@ export class SessionController {
    */
   rememberScanDone(sessionId: string): void {
     this.promptCache.observe(sessionId, [], true);
-  }
-
-  /** Fold every prompt the host still holds into the recall index, in the background.
-   *
-   * Session start delivers only the newest window, so without this the arrows could reach older
-   * prompts but not show them without paging first. Each page is parsed into a temporary transcript
-   * and only its prompts are kept, so the live record, its memory window and the row cache never
-   * grow. The walk is bounded and the next selection cancels it; anything past the bound is still
-   * reachable through the lazy backward step.
-   * @param sessionId - Session being opened.
-   * @param selection - Selector generation that must still be current.
-   */
-  private backfillPrompts(sessionId: string, selection: number): void {
-    this.promptBackfill?.abort();
-    const abort = new AbortController();
-    this.promptBackfill = abort;
-    void (async () => {
-      try {
-        while (!this.info.record.ready) {
-          abort.signal.throwIfAborted();
-          await delay(20, undefined, { signal: abort.signal });
-        }
-        // A cost scan or an earlier open may already have this session's prompts cached.
-        if (this.adoptCachedPrompts(sessionId)) return;
-        const throughSeq = this.info.record.readThrough;
-        let beforeSeq = this.info.record.beforeSeq;
-        let hasMore = this.info.record.hasMore;
-        for (let page = 0; hasMore && beforeSeq !== undefined && page < PROMPT_BACKFILL_PAGES; page++) {
-          abort.signal.throwIfAborted();
-          if (selection !== this.store.selection()) return;
-          const result = object(await this.host.require().call('session/page', { request: {
-            address: { kind: 'session', sessionId }, throughSeq, beforeSeq, maxMessages: 80,
-          } }, abort.signal));
-          abort.signal.throwIfAborted();
-          if (selection !== this.store.selection()) return;
-          const temporary = new Transcript();
-          try {
-            temporary.accept({ type: 'snapshot', cursor: throughSeq, assistantStream: { revision: 0 }, records: result.records, hasMore: result.hasMore });
-            const next = temporary.beforeSeq;
-            if (temporary.hasMore && (next === undefined || next >= beforeSeq)) throw new Error('Host history page did not advance');
-            this.prompts.prepend(temporary.promptsSince(-1).prompts);
-            beforeSeq = next; hasMore = temporary.hasMore;
-          } finally { temporary.dispose(); }
-          // A scan that finished while this walk ran already established the same list.
-          if (this.adoptCachedPrompts(sessionId)) return;
-        }
-        this.prompts.settle();
-        // Only a walk that ended because the host said "no more" makes the index exhaustive; one
-        // stopped by the page bound leaves the lazy backward step in charge of the rest.
-        if (!hasMore) this.prompts.markComplete();
-        // Cache only what the walk established: advertising a capped or shed list would let a later
-        // open skip a fetch it still needs.
-        if (!hasMore) this.promptCache.put(sessionId, { prompts: this.prompts.durableItems, complete: this.prompts.exhausted });
-        this.store.update({});
-      } catch {
-        // A cancelled, disconnected or unavailable history leaves the lazy backward step in charge.
-      } finally { if (this.promptBackfill === abort) this.promptBackfill = undefined; }
-    })();
   }
 
   /** Search one page at a time, preserving only the first 200 matches and releasing temporary content.
@@ -813,7 +742,7 @@ export class SessionController {
   /** Release the selected transcript and its layout caches. */
   private releaseTranscript(): void {
     this.history.cancel();
-    this.promptBackfill?.abort(); this.promptBackfill = undefined;
+    this.promptBackfill.cancel();
     this.info.reset();
   }
 

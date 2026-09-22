@@ -201,8 +201,14 @@ export class PromptIndex {
    * @returns How many entries were actually retained.
    */
   prepend(values: readonly PromptRecord[]): number {
+    const oldest = this.oldest;
+    const seen = new Set<number>();
     const older = values.map(value => ({ seq: value.seq, text: promptText(value.text), durable: true }))
-      .filter(value => !this.internal.has(value.text) && this.retainable(value));
+      .filter(value => {
+        if (oldest !== undefined && value.seq >= oldest || seen.has(value.seq)
+          || this.internal.has(value.text) || !this.retainable(value)) return false;
+        seen.add(value.seq); return true;
+      });
     if (!older.length) return 0;
     this.entries = [...older, ...this.entries];
     this.bytes += older.reduce((sum, value) => sum + value.text.length * 2, 0);
@@ -256,10 +262,12 @@ export class PromptIndex {
 
   /** Drop the oldest entries until both budgets hold; a dropped prefix stays reloadable. */
   private trim(): void {
+    let removed = 0;
     while (this.entries.length > this.limits.maxEntries || this.bytes > this.limits.maxBytes) {
       this.bytes -= this.entries.shift()!.text.length * 2;
-      this.shed = true;
+      removed++; this.shed = true; this.complete = false;
     }
+    if (this.position !== undefined) this.position = Math.max(0, this.position - removed);
   }
 }
 

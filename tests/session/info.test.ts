@@ -7,6 +7,38 @@ import { Transcript } from '../../src/session/transcript.ts';
 /** Two entries force eviction in tests without pushing 2,000 prompts through a snapshot. */
 const small = { maxEntries: 2, maxBytes: 1_000_000 };
 
+test('overlapping background and lazy refill pages retain each durable prompt once', () => {
+  const index = new PromptIndex();
+  index.append([{ seq: 3, text: 'recent' }]);
+  index.prepend([{ seq: 1, text: 'one' }, { seq: 2, text: 'two' }]);
+  assert.equal(index.move(-1, 'draft'), 'recent');
+  index.prepend([{ seq: 0, text: 'zero' }, { seq: 1, text: 'one' }, { seq: 2, text: 'two' }]);
+  assert.deepEqual(index.items.map(item => item.seq), [0, 1, 2, 3]);
+  assert.equal(index.move(-1, ''), 'two');
+  assert.equal(index.move(-1, ''), 'one');
+  assert.equal(index.move(-1, ''), 'zero');
+});
+
+test('settling a bulk refill preserves a retained recall selection and its draft', () => {
+  const index = new PromptIndex(small);
+  index.append([{ seq: 2, text: 'two' }, { seq: 3, text: 'three' }]);
+  assert.equal(index.move(-1, 'draft'), 'three');
+  index.prepend([{ seq: 0, text: 'zero' }, { seq: 1, text: 'one' }]);
+  index.settle();
+  assert.equal(index.move(-1, ''), 'two');
+  assert.equal(index.move(1, ''), 'three');
+  assert.equal(index.move(1, ''), 'draft');
+});
+
+test('new live prompts make an exhausted index refillable after eviction', () => {
+  const index = new PromptIndex(small);
+  index.append([{ seq: 0, text: 'zero' }, { seq: 1, text: 'one' }]);
+  index.markComplete();
+  assert.equal(index.exhausted, true);
+  index.append([{ seq: 2, text: 'two' }]);
+  assert.equal(index.exhausted, false);
+});
+
 test('recall traverses prompts, deduplicates neighbours and restores the draft', () => {
   const index = new PromptIndex();
   index.record('first'); index.record('second'); index.record('second');
