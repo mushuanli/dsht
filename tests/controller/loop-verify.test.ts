@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { Controller, loopProtocolFor } from '../../src/controller/index.ts';
 import type { LoopProtocol } from '../../src/controller/loop.ts';
 import { runStartup } from '../../src/cli/startup.ts';
+import { ProcessVerifier } from '../../src/cli/verifier.ts';
 import { runCommand } from '../../src/controller/commands.ts';
 import { parseCommand } from '../../src/slash/index.ts';
 import { readTrace } from '../../src/controller/trace-log.ts';
@@ -76,6 +77,103 @@ function fakeVerifier(outcome: (request: VerifierRequest) => VerifierOutcome | P
     },
   };
 }
+
+test('stopping the client aborts its in-flight verifier and a late verdict cannot continue the run', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  let release!: (outcome: VerifierOutcome) => void;
+  const verifier = fakeVerifier(() => new Promise<VerifierOutcome>(resolve => { release = resolve; }));
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier: verifier.port });
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  idle(fixture, 's1');
+  await until(() => verifier.requests.length === 1);
+  try {
+    await controller.stop();
+    assert.equal(verifier.signals[0]?.aborted, true);
+  } finally { release({ type: 'verified', result: { score: 10 }, sessionId: 'v1' }); }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(controller.queries.loop?.active, false);
+  assert.equal(verifier.requests.length, 1);
+  assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
+});
+
+test('a late verdict from a replaced run cannot unlock the current verifier', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const releases: ((outcome: VerifierOutcome) => void)[] = [];
+  const verifier = fakeVerifier(() => new Promise<VerifierOutcome>(resolve => { releases.push(resolve); }));
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', verifier: verifier.port });
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  const start = () => controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 2 });
+  await start(); idle(fixture, 's1');
+  await until(() => verifier.requests.length === 1);
+  controller.actions.stopLoop();
+  await start(); idle(fixture, 's1');
+  await until(() => verifier.requests.length === 2);
+  const current = controller.queries.loop!.runId;
+  try {
+    releases[0]!({ type: 'verified', result: { score: 10 }, sessionId: 'old' });
+    await new Promise(resolve => setImmediate(resolve));
+    // Replayed idle frames and normal publishes must not start a duplicate verifier.
+    controller.event({ kind: 'agent-status', sessionId: 's1', running: false });
+    controller.update({});
+    assert.equal(verifier.requests.length, 2);
+    assert.equal(controller.queries.loop?.runId, current);
+    assert.equal(controller.queries.loop?.activity, 'verify');
+    releases[1]!({ type: 'verified', result: { score: 9 }, sessionId: 'current' });
+    await until(() => controller.queries.loop?.phase === 'passed');
+  } finally {
+    controller.actions.stopLoop();
+    for (const release of releases) release({ type: 'cancelled' });
+  }
+});
+
+test('shutdown drains child cleanup and confirms the verifier cancel before closing the host', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-stop-verifier-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const fixture = await host(); t.after(() => fixture.close());
+  let controller!: Controller;
+  let spawned = false;
+  let confirm!: () => void;
+  fixture.onCancel = () => new Promise<void>(resolve => { confirm = resolve; });
+  const verifier = new ProcessVerifier({
+    command: ['fixture-child'], url: fixture.url, cwd: directory, env: {}, timeoutMs: 10_000,
+    createSession: title => controller.actions.createVerifierSession(title),
+    cancelSession: async sessionId => {
+      assert.equal(await controller.actions.cancelVerifierSession(sessionId), true);
+    },
+    onLine() {},
+    run: async (_file, _args, options) => {
+      spawned = true;
+      return new Promise(resolve => options.signal.addEventListener('abort',
+        () => resolve({ code: null, signal: 'SIGTERM' }), { once: true }));
+    },
+  });
+  controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
+    verifier, localDirectory: directory });
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  idle(fixture, 's1');
+  await until(() => spawned);
+  let release!: () => void;
+  const foreground = controller.actions.foreground('history', 'Reading', () => new Promise<void>(resolve => { release = resolve; }));
+  let stopped = false;
+  const stopping = controller.stop().then(() => { stopped = true; });
+  try {
+    await until(() => confirm !== undefined);
+    assert.equal(stopped, false);
+    assert.equal(controller.snapshot().online, true);
+    assert.equal(fixture.calls.filter(call => call.method === 'session/cancel').length, 1);
+    confirm();
+    await stopping;
+    assert.equal(controller.snapshot().online, false);
+  } finally { confirm?.(); release(); await foreground; await stopping; }
+});
 
 test('a forked verdict decides the round, and the reviewer is told not to self-score', async t => {
   const fixture = await host(); t.after(() => fixture.close());

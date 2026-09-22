@@ -75,3 +75,16 @@ test('a ! block opens from its bar, a note from any row of it', () => {
   // Its bar and the `(no output)` row it needs to say something are still rendered.
   assert.equal(plain.total, 4);
 });
+
+test('history targets retain their rows with local blocks before, between and after host messages', () => {
+  const layout = { ...fakeLayout(), length: 6, messages: [{ seq: 1 }, { seq: 2 }, { seq: 3 }],
+    offsets: new Map([[1, 0], [2, 2], [3, 4]]) };
+  const merged = mergeShellRuns(layout, [block(1, { anchor: 0 }), block(2, { anchor: 1 }), block(3, { anchor: 3 })], 60);
+  for (let row = 0; row < layout.length; row++) {
+    const at = merged.hostRow(row);
+    assert.deepEqual(merged.viewport(at, at + 1), layout.viewport(row, row + 1));
+  }
+  assert.equal(merged.hostRow(0), 2);
+  assert.equal(merged.hostRow(2), 6);
+  assert.equal(merged.hostRow(4), 8);
+});

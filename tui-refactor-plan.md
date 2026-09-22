@@ -2,7 +2,7 @@
 
 Status: implemented（实施期方案与状态记录）。架构结论以 `.agents/notes/implemented/architecture/2026-09-15-layered-boundaries-and-plain-ui-contract` 与 `tui-design.md` 为准；本文件保留逐阶段范围、文件映射与验证记录。
 
-Status: proposed（方案评审稿，尚未实施）
+2026-09-22 后续审查与尚未完成的优化见 `docs/architecture-review.md`；本文件不代表当前审查已完成。
 
 范围：`src/` 的状态归属、依赖方向与边界数据形态；不改 wire 协议、CLI 参数、命令语义、终端输出与成本模型。
 

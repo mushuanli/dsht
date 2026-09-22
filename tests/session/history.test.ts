@@ -66,6 +66,65 @@ test('paging stops on an unadvancing host page and respects cancellation', async
   assert.match(controller.state.lastFailure, /abort/i);
 });
 
+for (const operation of ['snapshot', 'prefix']) test(`already cancelled ${operation} reads fail even when no loading is needed`, async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(() => controller.stop()); controller.start();
+  await until(() => controller.queries.record.ready);
+  const signal = AbortSignal.abort();
+  await assert.rejects(operation === 'snapshot' ? controller.session.waitForHistory(signal)
+    : controller.session.historyThrough('first', signal), { name: 'AbortError' });
+});
+
+test('closing a detached history window cancels paging and prevents a late page from restoring it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); await controller.stop(); }); controller.start();
+  await until(() => controller.queries.record.ready);
+  const window = new Transcript();
+  window.accept({ ...snapshot, cursor: 5, hasMore: true, records: [{ type: 'event', event: {
+    seq: 5, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Detached message' }] },
+  } }] });
+  controller.session.setViewWindow(window);
+  let requested = false;
+  fixture.onPage = async () => { requested = true; await gate; return { records: snapshot.records, hasMore: false }; };
+  const paging = controller.actions.older(undefined, window);
+  await until(() => requested);
+  controller.actions.showLatest();
+  release();
+  assert.equal(await paging, false);
+  assert.equal(window.retainedRecordCount, 0);
+  assert.equal(controller.queries.window, undefined);
+});
+
+test('selecting another session aborts the previous history search request', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  let release = () => {};
+  t.after(async () => { release(); await controller.stop(); }); controller.start();
+  await until(() => controller.queries.record.ready && controller.state.session.prompts.exhausted);
+  controller.queries.record.hasMore = true;
+  const client = controller.connection.require();
+  const call = client.call.bind(client);
+  let requestSignal: AbortSignal | undefined;
+  client.call = (method, args, signal) => {
+    if (method !== 'session/page') return call(method, args, signal);
+    requestSignal = signal;
+    return new Promise((resolve, reject) => {
+      release = () => resolve({ records: [], hasMore: false });
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  };
+  const search = controller.session.searchHistory('missing', new AbortController().signal);
+  const check = assert.rejects(search);
+  await until(() => requestSignal !== undefined);
+  await controller.actions.selectSession('s2');
+  try { assert.equal(requestSignal?.aborted, true); }
+  finally { release(); await check; }
+});
+
 test('stream frames reuse the history index, bound row caching, and retrieve evicted rows on demand', () => {
   const transcript = new Transcript();
   transcript.accept({ ...snapshot, records: Array.from({ length: 1500 }, (_, seq) => ({ type: 'event', event: {

@@ -91,6 +91,82 @@ test('/prompt d deletes the selected prompt', async t => {
   assert.equal(app.frame().includes('Explain this code'), false);
 });
 
+for (const change of ['continue', 'escape', 'session']) test(`a slow prompt save preserves the draft after ${change}`, async t => {
+  const app = await mount(t);
+  const update = app.controller.actions.updatePrompt;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  app.controller.actions.updatePrompt = async (id, text) => {
+    calls += 1;
+    await gate;
+    return update(id, text);
+  };
+  try {
+    await app.press('/prompt'); await app.press('\r'); await app.press('e');
+    await until(() => app.frame().includes('Editing saved prompt'));
+    await app.press(' changed'); await app.press('\r');
+    await until(() => calls === 1);
+    if (change === 'escape') await app.press('\u001b');
+    if (change === 'session') {
+      await app.controller.actions.selectSession('s2');
+      await until(() => !app.frame().includes('Editing saved prompt') && composer(app.frame()) === PLACEHOLDER);
+    }
+    await app.press(change === 'continue' ? ' again' : 'A new draft');
+    release();
+    await until(() => app.controller.promptStore.list.some(item => item.text === 'Explain this code changed'));
+    await app.press('!');
+    assert.equal(composer(app.frame()), change === 'continue' ? 'Explain this code changed again!' : 'A new draft!');
+    assert.equal(app.frame().includes('Editing saved prompt'), change === 'continue');
+    assert.equal(app.fixture.calls.some(call => call.method === 'session/prompt'), false);
+  } finally { release(); }
+});
+
+test('a command completion cannot consume a newer draft with identical text', async t => {
+  const app = await mount(t);
+  const save = app.controller.actions.savePrompt;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let started = false;
+  app.controller.actions.savePrompt = async text => {
+    started = true;
+    await gate;
+    return save(text);
+  };
+  try {
+    const line = '/prompt A reusable prompt';
+    await app.press(line); await app.press('\r');
+    await until(() => started);
+    await app.press('\u0015');
+    await app.press(line);
+    release();
+    await until(() => app.controller.promptStore.list.some(item => item.text === 'A reusable prompt'));
+    await app.press('!');
+    assert.equal(composer(app.frame()), `${line}!`);
+  } finally { release(); }
+});
+
+test('repeated Enter during a prompt save commits only once', async t => {
+  const app = await mount(t);
+  const update = app.controller.actions.updatePrompt;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  app.controller.actions.updatePrompt = async (id, text) => {
+    calls += 1;
+    await gate;
+    return update(id, text);
+  };
+  try {
+    await app.press('/prompt'); await app.press('\r'); await app.press('e');
+    await until(() => app.frame().includes('Editing saved prompt'));
+    await app.press('\r'); await app.press('\r');
+    assert.equal(calls, 1);
+    release();
+    await until(() => !app.frame().includes('Editing saved prompt'));
+  } finally { release(); }
+});
+
 test('/prompt TEXT saves a shortcut prompt that the list then offers', async t => {
   const app = await mount(t);
   await app.press('/prompt Fix this bug and add tests'); await app.press('\r');
@@ -98,6 +174,32 @@ test('/prompt TEXT saves a shortcut prompt that the list then offers', async t =
   await until(() => app.controller.queries.foreground === undefined);
   await app.press('/prompt'); await app.press('\r');
   await until(() => app.frame().includes('Fix this bug and add tests'));
+});
+
+test('offline input stays editable, saves local shortcuts and retains a refused message', async t => {
+  const app = await mount(t);
+  await app.controller.connection.stop();
+  await until(() => app.frame().includes('Offline'));
+  await app.press('/prompt Prepare for reconnect'); await app.press('\r');
+  await until(() => app.controller.queries.prompts.some(item => item.text === 'Prepare for reconnect'));
+  await app.press('Draft while offline');
+  assert.equal(composer(app.frame()), 'Draft while offline');
+  await app.press('\r');
+  assert.equal(composer(app.frame()), 'Draft while offline');
+  assert.equal(app.fixture.calls.some(call => call.method === 'session/prompt'), false);
+  assert.match(app.frame(), /Not connected/);
+});
+
+test('reconnect keeps the edited draft and never submits it automatically', async t => {
+  const app = await mount(t);
+  await app.press('Unsent draft');
+  app.fixture.disconnect();
+  await until(() => !app.controller.state.online);
+  await app.press(' continued');
+  await until(() => app.controller.state.online && app.controller.queries.connectionSettled && app.controller.queries.record.ready);
+  assert.equal(composer(app.frame()), 'Unsent draft continued');
+  assert.equal(app.controller.state.screen, 'chat');
+  assert.equal(app.fixture.calls.some(call => call.method === 'session/prompt'), false);
 });
 
 test('/prompt Esc abandons an edit without changing the list or sending', async t => {

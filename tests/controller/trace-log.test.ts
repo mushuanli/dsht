@@ -70,11 +70,11 @@ test('the trace seeds a header, appends JSON events and stays owner-only', async
   if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 
-test('the trace names the reconnect that adopted the local workspace and dropped the session', async t => {
+test('the reconnect trace refreshes navigation and restores the selected session without a screen change', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dsht-trace-')); t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, 'trace.log');
   const fixture = await host(); t.after(() => fixture.close());
-  // Registering the client's own directory as a workspace is what makes a reconnect adopt it.
+  // Startup adopts this workspace once; reconnect must not adopt it again and drop the session.
   fixture.baseline = [{ ...workspace, path: process.cwd() }];
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', tracePath: path });
   t.after(async () => { await controller.stop(); });
@@ -98,21 +98,15 @@ test('the trace names the reconnect that adopted the local workspace and dropped
   const begin = after.findIndex(event => event.event === 'generation' && event.phase === 'begin');
   assert.ok(begin >= 0, 'the reconnect must record a generation begin');
   const reconnect = after.slice(begin);
-  assert.ok(reconnect.some(event => event.event === 'picker' && event.requested === 'workspaces'),
-    'the reconnect asked for the workspace picker');
-  assert.ok(reconnect.some(event => event.event === 'adopt' && event.workspace === 'w1' && event.directory === process.cwd()),
-    'the reconnect adopted the client directory as a workspace');
-  // No action event ran: this jump was not a key or a command.
-  assert.equal(reconnect.some(event => event.event === 'action'), false, 'no user action explains the jump');
-
-  const screens = reconnect.filter(event => event.event === 'state').map(event => event.screen);
-  assert.ok(screens.includes('chat -> workspaces'), `the picker replaced the conversation: ${String(screens)}`);
-  assert.ok(reconnect.some(event => event.event === 'state'
-    && event.screen === 'workspaces -> sessions' && event.session === 's1 -> none'),
-    'adopting the workspace landed on /resume and dropped the selection');
+  assert.ok(reconnect.some(event => event.event === 'navigation-refresh' && event.screen === 'chat'));
+  assert.equal(reconnect.some(event => event.event === 'adopt'), false);
+  assert.equal(reconnect.some(event => event.event === 'state' && (event.screen || event.session)), false,
+    'refreshing a connection must not navigate or transiently clear the selection');
   const resolve = reconnect.filter(event => event.event === 'resolve').at(-1)!;
-  assert.equal(resolve.session, 'none');
-  assert.equal(resolve.reselect, false, 'nothing re-selected the session the reader was in');
-  assert.equal(controller.state.screen, 'sessions');
-  assert.equal(controller.state.sessionId, undefined);
+  assert.equal(resolve.session, 's1');
+  assert.equal(resolve.reselect, true);
+  assert.equal(controller.state.screen, 'chat');
+  assert.equal(controller.state.sessionId, 's1');
+  await until(() => controller.queries.record.ready);
+
 });

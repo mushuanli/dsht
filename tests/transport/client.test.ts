@@ -75,6 +75,41 @@ test('logical stream errors settle and disconnected lists fail promptly', async 
   assert.equal((await client.listWorkspaces()).length, 1);
 });
 
+test('reconnect restores the selected follow behind an open picker without changing its filter', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.queries.record.ready && controller.queries.connectionSettled);
+  await controller.actions.switchSession('all');
+  const before = controller.queries.record;
+  fixture.disconnect();
+  await until(() => !controller.state.online);
+  await until(() => controller.state.online && controller.queries.connectionSettled && controller.queries.record.ready);
+  assert.notEqual(controller.queries.record, before);
+  assert.equal(controller.state.sessionId, 's1');
+  assert.equal(controller.state.screen, 'sessions');
+  assert.equal(controller.state.showAllSessions, true);
+  assert.equal(controller.actions.showChat(), true);
+  assert.equal(controller.queries.record.ready, true);
+  assert.equal(fixture.calls.some(call => ['session/prompt', 'session/cancel'].includes(String(call.method))), false);
+});
+
+test('reconnect does not reapply the startup session after the operator leaves it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(() => controller.stop());
+  controller.start();
+  await until(() => controller.queries.record.ready && controller.queries.connectionSettled);
+  await controller.actions.switchWorkspace('w1');
+  fixture.disconnect();
+  await until(() => !controller.state.online);
+  await until(() => controller.state.online && controller.queries.connectionSettled);
+  assert.equal(controller.state.sessionId, undefined);
+  assert.equal(controller.state.workspaceId, 'w1');
+  assert.equal(controller.state.screen, 'sessions');
+});
+
 test('workspace and session commands switch across workspaces without creating or cancelling agents', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.baseline = [workspace, { ...workspace, workspaceId: 'w2', title: 'Project β', path: '/host/second', sessionIds: ['s2'] }];
@@ -226,4 +261,33 @@ test('a claimed queue item cannot be removed or resubmitted by a stale action', 
   assert.match(controller.state.lastFailure, /session\/queue-item-not-found/);
   assert.equal(fixture.calls.filter(call => call.method === 'session/updateQueue').length, 1);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
+});
+
+test('cancelling a workspace baseline releases its subscription and ignores late frames', async () => {
+  const client = new Client('http://localhost');
+  let listener!: Parameters<Client['subscribe']>[2];
+  let opened = 0;
+  let cancelled = 0;
+  client.subscribe = (_endpoint, _args, next) => { opened++; listener = next; return { cancel: () => { cancelled++; } }; };
+  const abort = new AbortController();
+  const reading = client.listWorkspaces(abort.signal);
+  abort.abort();
+  await assert.rejects(reading, { name: 'AbortError' });
+  assert.equal(cancelled, 1);
+  listener.item({ type: 'baseline', value: { items: [], archivedSessionIds: ['late'] } });
+  assert.equal(client.archivedSessionIds.size, 0);
+  await assert.rejects(client.listWorkspaces(abort.signal), { name: 'AbortError' });
+  assert.equal(opened, 1);
+});
+
+test('a synchronous workspace baseline also releases its subscription', async () => {
+  const client = new Client('http://localhost');
+  let cancelled = 0;
+  client.subscribe = (_endpoint, _args, listener) => {
+    listener.item({ type: 'baseline', value: { items: [{ workspaceId: 'w' }], archivedSessionIds: ['s'] } });
+    return { cancel: () => { cancelled++; } };
+  };
+  assert.deepEqual(await client.listWorkspaces(), [{ workspaceId: 'w' }]);
+  assert.equal(cancelled, 1);
+  assert.deepEqual([...client.archivedSessionIds], ['s']);
 });

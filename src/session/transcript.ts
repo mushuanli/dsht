@@ -1,9 +1,11 @@
 /** Human transcript projection from durable events and ephemeral assistant chunks. */
 import sliceAnsi from 'slice-ansi';
 import type { HistoryLimits } from './memory.ts';
-import type { PromptRecord } from './info.ts';
 import { array, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import { safeText, toolLine } from '../text.ts';
+
+/** A durable user prompt projected from the transcript, before recall retention. */
+export interface PromptRecord { seq: number; text: string }
 
 interface ToolSummary { name: string; operation?: string; command?: string }
 

@@ -46,6 +46,7 @@ export async function sessionCostHistory(client: Client, session: ObjectValue, s
 /** Page one addressed session's history into the billing events the ledger folds. */
 async function readCostHistory(client: Client, address: ObjectValue, signal: AbortSignal, onPage?: () => void,
   onRecords?: (records: readonly Json[]) => void): Promise<{ cursor: number; events: ObjectValue[] }> {
+  signal.throwIfAborted();
   onPage?.();
   const snapshot = await new Promise<ObjectValue>((resolve, reject) => {
     let sub: Subscription | undefined;

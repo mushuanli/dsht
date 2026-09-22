@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Subscription } from '../transport/client.ts';
 import type { HostAccess } from '../transport/host.ts';
 import { array, errorText, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
-import type { ControllerStore, State } from '../state.ts';
+import type { SessionStore } from './state.ts';
 import { saveSessionLog } from './export.ts';
 import { saveTranscriptHtml } from './export-html.ts';
 import { historyLayout, releaseHistoryLayout, type SessionRender } from './history.ts';
@@ -14,7 +14,7 @@ import { sessionLabel } from '../session-title.ts';
 import { fileReferences, type FileReference } from './references.ts';
 import { SessionRuntime } from './runtime.ts';
 import type { Telemetry } from './telemetry.ts';
-import { PromptCache, type InteractionState, type ModelState, type OptionState, type PanelState, type PromptIndex, type SessionInfo } from './info.ts';
+import { PromptCache, type InteractionState, type OptionState, type PromptIndex, type SessionInfo } from './info.ts';
 import type { MutationAdmission } from './mutation-gate.ts';
 import { SessionMutationGate } from './mutation-gate.ts';
 import type { Reasoning } from './history.ts';
@@ -22,13 +22,12 @@ import { recordPrompts, Transcript } from './transcript.ts';
 import type { ConnectionView } from './connection-view.ts';
 import type { HistorySearch, AnswerValue, PendingInteraction, RemovalTarget } from './types.ts';
 import { projectionSnapshot, type ControlFrame, type HostEvent } from '../transport/events.ts';
-import { toolLine } from '../text.ts';
+import { HistoryReader } from './history-reader.ts';
+import { SessionInteractions } from './interactions.ts';
+import { SessionNavigator } from './navigator.ts';
 
 /** Built-in preset identifiers and the labels the web session header shows. */
 const BUILT_IN_MODES = new Map([['standard', 'Standard mode'], ['ptc', 'PTC mode'], ['minimal', 'Minimal mode'], ['cordis', 'Creator mode']]);
-
-/** Bounded match count for one history search. */
-const SEARCH_MATCH_LIMIT = 200;
 
 /** Bounded page count for the prompt backfill that runs once per opened session. */
 const PROMPT_BACKFILL_PAGES = 200;
@@ -36,7 +35,9 @@ const PROMPT_BACKFILL_PAGES = 200;
 /** Owns the selected session: its follow stream, transcript, history window and interactions. */
 export class SessionController {
   private follow: Subscription | undefined;
-  private interactions = new Map<string, PendingInteraction>();
+  private readonly history: HistoryReader;
+  private readonly interactions: SessionInteractions;
+  private readonly navigation: SessionNavigator;
   /** Reading protection: reclamation pauses while the reader is away from the live end. */
   private historyPinned = false;
   /** Host runtime mirrors for every session this connection has seen. */
@@ -45,7 +46,7 @@ export class SessionController {
   private promptBackfill?: AbortController;
   /** Prompts of sessions this process has already read, so re-opening one costs no page request. */
   private readonly promptCache = new PromptCache();
-  /** Prompt index, composer and reading view of the selected session; the instance `State.session` exposes. */
+  /** Prompt index, record, history window and interaction state of the selected session. */
   private get info(): SessionInfo { return this.store.state.session; }
   private get prompts(): PromptIndex { return this.info.prompts; }
   private stoppingSession?: string;
@@ -53,10 +54,36 @@ export class SessionController {
   private admission: Promise<Json | undefined> | undefined;
   /** Admission order of this session's writes, so two concurrent decisions cannot interleave. */
   private readonly mutations: SessionMutationGate;
-  constructor(private readonly store: ControllerStore, private readonly host: HostAccess,
+  constructor(private readonly store: SessionStore, private readonly host: HostAccess,
     private readonly connection: ConnectionView, private readonly historyLimits: HistoryLimits,
     report?: (admission: MutationAdmission) => void) {
     this.mutations = new SessionMutationGate(report);
+    this.navigation = new SessionNavigator({
+      require: () => this.host.require(), client: () => this.host.client(),
+      online: () => this.host.online(), signal: () => this.host.signal(),
+      read: () => this.store.state, publish: patch => this.store.update(patch),
+      selection: () => this.store.selection(),
+      leave: () => {
+        this.store.bumpSelection();
+        this.follow?.cancel(); this.follow = undefined;
+        this.releaseTranscript();
+      },
+      follow: id => this.followSession(id, true),
+    });
+    this.interactions = new SessionInteractions({
+      focused: () => this.store.state.pending[0],
+      admit: async (sessionId, dispatch) => { await this.mutations.admit(sessionId, 'normal', dispatch); },
+      reply: (eventId, outcome) => this.connection.reply(eventId, outcome),
+      changed: () => this.store.update({}),
+    });
+    this.history = new HistoryReader({
+      require: () => this.host.require(), online: () => this.host.online(), signal: () => this.host.signal(),
+      selected: () => ({ sessionId: this.sessionId, revision: this.store.selection(), record: this.info.record }),
+      current: selection => selection.revision === this.store.selection() && selection.sessionId === this.store.state.sessionId
+        && selection.record === this.info.record,
+      owns: source => source === this.info.record || source === this.info.window,
+      changed: () => this.store.update({}),
+    });
   }
 
   /** Host running state covers model generation, tools, and waits between assistant attempts. */
@@ -77,11 +104,11 @@ export class SessionController {
   }
 
   /** Current agent-preset name, matching the web header's built-in labels and custom metadata. */
-  get sessionMode(): string | undefined {
+  sessionMode(presets: readonly ObjectValue[] = []): string | undefined {
     if (!this.store.state.sessionId) return undefined;
     const id = this.runtime.telemetry.view(this.store.state.sessionId).values.agentPreset;
     if (typeof id !== 'string') return undefined;
-    const preset = this.store.state.presets?.find(item => item.id === id);
+    const preset = presets.find(item => item.id === id);
     return preset?.trust === 'system' && BUILT_IN_MODES.has(id) ? BUILT_IN_MODES.get(id)
       : typeof preset?.name === 'string' ? preset.name : id;
   }
@@ -93,13 +120,7 @@ export class SessionController {
   }
 
   /** Present only sessions explicitly accounted to the selected workspace. */
-  get visibleSessions(): ObjectValue[] {
-    const sessions = this.store.state.sessions.filter(item => !this.host.client()?.archivedSessionIds.has(string(item.sessionId)));
-    if (this.store.state.showAllSessions || !this.store.state.workspaceId) return sessions;
-    const workspace = this.store.state.workspaces.find(item => item.workspaceId === this.store.state.workspaceId);
-    const ids = new Set(array(workspace?.sessionIds ?? []).map(string));
-    return sessions.filter(item => ids.has(string(item.sessionId)));
-  }
+  get visibleSessions(): ObjectValue[] { return this.navigation.visibleSessions; }
 
   /** Whether a turn, cancellation or prompt admission is still in flight. */
   get active(): boolean { return this.interruptTask !== undefined || this.running || this.admission !== undefined; }
@@ -112,6 +133,7 @@ export class SessionController {
    */
   setViewWindow(window?: Transcript): void {
     if (this.info.window === window) return;
+    if (this.info.window) this.history.cancel(this.info.window);
     this.info.closeWindow();
     this.info.window = window;
     this.store.update({});
@@ -140,24 +162,24 @@ export class SessionController {
 
   /** Invalidate in-flight work and drop transient interactions when a generation ends. */
   endGeneration(): void {
+    this.navigation.reset();
+    this.history.cancel();
     this.store.bumpSelection();
     this.info.record.ready = false;
     this.interactions.clear();
   }
 
-  /** Wait for an in-flight cancellation so shutdown leaves nothing running. */
-  async settle(): Promise<void> { await this.interruptTask; }
+  /** Wait for cancellation and foreground history tasks before releasing their records. */
+  async settle(): Promise<void> { await this.interruptTask; await this.history.settle(); await this.interactions.settle(); await this.navigation.settle(); }
 
   /** Release the selected transcript and its layout caches. */
-  release(): void { this.releaseTranscript(); }
+  release(): void { this.navigation.reset(); this.releaseTranscript(); }
 
   /** Pending interactions for the selected chat session, derived independently of frame order.
-   * @param state - State being published.
+   * @param sessionId - Session whose pending interactions are being published.
    * @returns Retained question and approval frames for that session.
    */
-  pendingFor(state: State): PendingInteraction[] {
-    return [...this.interactions.values()].filter(frame => frame.sessionId === state.sessionId);
-  }
+  pendingFor(sessionId: string | undefined): PendingInteraction[] { return this.interactions.pendingFor(sessionId); }
 
   /** Unanswered interactions by session, so a list can show who is waiting without opening them.
    *
@@ -167,35 +189,18 @@ export class SessionController {
    * until the host replays the pending waterfalls.
    * @returns One count per session holding at least one unanswered interaction.
    */
-  pendingCounts(): ReadonlyMap<string, number> {
-    const counts = new Map<string, number>();
-    for (const frame of this.interactions.values()) {
-      if (frame.sessionId === '') continue;
-      counts.set(frame.sessionId, (counts.get(frame.sessionId) ?? 0) + 1);
-    }
-    return counts;
-  }
+  pendingCounts(): ReadonlyMap<string, number> { return this.interactions.counts(); }
 
   /** Retain a recognized host interaction; anything else belongs to the connection to delegate.
    * @param event - One normalized host event.
    * @returns Whether this domain retained the event for an answer.
    */
-  accept(event: HostEvent): boolean {
-    if (event.kind === 'approval-request') {
-      this.interactions.set(event.eventId, { kind: 'approval', eventId: event.eventId, sessionId: event.sessionId,
-        description: event.description });
-    } else if (event.kind === 'question-request') {
-      this.interactions.set(event.eventId, { kind: 'question', eventId: event.eventId, sessionId: event.sessionId,
-        questions: event.questions });
-    } else return false;
-    this.store.update({});
-    return true;
-  }
+  accept(event: HostEvent): boolean { return this.interactions.accept(event); }
 
   /** Drop a waterfall the host cancelled.
    * @param eventId - Correlation id previously retained.
    */
-  cancelled(eventId: string): void { this.interactions.delete(eventId); this.store.update({}); }
+  cancelled(eventId: string): void { this.interactions.cancelled(eventId); }
 
   /** Apply one host running-state notification to the session list and status line.
    * @param sessionId - Session whose state changed.
@@ -267,11 +272,12 @@ export class SessionController {
   /** Refresh both lists from the host, then show the requested picker.
    * @param screen - Picker to display after the refresh.
    */
-  async showPicker(screen: 'workspaces' | 'sessions'): Promise<void> {
-    const client = this.host.require();
-    const [workspaces, sessions] = await Promise.all([client.listWorkspaces(), client.listSessions()]);
-    this.store.update({ screen, workspaces, sessions });
+  showPicker(screen: 'workspaces' | 'sessions', signal?: AbortSignal): Promise<void> {
+    return this.navigation.showPicker(screen, signal);
   }
+
+  /** Refresh navigation data without taking the reader to another screen. */
+  refreshLists(): Promise<void> { return this.navigation.refreshLists(); }
 
   /** Return to the selected conversation without re-selecting it.
    *
@@ -279,11 +285,7 @@ export class SessionController {
    * transcript or lose the reading position, so this only changes which screen is shown.
    * @returns Whether there was a selected conversation to return to.
    */
-  showChat(): boolean {
-    if (this.store.state.sessionId === undefined) return false;
-    this.store.update({ screen: 'chat' });
-    return true;
-  }
+  showChat(): boolean { return this.navigation.showChat(); }
 
   /** Resolve a removal command to one reviewable object without changing the selection.
    * @param kind - Workspace registration removal or session archival.
@@ -309,11 +311,13 @@ export class SessionController {
    */
   async removeTarget(target: RemovalTarget): Promise<void> {
     const client = this.host.require();
+    const intent = this.navigation.intent;
     const receipt = object(target.kind === 'workspace'
       ? await client.call('workspace/delete', { request: { workspaceId: target.id } })
       // Archiving a session is a write on that session, so it queues behind that session's admissions.
       : await this.mutations.admit(target.id, 'normal', () => client.call('workspace/archiveSession', { request: { sessionId: target.id } })));
     if (client !== this.host.client()) return;
+    const navigate = intent === this.navigation.intent;
     if (target.kind === 'session') {
       client.archivedSessionIds = new Set(array(receipt.archivedSessionIds).map(string));
       if (this.store.state.sessionId === target.id) this.pickWorkspace(this.store.state.workspaceId);
@@ -322,54 +326,30 @@ export class SessionController {
       this.store.update({ workspaces: this.store.state.workspaces.filter(row => row.workspaceId !== target.id),
         ...(this.store.state.workspaceId === target.id ? { workspaceId: undefined } : {}) });
     }
-    this.store.update({ screen: target.kind === 'workspace' ? 'workspaces' : 'sessions',
+    this.store.update({ ...(navigate ? { screen: target.kind === 'workspace' ? 'workspaces' as const : 'sessions' as const } : {}),
       status: target.kind === 'workspace' ? 'Workspace registration removed' : 'Session archived' });
     // A refresh failure must not make a successful mutation look like a rejected deletion.
-    try { await this.showPicker(target.kind === 'workspace' ? 'workspaces' : 'sessions'); }
+    try { await this.refreshLists(); }
     catch (error) { this.store.update({ lastFailure: `Removal completed; list refresh failed: ${errorText(error)}` }); }
   }
 
   /** Pick a workspace, or use all sessions when the identity is omitted.
    * @param workspaceId - Workspace to select, if any.
    */
-  pickWorkspace(workspaceId?: string): void {
-    this.store.bumpSelection();
-    this.follow?.cancel(); this.follow = undefined;
-    this.releaseTranscript();
-    this.store.update({ workspaceId, sessionId: undefined, showAllSessions: false, screen: 'sessions' });
-  }
+  pickWorkspace(workspaceId?: string): void { this.navigation.pickWorkspace(workspaceId); }
 
   /** Open a workspace picker, or resolve a workspace by ID, exact title/path, or unique ID prefix.
    * @param query - Workspace target, if any.
    */
-  async switchWorkspace(query?: string): Promise<void> {
-    if (!query) { await this.showPicker('workspaces'); return; }
-    const client = this.host.require();
-    const workspaces = await client.listWorkspaces();
-    const workspace = resolveTarget(workspaces, query, 'workspaceId', item => [string(item.title), string(item.path)]);
-    const sessions = await client.listSessions();
-    this.store.update({ workspaces, sessions });
-    this.pickWorkspace(string(workspace.workspaceId));
-  }
+  switchWorkspace(query?: string, signal?: AbortSignal): Promise<void> { return this.navigation.switchWorkspace(query, signal); }
 
   /** Guide workspace selection, list all sessions with `all`, or resolve an exact session target.
    * @param query - Session target, `all`, or nothing for the guided picker.
    */
-  async switchSession(query?: string): Promise<void> {
-    if (!query || query === 'all') {
-      await this.showPicker(query === 'all' || this.store.state.workspaceId ? 'sessions' : 'workspaces');
-      this.store.update({ showAllSessions: query === 'all' });
-      return;
-    }
-    const client = this.host.require();
-    const [workspaces, sessions] = await Promise.all([client.listWorkspaces(), client.listSessions()]);
-    const session = resolveTarget(sessions, query, 'sessionId', item => [sessionLabel(item)]);
-    this.store.update({ workspaces, sessions });
-    await this.selectSession(string(session.sessionId));
-  }
+  switchSession(query?: string, signal?: AbortSignal): Promise<void> { return this.navigation.switchSession(query, signal); }
 
   /** Prompt for a host path without starting a local agent. */
-  enterPath(): void { this.store.update({ screen: 'path' }); }
+  enterPath(): void { this.navigation.enterPath(); }
 
   /** Adopt the workspace whose registered path contains the directory this client runs in.
    *
@@ -379,37 +359,15 @@ export class SessionController {
    * @param directory - Directory this client was started in.
    * @returns The adopted workspace's id, or undefined when none matches.
    */
-  adoptLocalWorkspace(directory: string): string | undefined {
-    const slashed = (value: string): string => value.replace(/\\/g, '/').replace(/\/+$/, '');
-    const target = slashed(directory);
-    if (target === '') return undefined;
-    let best: { id: string; length: number } | undefined;
-    for (const workspace of this.store.state.workspaces) {
-      const path = slashed(string(workspace.path));
-      if (path === '' || (target !== path && !target.startsWith(`${path}/`))) continue;
-      if (best === undefined || path.length > best.length) best = { id: string(workspace.workspaceId), length: path.length };
-    }
-    if (best === undefined) return undefined;
-    this.pickWorkspace(best.id);
-    return best.id;
-  }
+  adoptLocalWorkspace(directory: string): string | undefined { return this.navigation.adoptLocalWorkspace(directory); }
 
   /** Register a host directory and move to its session picker.
    * @param path - Absolute directory path on the host.
    */
-  async createWorkspace(path: string): Promise<void> {
-    const result = object(await this.host.require().call('workspace/create', { request: { path } }));
-    const workspace = object(result.workspace);
-    await this.showPicker('workspaces');
-    this.pickWorkspace(string(workspace.workspaceId));
-  }
+  createWorkspace(path: string, signal?: AbortSignal): Promise<void> { return this.navigation.createWorkspace(path, signal); }
 
   /** Create a session only after the user explicitly selects New session. */
-  async createSession(): Promise<void> {
-    if (!this.store.state.workspaceId) throw new Error('Select a workspace before creating a session');
-    const result = object(await this.host.require().call('session/create', { request: { workspaceId: this.store.state.workspaceId } }));
-    await this.selectSession(string(result.sessionId));
-  }
+  createSession(signal?: AbortSignal): Promise<void> { return this.navigation.createSession(signal); }
 
   /** Create a session for another purpose without selecting it, named so a reader can tell it apart.
    *
@@ -443,6 +401,18 @@ export class SessionController {
    * @param sessionId - Session to follow.
    */
   async selectSession(sessionId: string): Promise<void> {
+    this.navigation.cancel();
+    this.followSession(sessionId, true);
+  }
+
+  /** Reattach the selected conversation after reconnect, keeping the current navigation context. */
+  restoreSelectedSession(): void {
+    const sessionId = this.store.state.sessionId;
+    if (sessionId !== undefined) this.followSession(sessionId, false);
+  }
+
+  private followSession(sessionId: string, navigate: boolean): void {
+    this.history.cancel();
     this.stoppingSession = undefined;
     this.store.bumpSelection();
     const selection = this.store.selection();
@@ -453,7 +423,8 @@ export class SessionController {
     const workspaceId = workspace ? string(workspace.workspaceId)
       : this.store.state.sessions.some(item => item.sessionId === sessionId) ? undefined : this.store.state.workspaceId;
     this.runtime.observe(sessionId);
-    this.store.update({ sessionId, workspaceId, showAllSessions: false, screen: 'chat', status: 'Loading session…' });
+    this.store.update({ sessionId, status: 'Loading session…',
+      ...(navigate ? { workspaceId, showAllSessions: false, screen: 'chat' as const } : {}) });
     this.follow = this.host.require().subscribe('session/follow', {
       request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true },
     }, {
@@ -480,16 +451,7 @@ export class SessionController {
   /** Wait for the selected follow snapshot, failing on disconnect or cancellation.
    * @param signal - Cancels waiting without closing the session.
    */
-  async waitForHistory(signal: AbortSignal): Promise<void> {
-    const transcript = this.info.record;
-    const deadline = Date.now() + this.host.require().timeoutMs;
-    while (!transcript.ready) {
-      signal.throwIfAborted();
-      if (!this.store.state.online || this.info.record !== transcript) throw new Error('Session changed while loading history');
-      if (Date.now() >= deadline) throw new Error('Session snapshot timed out');
-      await delay(20, undefined, { signal });
-    }
-  }
+  async waitForHistory(signal: AbortSignal): Promise<void> { await this.history.waitForHistory(signal); }
 
   /** Search the host's bounded global results, optionally retaining workspace members.
    * @param query - Literal message text.
@@ -611,24 +573,12 @@ export class SessionController {
   /** Answer the oldest selected-session interaction, after explicit user action.
    * @param value - Structured answer value or approval outcome.
    */
-  async answer(value: AnswerValue): Promise<void> {
-    const pending = this.store.state.pending[0];
-    if (!pending) throw new Error('No pending interaction');
-    await this.mutations.admit(this.sessionId, 'normal', () => this.reply(pending.eventId, { kind: 'result', value }));
-    this.interactions.delete(pending.eventId);
-    this.store.update({});
-  }
+  async answer(value: AnswerValue): Promise<void> { await this.interactions.answer(value); }
 
   /** Restrict an approval command to an approval request.
    * @param allowed - Whether the request is approved once.
    */
-  async approve(allowed: boolean): Promise<void> {
-    const pending = this.store.state.pending[0];
-    if (pending?.kind !== 'approval') throw new Error('No pending approval');
-    await this.mutations.admit(this.sessionId, 'normal', () => this.reply(pending.eventId, { kind: 'result', value: allowed ? 'allowed-once' : 'rejected' }));
-    this.interactions.delete(pending.eventId);
-    this.store.update({});
-  }
+  async approve(allowed: boolean): Promise<void> { await this.interactions.approve(allowed); }
 
   /** Dismiss the whole selected-session question set without answering it.
    *
@@ -636,15 +586,7 @@ export class SessionController {
    * `ASK_CANCELLED` — so the host records a user cancellation rather than an answer. A question
    * batch is answered as one request, so dismissals also discard partial local answers.
    */
-  async dismissQuestion(): Promise<void> {
-    const pending = this.store.state.pending[0];
-    if (pending?.kind !== 'question') throw new Error('No pending question');
-    await this.mutations.admit(this.sessionId, 'normal', () => this.reply(pending.eventId, { kind: 'rejected', error: {
-      name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED',
-    } }));
-    this.interactions.delete(pending.eventId);
-    this.store.update({});
-  }
+  async dismissQuestion(): Promise<void> { await this.interactions.dismissQuestion(); }
 
   /** Add a page before the retained window using its fixed opening cut.
    *
@@ -656,17 +598,7 @@ export class SessionController {
    * @param signal - Cancels local paging without interrupting the remote agent.
    * @param transcript - Transcript to extend; defaults to the live one.
    */
-  async older(signal?: AbortSignal, transcript = this.info.record): Promise<void> {
-    const selection = this.store.selection();
-    if (!transcript.ready || !transcript.hasMore || transcript.beforeSeq === undefined) return;
-    const result = await this.host.require().call('session/page', { request: {
-      address: { kind: 'session', sessionId: this.sessionId }, throughSeq: transcript.cursor,
-      beforeSeq: transcript.beforeSeq, maxMessages: 80,
-    } }, signal);
-    if (selection !== this.store.selection()) return;
-    transcript.addPage(result);
-    this.store.update({});
-  }
+  async older(signal?: AbortSignal, transcript = this.info.record): Promise<void> { await this.history.older(signal, transcript); }
 
   /** Recall one step through the session's prompt index; navigation never touches the network.
    * @param direction - Negative for older input, positive for newer input.
@@ -836,89 +768,37 @@ export class SessionController {
    * @param signal - Cancels HTTP and processing without cancelling the agent.
    * @returns Newest-first bounded summaries and an explicit truncation flag.
    */
-  async searchHistory(query: string, signal: AbortSignal): Promise<HistorySearch> {
-    const source = this.info.record;
-    if (!source.ready) throw new Error('Wait for the session snapshot');
-    const sessionId = this.sessionId;
-    const selection = this.store.selection();
-    const throughSeq = source.readThrough;
-    const needle = query.toLowerCase();
-    const result: HistorySearch = { items: [], truncated: false };
-    const scan = (transcript: Transcript): boolean => {
-      const messages = transcript.messages;
-      for (let index = messages.length - 1; index >= 0; index--) {
-        signal.throwIfAborted();
-        const message = messages[index]!;
-        if (message.role === 'Tool') continue;
-        const text = message.text;
-        const match = text.toLowerCase().indexOf(needle);
-        if (match < 0) continue;
-        if (result.items.length === SEARCH_MATCH_LIMIT) { result.truncated = true; return false; }
-        result.items.push({ seq: message.seq, role: message.role, preview: Buffer.from(toolLine(text.slice(Math.max(0, match - 40), match + needle.length + 100), 160)).toString('utf8') });
-      }
-      return true;
-    };
-    signal.throwIfAborted();
-    if (!scan(source)) return result;
-    let beforeSeq = source.beforeSeq;
-    let hasMore = source.hasMore;
-    while (hasMore && beforeSeq !== undefined) {
-      const page = object(await this.host.require().call('session/page', { request: {
-        address: { kind: 'session', sessionId }, throughSeq, beforeSeq, maxMessages: 80,
-      } }, signal));
-      signal.throwIfAborted();
-      if (selection !== this.store.selection()) throw new Error('Session changed while searching history');
-      const temporary = new Transcript();
-      try {
-        temporary.accept({ type: 'snapshot', cursor: throughSeq, assistantStream: { revision: 0 }, records: page.records, hasMore: page.hasMore });
-        const next = temporary.beforeSeq;
-        if (temporary.hasMore && (next === undefined || next >= beforeSeq)) throw new Error('Host history page did not advance');
-        if (!scan(temporary)) return result;
-        beforeSeq = next; hasMore = temporary.hasMore;
-      } finally { temporary.dispose(); }
-    }
-    return result;
-  }
+  async searchHistory(query: string, signal: AbortSignal): Promise<HistorySearch> { return this.history.searchHistory(query, signal); }
 
-  /** Load a separate small window ending at a search target; the live transcript keeps following.
+  /** Select a readable window by sequence; temporary records never escape to the UI.
    * @param target - Durable message sequence to display.
    * @param signal - Cancels the target-page request.
-   * @returns A caller-owned historical window that must be disposed when closed.
    */
-  async historyAt(target: number, signal: AbortSignal): Promise<Transcript> {
-    const source = this.info.record;
-    const selection = this.store.selection();
-    const page = object(await this.host.require().call('session/page', { request: {
-      address: { kind: 'session', sessionId: this.sessionId }, throughSeq: source.readThrough,
-      beforeSeq: target + 1, maxMessages: 80,
-    } }, signal));
+  async openHistory(target: number, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
-    if (selection !== this.store.selection()) throw new Error('Session changed while opening history');
-    const window = new Transcript();
+    const selection = this.store.selection();
+    const record = this.info.record;
+    const displayed = this.info.window ?? record;
+    const loaded = displayed.messages.some(message => message.seq === target) ? displayed
+      : record.messages.some(message => message.seq === target) ? record : undefined;
+    const window = loaded ?? await this.history.historyAt(target, signal);
     try {
-      window.accept({ type: 'snapshot', cursor: source.readThrough, assistantStream: { revision: 0 }, records: page.records, hasMore: page.hasMore });
-      if (!window.messages.some(message => message.seq === target)) throw new Error('The host did not return the requested message');
-      return window;
-    } catch (error) { window.dispose(); throw error; }
+      signal.throwIfAborted();
+      if (selection !== this.store.selection() || record !== this.info.record || this.store.state.screen !== 'chat') {
+        throw new Error('Session changed while opening history');
+      }
+      this.setViewWindow(window === record ? undefined : window);
+    } catch (error) {
+      if (!loaded) window.dispose();
+      throw error;
+    }
   }
 
   /** Load the prefix required for an explicit history jump; never loop on an unadvancing page.
    * @param target - Visible record sequence, or first for the oldest available history.
    * @param signal - Cancels local paging without interrupting the remote agent.
    */
-  async historyThrough(target: number | 'first', signal: AbortSignal): Promise<void> {
-    const transcript = this.info.record;
-    if (!transcript.ready) throw new Error('Wait for the session snapshot');
-    while (transcript.hasMore && (target === 'first' || transcript.beforeSeq !== undefined && transcript.beforeSeq > target)) {
-      signal.throwIfAborted();
-      const before = transcript.beforeSeq;
-      await this.older(signal);
-      if (this.info.record !== transcript) throw new Error('Session changed while loading history');
-      if (transcript.hasMore && (before === undefined || transcript.beforeSeq === undefined || transcript.beforeSeq >= before)) {
-        throw new Error('Host history page did not advance');
-      }
-    }
-  }
+  async historyThrough(target: number | 'first', signal: AbortSignal): Promise<void> { await this.history.historyThrough(target, signal); }
 
   /** Reclaim reloadable history unless the user is reading away from the tail.
    * @returns Number of removed records.
@@ -932,6 +812,7 @@ export class SessionController {
 
   /** Release the selected transcript and its layout caches. */
   private releaseTranscript(): void {
+    this.history.cancel();
     this.promptBackfill?.abort(); this.promptBackfill = undefined;
     this.info.reset();
   }
@@ -942,8 +823,4 @@ export class SessionController {
     return this.store.state.sessionId;
   }
 
-  /** Answer one retained waterfall through the connection's event-result endpoint. */
-  private async reply(eventId: string, outcome: Json): Promise<void> {
-    await this.connection.reply(eventId, outcome);
-  }
 }

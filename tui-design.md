@@ -187,9 +187,14 @@ C4Component
 
 域内模块只依赖 `transport/`、Node 标准库与 `ws`；`session/`、`cost/`、`catalog/` 与 `controller/` 都不引用 React 或 Ink，只有 `ui/` 引用。完整规则与机械检查见 2.4。
 
+会话域的异步所有权分为三部分：`HistoryReader` 管历史读取，`SessionNavigator` 管页面意图和列表请求，
+`SessionInteractions` 管宿主待答请求及响应；SessionController 保留所选记录、follow 与会话写入门。
+导航取消贯穿列表与创建请求，迟到回执不能覆盖后来选择的页面；后台列表刷新不改变页面。
+交互按请求实例合并重复响应，发送前检查取消，确认后只移除同一实例；失败后允许重试。
+
 ### 2.4 模块分层与依赖规则
 
-目录即架构边界：每个业务域一个目录，跨域导入只允许沿依赖方向，并且必须走目标域的 `index.ts`。
+目录即架构边界：每个业务域一个目录，内部跨域导入只允许沿依赖方向。可使用域入口 `index.ts` 或具体模块，避免为内部能力扩大 barrel 导出；UI 叶子只经 `contracts.ts` 与共享叶子读取领域类型。包对外导出仍由 package.json 的 exports 约束。
 
 ```mermaid
 C4Component
@@ -230,13 +235,13 @@ C4Component
 | `session-title.ts` | `json.ts`、`text.ts` | 宿主会话标题投影的读取；域与 UI 共用 |
 | `storage/` | `storage` | 唯一允许导入 `node:fs` / `node:fs/promises` 的域；不导入任何其他业务域 |
 | `transport/` | `transport`、`storage`、`json.ts`、`text.ts` | 不包含业务规则；`events.ts` 是 wire 帧的唯一解码处 |
-| `session/` | `transport`、`session`、`state.ts`、`storage`、`text.ts`、`json.ts`、`session-title.ts` | 纯 TypeScript，不含 React |
+| `session/` | `transport`、`session`、`storage`、`text.ts`、`json.ts`、`session-title.ts`、`references.ts` | 纯 TypeScript，不含 React |
 | `cost/` | `transport`、`cost`、`storage`、`text.ts`、`json.ts` | 不依赖 session 投影，也不依赖 ui；React 与 Ink 不进入该域 |
-| `catalog/` | `transport`、`catalog`、`state.ts`、`json.ts` | 独立的模型元数据域 |
+| `catalog/` | `transport`、`catalog`、`json.ts` | 独立的模型元数据域 |
 | `shell/` | `shell`、`storage`、`text.ts`、`json.ts` | 唯一允许导入 `node:child_process` 的域 |
 | `slash/` | `slash` | 纯叶子：命令目录、`parseCommand(line)` 与 `COMMAND_POLICY`，不含 UI 事实与副作用 |
 | `controller/` | `transport`、`session`、`cost`、`catalog`、`controller`、`shell`、`state.ts`、`storage`、`text.ts`、`json.ts`、`contracts.ts`、`slash` | 应用门面：事件路由、生命周期、Actions/Queries、命令策略、内存日志与快捷提示词存储 |
-| `contracts.ts` | `json.ts`、`transport`、`session`、`cost`、`catalog`、`shell` | **只含类型**：门禁拒绝 `const`/`function`/`class` |
+| `contracts.ts` | `json.ts`、`transport`、`session`、`cost`、`catalog`、`shell` | **只含类型**：语法白名单只允许类型定义和显式类型导入/导出 |
 | `ui/` | `ui`、`controller`（仅 `app.tsx`/`mount.tsx`）、`contracts.ts`、`json.ts`、`text.ts`、`slash`、`session-title.ts`、`references.ts` | 唯一允许 React 与 Ink 的域；不得导入 `transport/` 或任何 feature |
 | `cli/` | 全部 | 组装入口，只通过 `ui/mount.tsx` 渲染 |
 | `state.ts` | `transport`、`session`、`shell`、`json.ts` | 共享状态契约 |
@@ -244,7 +249,17 @@ C4Component
 
 **九条禁止边**（每条一个合成拒绝用例，且没有豁免）：B1 `ui/*`（除 `ui/app.tsx`/`ui/mount.tsx`）不得导入 controller；B2 `ui` 不得导入 `transport`；B3 `ui` 只能经 `contracts.ts` 与共享叶子读取 feature；B4 feature 不得导入 `ui`；B5 controller 不得导入 `ui`；B6 feature 之间不得互相导入（**含 `import type`**）；B7 feature 不得导入 controller；B8 `transport`/`storage` 不得导入上层；B9 `slash` 只能导入自身。
 
-这些规则由 `tests/architecture/dependencies.test.ts` 机械检查：它遍历 `src/` 的全部模块、解析导入说明符，拒绝 `storage/` 之外的任何 `node:fs` 与 `shell/` 之外的 `node:child_process` 导入，并附带合成用例证明每个禁止方向都会被拒绝。
+这些规则由 `tests/architecture/dependencies.test.ts` 机械检查，解析器位于 `tests/support/source-dependencies.ts`。
+它使用 TypeScript AST 遍历 `src/` 全部模块，识别静态导入/导出、import type 表达式、字面量动态 import 与 require；
+注释和字符串里的代码示例不形成依赖。计算模块路径被显式拒绝，缺失本地目标也会失败。
+类型边同样遵守层级方向；契约只能包含类型声明和显式类型导入/导出，不能含副作用或运行时代码。
+检查同时构建仅值依赖图与包含类型边的图，要求两者无环；普通导入即使只被用于类型，也保守归入值依赖。
+因此图描述源码的依赖能力，不声称等同于编译产物的实际执行图。
+文件系统、进程执行和渲染器的域限制与九条禁止方向均有合成拒绝用例。
+
+命令联合类型与 LoopOptions 放在 `slash/types.ts`，解析器和命令目录共同依赖它；
+PromptRecord 属于 `session/transcript.ts` 的投影输出，提示词索引消费它，记录模块不反向导入 SessionInfo。
+原解析器与 SessionInfo 路径保留类型再导出，已有类型调用方仍可编译。
 
 ### 2.5 状态与渲染模型
 
@@ -259,11 +274,11 @@ C4Component
 
 **事件只有一个路由点**：`ConnectionController` 解码 `$events` 后调 `listener.event(event)`，由 `Controller.event` 分发给 `session`、`catalog` 与 `cost`；connection 不认识任何会话概念，session 也不读宿主字段名。
 
-**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；输入框、`@` 菜单高亮、面板可见性与阅读视图（滚动、折叠、实时折叠模式）都是 `ui/app.tsx` 的组件状态，切换会话由一处 effect 清理；`pinned` 是 `SessionController` 的私有标志。
+**状态就近持有**：`SessionInfo` 只留 `sessionId`、`record`、`prompts`、`window`、`interaction`；草稿、光标、临时编辑和寄存草稿归 `ui/input/use-composer.ts`，提交按会话身份与草稿修订号消费，迟到结果不能清空新草稿。`ui/dialogs/use-panels.ts` 持有面板状态与键盘占用规则；`@` 菜单高亮与阅读视图（滚动、折叠、实时折叠模式）仍是 `ui/app.tsx` 的组件状态，随会话切换清理；`pinned` 是 `SessionController` 的私有标志。`ui/input/use-deferred-lines.ts` 持有已提交命令的等待队列，连接及会话快照就绪后重新授权并逐条执行。
 
 **UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。
 
-**扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。UI 侧的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、保留键与关闭方式，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
+**扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。`usePanels` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键及保留键，关闭操作由同一 hook 处理，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
 阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话；状态另用 `statusPaused = copyMode || (screen === 'chat' && dialogOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 对话框与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
@@ -282,7 +297,7 @@ C4Component
 | 成本按请求计价 | 折叠持久用量事件而非对遥测基线做差 | 基线差会丢失重试、fork 继承与峰谷归属 |
 | 账本是投影 | 每次扫描按当前价目表重新折叠整段历史，落盘只保留会话汇总 | 账本可由宿主日志重建；修改 `prices.json` 在下一次扫描重算它覆盖的请求 |
 | Controller 是门面 | 门面只负责状态发布、选择器世代与生命周期，实现分布在四个域控制器 | 防止再次长出 God Object，同时保留 UI 与测试沿用的公开 API |
-| 目录即边界 | 每个业务域一个目录，跨域导入走 `index.ts` | 目录表达架构，依赖方向可被机械检查 |
+| 目录即边界 | 每个业务域一个目录，跨域导入沿允许方向 | 目录表达架构，依赖方向可被机械检查 |
 | 公开 API 与布局解耦 | `src/index.ts` 是唯一库门面，`exports` 指向编译产物 | 内部目录调整不改变 `@itookit/dsht` 的导入路径 |
 | 首个工作区可由启动目录决定 | `ready()` 用 `localDirectory` 在已注册工作区里按路径分段做最长匹配，命中就 `pickWorkspace` 并落在会话列表 | 在项目目录里启动已经把"用哪个工作区"回答了；远端路径通常不匹配，因此这是一条安全的自动捷径而非新的默认 |
 | 本地 shell 只在客户端 | `!` 由 `src/shell/` 执行，cwd 是客户端目录，绝不经过宿主、`commands/execute` 或 `session/prompt` | 宿主的 shell 是模型自己的工具；在操作者机器上执行命令是另一个需求，且只能由人敲出的 `!` 触发 |
@@ -454,13 +469,21 @@ class Client {
        timeoutMs?: number | null): Promise<Json | undefined>
   connect(): Promise<void>                                 // 重复调用抛错
   subscribe(endpoint: string, args: ObjectValue, listener: Listener): Subscription
-  listWorkspaces(): Promise<ObjectValue[]>                 // 消费并取消首个 baseline
-  listSessions(workspaceId?: string): Promise<ObjectValue[]>
+  listWorkspaces(signal?: AbortSignal): Promise<ObjectValue[]>                 // 消费并取消首个 baseline
+  listSessions(workspaceId?: string, signal?: AbortSignal): Promise<ObjectValue[]>
   close(): Promise<void>
 }
 ```
 
 `Listener` 为 `{ item(value: Json | undefined): void; end(error?: Error): void }`。构造器拒绝带路径、查询、hash 或内嵌凭据的 URL。
+
+`Client.close()` 是客户端寿命的终点：它取消 HTTP 和未完成握手，并发调用共同等待物理 socket 关闭。
+关闭后的实例不能再次 connect；仅对端断线时可以保留 Cookie 重连，失败握手在清理完成后也允许重试。
+ConnectionController 每个重连代际创建新 Client；认证、握手、基线及应用初始化之间检查停止信号。
+`ConnectionStreams` 管 `$events` / `session/control`、基线超时及订阅回收；关键流失效立即结束整个代际，
+不能继续等另一条流的基线超时。控制指标不可用或不可解码时沿用降级显示。
+ConnectionStore 只提供 online 读取与连接状态发布，不持有会话、导航、模型或 shell 的写入能力。
+
 
 #### 3.2.2 `Controller` 门面（`src/controller/controller.ts`）
 
@@ -483,7 +506,7 @@ interface ControllerOptions {
 class Controller implements ControllerStore, ConnectionListener {
   readonly state: State
   readonly actions: Actions      // prompt / switchSession / answer / approve / selectModel / dispatch …
-  readonly queries: Queries      // running / sessionName / telemetry / render / searchHistory / historyAt …
+  readonly queries: Queries      // running / sessionName / telemetry / render / references …
   readonly connection: ConnectionController
   readonly session: SessionController
   readonly catalog: CatalogController
@@ -509,10 +532,24 @@ class Controller implements ControllerStore, ConnectionListener {
 | --- | --- | --- |
 | `ConnectionController` | `src/controller/connection.ts` | Client 生命周期、认证、连接世代、退避重连、`$events` 与 `session/control` 订阅、遥测世代、运行状态与观察起点缓存 |
 | `SessionController` | `src/session/controller.ts` | 所选会话、follow 流、transcript、历史分页与搜索、输入投递、取消、审批与提问、工作区与会话导航、归档、导出、`@` 引用 |
+| `LoopCoordinator` | `src/controller/loop-coordinator.ts` | 当前运行选择、每次运行独立的验证/提交/截止状态、结果与清理；通过 LoopHost 接收应用能力 |
 | `CatalogController` | `src/catalog/controller.ts` | `session/modelCatalog`、`session/selectModel`、`agentPresets/list` 与目录刷新 |
 | `CostController` | `src/cost/controller.ts` | 启动扫描、60 秒定时、回合结束刷新、`/cost` 刷新与并发合并 |
 
 域控制器之间的契约是显式的：`HostAccess`（`src/transport/host.ts`）给出 `client/require/online/signal`，`ConnectionView`（`src/session/connection-view.ts`）给出 `telemetryView/runningFor/observedAt/observe/fail/reply`，`CostHost`（`src/cost/controller.ts`）给出扫描所需的宿主访问与状态发布。`interrupt()` 仍会合并并发调用：`interruptTask` 存在时直接复用；返回 `true` 表示可以退出（仅在空闲、无 admission、无排队输入且不忙时）。
+
+`CatalogHost` 只在 HostAccess 上增加选择修订号/会话身份和 `CatalogUpdate` 发布能力，Catalog 不再依赖 ControllerStore。模型读取与选择接收前台取消信号；后台目录和 preset 请求归当前 Catalog 代际所有，reset/close 后的迟到结果不能发布。首次连接先发布 online 再启动目录刷新；设置变更启动新刷新并取消旧读取。取消只终止本机请求与结果发布，不承诺撤销已到达宿主的设置变更。
+
+`SessionStore` 定义在 `session/state.ts`，只暴露会话域读取和发布能力；应用 State 组合 SessionState，会话域不导入整份应用状态。`HistoryReader`（`session/history-reader.ts`）负责快照等待、翻页、搜索、定位窗口及前缀加载，只接收所选记录、身份检查、传输与刷新通知。每个读取任务拥有取消器；换会话/断线取消旧任务，关闭独立历史窗口取消其翻页。读取结果在发布前再次检查归属，停止时等待任务收尾，不能重新填充已释放的窗口。
+
+`ui/chat/use-history-view.ts` 管理滚动、折叠、布局缓存与读取意图，只接收记录元数据和操作回调。
+新滚动意图取消迟到跳转，卸载取消视图发起的读取；跨会话搜索在结果发布前检查选中身份。
+UI 通过 `actions.openHistory(target, signal)` 按序号打开记录、通过 `actions.showLatest()` 返回实时尾部，
+不再自行获取和安装临时 Transcript。SessionController 检查归属并负责失败释放；主记录与窗口的只读查询面仍待进一步收窄。
+历史跳转按包含本地 shell 块的合并行索引定位，保留原有分页、折叠与历史保护行为。
+
+
+`CostController` 先登记共享任务再通知观察者，防止同步刷新启动第二次扫描。已取消的调用者直接拒绝，不加入有效扫描；已加入者随后取消则终止该次共享扫描，stop 也主动取消再等待清理，已完成的账本写入保留。CLI 启动的连接、快照、命令排队、回合、Loop 及 verdict 宽限等待均接受客户端寿命信号；提示词发送返回 false 会立即失败，不再继续等待未获接纳的回合。
 
 #### 3.2.3 `Transcript`（`src/session/transcript.ts`）
 
@@ -786,7 +823,7 @@ dsht [options] [list workspaces|list sessions]
 
 路由约束是命令自身的数据：`COMMAND_POLICY`（`slash/registry.ts`）按 `Command['kind']` 声明 `requiresSession`／`requiresNoInteraction`／`control`／`duringTurn`／`duringLoop`，`slash/pipeline.ts` 的 `authorize` 只读这张表判定，因此新增命令不再修改路由函数；未登记的 kind（如 `savePrompt`、`coredump`）没有约束，在任意界面、即使有待答交互也能执行。命令的执行策略集中在 `controller/commands.ts`：`runCommand(controller, command, port)` 调用应用动作并返回 `CommandResult`，其中 `port.run` 借出 UI 的"可取消操作 + 加载标签"机制；UI 只解释意图，因此新增命令不需要改动 `ui/`，除非它引入新的表现层动词或新面板。
 
-**带评分的分步循环是通用机制，协议只是数据**：`controller/loop.ts` 提供 `LoopProtocol`（`marker`/`kind`/`title`/`steps`/`starts`/`artifact`/`stepLabel`/默认分/默认次数/`brief`/`followUp`/`verify`）、`ScoredLoop`（无 I/O 的 step／attempt／best／noProgress／phase 状态机）、`resolveLoop`（套用协议默认值并校验 `to >= from`）与 `parseLoopResult`（按 `marker` + `kind` 读正文最后一个块）；`Controller` 负责发送、在 `agent-status running:false` 时推进、以及在任何会打断循环的事件上停止（用户发送普通消息、`/cancel`、Esc/Ctrl+C、切换会话、断线）。终态有 `passed`/`exhausted`/`stalled`/`blocked`/`unavailable`/`cancelled`/`needs-human`/`deadline`，`--deadline`（或 `DSHT_LOOP_DEADLINE`，单位分钟）把整轮 run 的墙钟时间也纳入预算。
+**带评分的分步循环是通用机制，协议只是数据**：`controller/loop.ts` 提供 `LoopProtocol`（`marker`/`kind`/`title`/`steps`/`starts`/`artifact`/`stepLabel`/默认分/默认次数/`brief`/`followUp`/`verify`）、`ScoredLoop`（无 I/O 的 step／attempt／best／noProgress／phase 状态机）、`resolveLoop`（套用协议默认值并校验 `to >= from`）与 `parseLoopResult`（按 `marker` + `kind` 读正文最后一个块）；`controller/loop-coordinator.ts` 的 `LoopCoordinator` 负责运行编排，每个 `LoopExecution` 独占验证、回复提交等待、截止定时器与发送状态。`Controller` 提供 `LoopHost` 能力并转交 `agent-status running:false` 事件；普通消息、`/cancel`、Esc/Ctrl+C、切换会话与客户端停机停止运行，断线保留运行并等待订阅恢复。终态有 `passed`/`exhausted`/`stalled`/`blocked`/`unavailable`/`cancelled`/`needs-human`/`deadline`，`--deadline`（或 `DSHT_LOOP_DEADLINE`，单位分钟）把整轮 run 的墙钟时间也纳入预算。
 
 **协议是 `loop.yaml` 的记录，不是代码**：`controller/loop-protocols.ts` 把一条记录（标题/轮次/rubric/附加标准/固定 `vars`/默认分与次数）装配成 `LoopProtocol`，`/loop <name>` 只按名字取用。**新增一个审查协议只需往 `loop.yaml` 加一条记录并 `npm run build:prompts`，不必碰循环、slash 与 UI**；`kind` 就是记录名。状态只存在于内存并绑定当前会话，不持久化；UI 只读 `Queries.loop` 的只读快照，由叶子组件 `ui/chat/loop-status.tsx` 渲染一行 `title · step · attempt · best/target`（终态再带 `phase`；验证者提前停下时带它给的 `exit.reason`，等人时带 `interaction`），不做判断；该组件只吃 `LoopProgress`，不认识任何协议。
 
@@ -796,7 +833,7 @@ dsht [options] [list workspaces|list sessions]
 
 契约还要求把产出物落到工作区，并交给 **fork 出的独立验证进程**打分（自己的 session、自己的上下文，见 `loop.md`）——记录可自带 `standard`（取代已删除的会话级 `/verify`），`loop-protocols.ts` 在装配时把它叠加在每轮 rubric 之上。`resultContract` 接收 `VerificationBrief`（`standard`/`artifact`/`focus`），因此协议可以自带 rubric：`/loop design-review` 与 `/loop designdoc-review` 都用**本轮检查要点**作为标准，要求每轮写入工作区文件（分别是 `DESIGN-REVIEW.md` 与 `DESIGN-DOC-REVIEW.md`；验证者在全新上下文里只能读文件），并通过可选的 `LoopProtocol.stepLabel` 在进度行显示轮次主题。两条记录都声明了 `starts: verify`：每轮先让独立验证者检查产物现状，通过了就不花工作 turn，失败才按要求修改。**`passed` 只声称本次 run 覆盖的轮次**：`LoopProgress` 带 `total` 与 `scope`（`rounds 1–10/10`、`rounds 1–3/10 · selected range`），进度行与 headless 输出在 `passed` 时都打印它；当 `coversWholeProtocol(from, to, steps)` 为真时最后一轮是**收尾轮**，工作 brief 要求不得破坏前序要求，verdict brief 收到前面每一轮的 rubric 全文并被要求逐轮复核——因此「整份产出物通过」只可能由一次覆盖全部轮次的 run 得出。**产出物的归属是显式的**：`VerifierRequest` 携带被评审 workspace（`Controller.localDirectory`）与 artifact，验证前后在该 workspace 上比对 SHA-256 指纹，变化即作废该轮结论并重新验证；`ProcessVerifier` 不再从自己的进程目录推断路径，验证在飞时 loop 也不发送任何写入（`flushLoop` 门禁）。这仍是**检测**而非阻止：独立进程以同一 OS 用户运行，真正的只读需要 OS 级隔离。**验收不是只看分数**：记录可以声明 `artifactMarker`，客户端在采纳一次判定前自己读 `join(localDirectory, artifact)` 核对本轮小节是否存在（`Controller.settleChecked`），缺小节就置空 `score`、按一次失败尝试处理并把缺失项回灌——高分不能覆盖这个硬条件；产出物对本机不可读时不做该检查。
 
-面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由 `surfaces` 的 `keepFor` 决定）。
+面板生命周期：`/help`、`/cost`、`/status` 保持打开直到下一条命令或 Esc；`/history` 是查询而非阅读面板，除 Esc 外还会在 `panelLifetimeMs`（默认 10 秒）后自动清除 `historyQuery`／`historyMatches`，使其不长期占用输入框。`/search` 的结果（`contentSearch`）不受该定时器影响，由读者自行离开。`/prompt` 与 `/think`、`/model`、`/queue` 一样，只被自己的命令保持打开，其余提交一律关闭（由命令结果的 open/toggle 效果确定保留面板，再调用 `closeExcept`）。
 
 ### 3.5 配置与状态路径
 
@@ -842,7 +879,7 @@ C4Dynamic
 
 认证回退（`login`）：先读本地 Cookie 并用 `session/list` 探测；仅当返回 `HttpError(401)` 时才使用启动令牌重新认证，成功后若服务端下发了持久 Cookie 则写盘。没有可用令牌时抛 `AuthenticationRequired`。
 
-首个界面：`ready()` 建立基线后按当前 screen 打开选择器；若命令行没有指定会话、且 `Controller.localDirectory` 落在某个已注册工作区的路径内（按路径分段比较、最长路径优先），则直接采用该工作区并落在它的会话列表上，`pickWorkspace` 之后屏幕为 `sessions`，状态行写明 `Workspace from this directory · ← to switch`。远端宿主的路径通常与客户端不同，此时不会有任何匹配，行为与以前完全一致。
+首个界面：`ready()` 建立基线后用 `session.refreshLists()` 刷新列表，保留当前 screen；若命令行没有指定会话、且 `Controller.localDirectory` 落在某个已注册工作区的路径内（按路径分段比较、最长路径优先），则直接采用该工作区并落在它的会话列表上，`pickWorkspace` 之后屏幕为 `sessions`，状态行写明 `Workspace from this directory · ← to switch`。远端宿主的路径通常与客户端不同，此时不会有任何匹配，行为与以前完全一致。
 
 ### 4.2 会话跟随与流式渲染
 
@@ -927,7 +964,7 @@ C4Dynamic
   Rel(client, host, "10. POST /api/$events/result")
 ```
 
-投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。终端**不维护第二份队列**，排队项全部来自 `session/control`；`/queue` 的删除动作调用 `session/updateQueue`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。
+投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。已投递消息的排队项全部来自 `session/control`；`/queue` 的删除动作调用 `session/updateQueue`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。客户端另由 `useDeferredLines` 保留用户已提交、策略要求等回合或 Loop 结束的命令；这些命令尚未投递，断线期间继续等待，连接与会话快照恢复后才重新授权并逐条执行。
 
 交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。
 
@@ -1042,7 +1079,11 @@ C4Dynamic
 
 退避公式为 `Math.min(500 * 2 ** attempt++, 10_000) * (0.8 + Math.random() * 0.4)`，`attempt` 在成功连接后归零。`AuthenticationRequired`、`HttpError(401)` 与 `HttpError(403)` 直接终止重试循环并提示重新登录。
 
-退出路径统一收敛到 `shutdown()`：`interruptTask` 存在、`running` 为真或有 `admission` 时先 `await interrupt(true)`，再 `stop()`；`stop()` 会 abort 生命周期、清理成本定时器、关闭 socket、等待 `runTask`、`interruptTask`、`catalogTasks` 与 `costTask`，最后释放 transcript 布局。空闲会话不会收到多余取消。
+启动目录自动采用与 `initialSession` 只在首次完成初始化时应用。重连通过 `refreshLists()` 更新导航数据，通过 `restoreSelectedSession()` 恢复当前会话订阅，不再借用 `showPicker()` 改变页面；会话选择器的 all 筛选和路径输入界面也保留。输入框在离线期间仍可编辑草稿、操作本地快捷提示词；联网操作明确报告未连接并保留草稿，恢复连接不会自动发送该草稿。
+
+前台操作由 `controller/foreground.ts` 的 `ForegroundSlot` 管理：异步所有权匹配当前操作 ID；取消后不再派发嵌套操作；释放时先保留下一个排队者的名额再发布 UI 更新；关闭时取消占用者并唤醒全部等待者，后续请求均被拒绝。UI 快照仅含 `id/kind/label/startedAt`，不暴露 AbortController。已开始工作的取消是协作式的，其返回值与异常仍交由调用方处理；槽位在工作真正结束前保持占用。
+
+退出路径统一收敛到 `shutdown()`：`interruptTask` 存在、`running` 为真或有 `admission` 时先 `await interrupt(true)`，再 `stop()`；`stop()` 先关闭前台入口、取消 Loop 并等待验证适配器的 `settle()` 收尾，然后 abort 生命周期、清理成本定时器、关闭 socket、等待 `runTask`、`interruptTask`、`catalogTasks` 与 `costTask`，最后释放 transcript 布局。空闲会话不会收到多余取消。
 
 ### 4.7 状态机与不变量汇总
 
@@ -1236,10 +1277,11 @@ C4Component
 | 会话提示词索引与回填游标 | `PromptIndex`（`session/info.ts`） | `recall()`、`refillRecall()`、`length`／`atOldest` | `session/follow` 帧的增量折叠、`adoptCachedPrompts`／`backfillPrompts` 的播种与回填、本地提交的 `record()`、边界处的 `prepend()`、客户端自组装提示词的 `suppress()` | `trim()` 按 2,000 条 / 512 KiB 淘汰最旧条目并置 `trimmed`（此后不再声称穷尽）；切换会话重置并取消回填，但 `suppress` 集合保留（进程级、上限 512 条），否则重开会话时回填又会把内部提示词带回来 |
 | 本地 `!` 块 | `ShellController.blocks`（`shell/controller.ts`） | 对话视口（内联追加的行） | `start()` 与 runner 的 `onLine` | 每块 200 行 / 64 KiB，最多 20 块；`stop()` 终止进程组 |
 | 跨会话提示词缓存 | `PromptCache`（`session/info.ts`） | `adoptCachedPrompts` | 计费扫描的 `rememberScanPage`／`rememberScanDone`、回填完成时的 `put()` | 按字节 LRU 淘汰最久未用的会话，至少保留一个条目；只接受 `complete` 条目 |
-| 会话草稿、光标与寄存草稿 | `SessionInfo.composer`（`session/info.ts`） | composer、`recall()` | `setComposer`／`setComposerCursor`／`parkComposer`／`restoreComposer` | `releaseTranscript()` 随会话重置；`setComposer` 只在真正变化时发布 |
-| 阅读视图（窗口、滚动、折叠、阅读保护） | `SessionInfo.view`（`session/info.ts`） | `historyLayout`、视口、`/think` | `setViewWindow`／`setScroll`／`setFolds`／`setLiveReasoning`／`pinHistory` | `closeWindow()` 与 `releaseTranscript()` 释放独立窗口；行缓存仍是 `WeakMap` |
-| 待答作答与 `@` 菜单选择 | `SessionInfo.interaction`／`SessionInfo.reference`（`session/info.ts`） | 提问／审批对话框、`ReferenceMenu` | `setAnswers`／`setOption`／`setApproval`／`setReferenceIndex`／`setReferenceDismissed` | `releaseTranscript()` 随会话重置；`lookup` 不进状态，按 draft 现算 |
-| 会话面板可见性与查询 | `PanelState`（`session/info.ts`，由 `App` 以组件状态持有） | `/think`、`/queue`、`/model`、`/history`、`/search`、`/prompt` 面板 | `openThoughts`／`openQueue`／`setModelPanel`／`setHistoryPanel`／`setSearchPanel`／`openPrompts` | 切换会话时整体重置；面板行光标仍在 `Picker` 内（`/prompt` 是唯一的客户端级面板，不读会话记录） |
+| 会话草稿、光标、临时编辑与寄存草稿 | `useComposer`（`ui/input/use-composer.ts`） | 输入框、回填、异步提交 | `setInput`／`setCursor`／`setIntent`／`consume`／`interactionChanged` | 随会话重置；消费须匹配会话与修订号；同一编辑意图不会并发保存 |
+| 客户端延迟命令 | `useDeferredLines`（`ui/input/use-deferred-lines.ts`） | 命令执行管线 | `enqueue`、重新授权、逐条执行 | 断线保留；连接与会话快照恢复后执行；换会话丢弃旧会话等待项 |
+| 阅读视图（窗口、滚动、折叠、阅读保护） | `SessionInfo.window`、App 的滚动与折叠状态、SessionController 的 `pinned` | `historyLayout`、视口、`/think` | 历史动作及 UI 状态更新 | `closeWindow()` 与 `releaseTranscript()` 释放独立窗口；UI 状态随会话重置，行缓存仍是 `WeakMap` |
+| 待答作答与 `@` 菜单选择 | `SessionInfo.interaction`、App 的菜单状态 | 提问／审批对话框、`ReferenceMenu` | `setAnswers`／`setOption`／`setApproval`、UI 菜单回调 | 随会话重置；异步文件查询取消过期请求 |
+| 会话面板可见性与查询 | `usePanels` 内部状态（`ui/dialogs/use-panels.ts`） | `/think`、`/queue`、`/model`、`/history`、`/search`、`/prompt` 面板 | `openThoughts`／`openQueue`／`setModelPanel`／`setHistoryPanel`／`setSearchPanel`／`openPrompts` | 切换会话时整体重置；面板行光标仍在 `Picker` 内（`/prompt` 是唯一的客户端级面板，不读会话记录） |
 | Cookie 与在册订阅 | `Client.cookie/expiresAt/listeners` | `call`、`subscribe` | `restoreCookie`、`authenticate`、`subscribe` | `close()` 结束全部订阅 |
 | 成本汇总镜像与合计 | `CostLedger.sessions/totals` | `total`、`today`、`hasSession`、`missing` | `load`、`replace` | `replace` 清空合计缓存 |
 
@@ -1281,9 +1323,9 @@ C4Component
 | Preset 名单 | 内存 `State.presets` | `sessionMode` | `loadPresetNames` | 标题栏模式标签、`/status` | `agentPresets/list` |
 | 会话提示词索引 | 内存 `PromptIndex`（`session/info.ts`） | `recall()`、`refillRecall()` | `session/follow` 增量折叠、缓存播种或整段回填、本地提交 `record()` | ↑/↓、Ctrl+P/N 回填 | 打开会话优先读 `PromptCache`（计费扫描已读过的页面）；未命中才按页读取整段历史 |
 | 会话草稿与光标 | 内存 `SessionInfo.composer`（`session/info.ts`） | composer、回填与提交 | `setComposer`、`parkComposer`、`restoreComposer` | 输入、回填、切会话清空 | 无（纯本地） |
-| 阅读视图 | 内存 `SessionInfo.view`（`session/info.ts`） | `historyLayout`、视口、`/think`、`/older` | `setScroll`、`setViewWindow`、`setFolds`、`pinHistory` | 滚动、跳转历史、展开推理 | 无（纯本地；独立窗口由宿主分页填充） |
+| 阅读视图 | UI `useHistoryView`，独立窗口归 `SessionInfo.window` | `historyLayout`、视口、`/think`、`/older` | `openHistory`、`showLatest`、UI 滚动/折叠、`pinHistory` | 滚动、跳转历史、展开推理 | 无（纯本地；独立窗口由宿主分页填充） |
 | 待答作答与选择 | 内存 `SessionInfo.interaction`／`reference`（`session/info.ts`） | 提问／审批对话框、`ReferenceMenu` | `setAnswers`、`setOption`、`setApproval`、`setReferenceIndex` | 作答、选项与 `@` 菜单导航 | `$events/result`（提交作答） |
-| 会话面板 | 内存 `PanelState`（`session/info.ts`，`App` 组件状态） | `/think`、`/queue`、`/model`、`/history`、`/search`、`/prompt` | `openThoughts`、`openQueue`、`setModelPanel`、`setHistoryPanel`、`openPrompts` | 打开／关闭各面板 | 打开即触发对应读取（`session/page`、`session/modelCatalog` 等）；`/prompt` 只读客户端 `prompts.json` |
+| 会话面板 | `usePanels` 内存状态（`ui/dialogs/use-panels.ts`） | `/think`、`/queue`、`/model`、`/history`、`/search`、`/prompt` | `openThoughts`、`openQueue`、`setModelPanel`、`setHistoryPanel`、`openPrompts` | 打开／关闭各面板 | 打开即触发对应读取（`session/page`、`session/modelCatalog` 等）；`/prompt` 只读客户端 `prompts.json` |
 | 导出归档 | 磁盘 ZIP | — | `saveSessionLog` | `/export` | `GET /api/session.export` |
 | 终端鼠标标志 | 终端 | — | `useMouseWheel` | 滚轮滚动、左键复制、原生选区 | 无 |
 
@@ -1732,7 +1774,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/export.ts` | `saveSessionLog` |
 | `session/history.ts` | `Reasoning`、`RowKind`、`HistoryRow`、`releaseHistoryLayout`、`layoutStats`、`SessionRender`、`historyLayout` |
 | `session/index.ts` | `SessionController`、`contentText`、`Transcript`、`toolLine`、`historyLayout`、`layoutStats`、`releaseHistoryLayout`、`markdownCacheStats`、`Telemetry`、`DEFAULT_HISTORY_LIMITS`、`historyLimits`、`DEFAULT_PROMPT_LIMITS` |
-| `session/info.ts` | `PromptRecord`、`PromptEntry`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText`、`ModelState`、`PanelState`、`OptionState`、`InteractionState`、`SessionInfo`、`PromptIndex`、`DEFAULT_PROMPT_CACHE_BYTES` |
+| `session/info.ts` | `PromptRecord`、`PromptEntry`、`PromptLimits`、`DEFAULT_PROMPT_LIMITS`、`promptText`、`OptionState`、`InteractionState`、`SessionInfo`、`PromptIndex`、`DEFAULT_PROMPT_CACHE_BYTES` |
 | `session/markdown.ts` | `MarkdownSpan`、`MarkdownRow`、`markdownCacheStats`、`hasMarkdown`、`markdownRows`、`markdownHtml` |
 | `session/math.ts` | `renderMath` |
 | `session/memory.ts` | `HistoryLimits`、`DEFAULT_HISTORY_LIMITS`、`historyLimits` |
@@ -1786,6 +1828,8 @@ CI 工作流 `.github/workflows/publish.yml`：
 | --- | --- |
 | `controller/connection.ts` | `ConnectionOptions`、`ConnectionListener`、`ConnectionController` |
 | `controller/controller.ts` | `Actions`、`Queries`、`Controller` |
+| `controller/foreground.ts` | `ForegroundSlot`：前台调度与取消 |
+| `controller/loop-coordinator.ts` | `LoopHost`、`LoopCoordinatorOptions`、`LoopCoordinator`：独立运行编排 |
 | `controller/commands.ts` | `RunnableCommand`、`CommandPort`、`runCommand`、`removalIntent` |
 | `controller/index.ts` | `Controller`、`ConnectionController`、`runCommand`、`removalIntent`、`resolveLoop`、`parseLoopResult`、`ScoredLoop`、`loopProtocolFor`、`loopProtocolNames`、`roundStandard`、`resultContract`、`followUpContract`、`LOOP_MARKER`、`LOOP_STATUSES`、`PromptStore` |
 | `controller/loop.ts` | `LoopLimits`、`LoopProtocol`、`LoopResult`、`VerifyTarget`、`PriorVerdict`、`LoopStepResult`、`resolveLoop`、`coversWholeProtocol`、`parseLoopResult`、`readResultFields`、`latestAssistantText`、`ScoredLoop` |
@@ -1841,7 +1885,7 @@ C4Component
   Component(root, "根共享", "index, state, json, text, contracts, session-title, references", "域外共享叶子与只含类型的 UI 契约")
   Component(storage, "storage/", "files, directories, heap-snapshot, index", "文件系统操作")
   Component(transport, "transport/", "client, wire, auth, endpoint, host, index", "wire 协议、认证与端点")
-  Component(session, "session/", "controller, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, interactions, prompts, index", "记录、投影、提示词索引与回填")
+  Component(session, "session/", "controller, state, history-reader, navigator, interactions, transcript, history, markdown, math, export-html, telemetry, memory, navigation, references, export, types, connection-view, info, prompts, index", "记录、投影、提示词索引与回填")
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "价格、账本与扫描")
   Component(catalog, "catalog/", "controller, index", "模型路由与 preset")
   Component(controller, "controller/", "controller, commands, loop, loop-contract, loop-protocols, loop-prompts, loop-prompts-schema, loop-prompts.generated, verifier, connection, memory-log, trace-log, perf-measures, prompts, index", "门面、命令策略与评分循环")

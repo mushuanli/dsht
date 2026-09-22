@@ -104,6 +104,7 @@ async function fingerprint(path: string): Promise<string | undefined> {
 export class ProcessVerifier implements VerifierPort {
   /** This client forks itself, so the harness that judges is this one. */
   readonly name = 'dsht';
+  private readonly tasks = new Set<Promise<VerifierOutcome>>();
   constructor(private readonly options: ProcessVerifierOptions) {}
 
   /** @param request - Round identity, prompt and verdict path.
@@ -111,6 +112,15 @@ export class ProcessVerifier implements VerifierPort {
    *  @returns The verdict read back from the file, or a note explaining its absence.
    */
   async verify(request: VerifierRequest, signal: AbortSignal): Promise<VerifierOutcome> {
+    const task = this.runVerification(request, signal);
+    this.tasks.add(task);
+    try { return await task; } finally { this.tasks.delete(task); }
+  }
+
+  /** Keep host cancellation available until every child has completed its bounded cleanup. */
+  async settle(): Promise<void> { await Promise.allSettled([...this.tasks]); }
+
+  private async runVerification(request: VerifierRequest, signal: AbortSignal): Promise<VerifierOutcome> {
     const run = this.options.run ?? runProcess;
     const file = request.file;
     // Cancelled before anything happened: no session, no child, no verdict file.
@@ -159,10 +169,14 @@ export class ProcessVerifier implements VerifierPort {
           ? { note: 'host cannot cancel', stopped: false }
           : { note: 'no verifier session to cancel', stopped: true };
       }
-      const settled = await Promise.race([
-        confirmation.then(() => true),
-        new Promise<boolean>(resolve => { const wait = setTimeout(() => resolve(false), CANCEL_CONFIRM_MS); wait.unref(); }),
-      ]);
+      let timer: NodeJS.Timeout | undefined;
+      let settled: boolean;
+      try {
+        settled = await Promise.race([
+          confirmation.then(() => true),
+          new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), CANCEL_CONFIRM_MS); timer.unref(); }),
+        ]);
+      } finally { clearTimeout(timer); }
       if (!settled) return { note: `remote cancel unconfirmed after ${CANCEL_CONFIRM_MS} ms`, stopped: false };
       return confirmed === true
         ? { note: 'remote cancel confirmed', stopped: true }
@@ -229,7 +243,7 @@ export class ProcessVerifier implements VerifierPort {
         cwd: this.options.cwd, env: this.options.env, signal: controller.signal, onLine,
       });
       // A cancelled review decides nothing, and is not a verifier outage either.
-      if (cancelled) return { type: 'cancelled' };
+      if (cancelled) { await cancelNote(); return { type: 'cancelled' }; }
       // The child stopped because the host wants a human: cancel the turn it left waiting (bounded,
       // reported), and hand the request to the caller instead of retrying into the same block.
       if (human !== undefined) {

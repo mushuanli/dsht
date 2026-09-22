@@ -46,9 +46,10 @@ export class CostController {
     this.timer = setInterval(() => { if (this.host.online()) void this.refresh().catch(() => undefined); }, REFRESH_INTERVAL_MS);
   }
 
-  /** Stop the timer and wait for an in-flight scan; the ledger keeps its folded totals. */
+  /** Cancel the timer and active scan, then wait for cleanup; keep already folded totals. */
   async stop(): Promise<void> {
     clearInterval(this.timer); this.timer = undefined;
+    this.abort?.abort();
     await this.task;
   }
 
@@ -61,8 +62,11 @@ export class CostController {
    * @param signal - Optional cancellation for an explicit `/cost` refresh.
    */
   async refresh(signal: AbortSignal = this.host.signal()): Promise<void> {
+    signal.throwIfAborted();
+    this.host.signal().throwIfAborted();
     if (this.task) {
-      const cancel = () => this.abort?.abort();
+      const scanAbort = this.abort;
+      const cancel = () => scanAbort?.abort();
       signal.addEventListener('abort', cancel, { once: true });
       try { await this.task; } finally { signal.removeEventListener('abort', cancel); }
       return;
@@ -72,9 +76,10 @@ export class CostController {
     this.abort = new AbortController();
     const combined = AbortSignal.any([signal, this.host.signal(), this.abort.signal]);
     const ledger = this.ledger;
-    ledger.scanning = true; ledger.error = ''; this.host.publish();
-    const task = (async () => {
+    ledger.scanning = true; ledger.error = '';
+    const task = Promise.resolve().then(async () => {
       try {
+        combined.throwIfAborted();
         const sessions = array(object(await client.call('session/list', { _request: {} }, combined)).items).map(object);
         combined.throwIfAborted();
         const failures: string[] = [];
@@ -89,6 +94,7 @@ export class CostController {
             this.host.scanDone?.(sessionId);
             scanned++; events += history.events.length;
             await ledger.replace(sessionId, history.cursor, history.events);
+            combined.throwIfAborted();
             if (!session.running && typeof session.updatedAt === 'number') this.updates.set(sessionId, session.updatedAt);
             this.host.publish();
           } catch (error) {
@@ -102,8 +108,10 @@ export class CostController {
         ledger.scannedAt = Date.now();
       } catch (error) { ledger.error = errorText(error); }
       finally { ledger.scanning = false; this.host.publish(); }
-    })();
+    });
     this.task = task;
+    // Publish only after reserving the scan: an observer may synchronously join or cancel it.
+    this.host.publish();
     try { await task; } finally { this.task = undefined; this.abort = undefined; }
   }
 }

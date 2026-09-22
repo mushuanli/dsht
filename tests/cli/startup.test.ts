@@ -18,6 +18,36 @@ function reply(fixture: Awaited<ReturnType<typeof host>>, seq: number, status: s
     data: { message: { content: [{ type: 'text', text: `round result\n\`\`\`dsht-loop\n${body}\n\`\`\`` }] } } } });
 }
 
+test('startup fails immediately when the prompt action refuses admission', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(() => controller.stop()); controller.start();
+  await until(() => controller.queries.connectionSettled && controller.queries.record.ready);
+  controller.actions.prompt = async () => false;
+  await assert.rejects(runStartup(controller, { commands: [], prompt: 'Do the work', timeoutSeconds: 1 }, () => {}), /Prompt was not accepted/);
+});
+
+test('stopping the client interrupts a headless wait for the turn to finish', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(() => controller.stop()); controller.start();
+  await until(() => controller.queries.connectionSettled && controller.queries.record.ready);
+  const waiting = runStartup(controller, { commands: [], wait: true, timeoutSeconds: 0.3 }, () => {});
+  const check = assert.rejects(waiting, { name: 'AbortError' });
+  await controller.stop();
+  await check;
+});
+
+test('startup cannot wait for a connection after the client has stopped', async t => {
+  const controller = new Controller({ base: 'http://localhost', token: 'unused' });
+  await controller.stop();
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const waiting = runStartup(controller, { commands: [], timeoutSeconds: 1 }, () => {});
+  const check = assert.rejects(waiting, { name: 'AbortError' });
+  t.mock.timers.tick(30_001);
+  await check;
+});
+
 test('startup picks the workspace, creates a session and follows the loop to its verdict', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   // The reviewed document carries the round's own section, which the client checks before accepting.

@@ -5,6 +5,30 @@ import { resolveTarget } from '../../src/session/navigation.ts';
 import { sessionLabel } from '../../src/session-title.ts';
 import { activityAge, ROLLUP_LEGEND, sessionState, sessionStatus, SESSION_MARKERS, STATE_LABELS, workspaceCounts, workspaceDetail, workspaceStatus } from '../../src/ui/chat/navigation-model.ts';
 import { parseCommand } from '../../src/slash/parse.ts';
+import { Controller } from '../../src/controller/controller.ts';
+import { host, until } from '../support/host.ts';
+
+for (const leave of ['path', 'chat', 'cancel']) test(`a delayed picker cannot reopen after ${leave}`, async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const app = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); await app.stop(); }); app.start();
+  await until(() => app.queries.connectionSettled && app.queries.record.ready);
+  const client = app.connection.require();
+  const list = client.listWorkspaces.bind(client);
+  let started = false;
+  client.listWorkspaces = async signal => { started = true; await gate; return list(signal); };
+  const opening = app.actions.showPicker('workspaces');
+  await until(() => started);
+  if (leave === 'path') app.actions.enterPath();
+  else if (leave === 'chat') app.actions.showChat();
+  else app.actions.cancelForeground();
+  release();
+  assert.equal(await opening, false);
+  assert.equal(app.state.screen, leave === 'path' ? 'path' : 'chat');
+  assert.equal(app.state.sessionId, 's1');
+});
 
 test('workspace and resume commands resolve with their aliases', () => {
   for (const name of ['ws', 'workspace', 'workspaces']) {
@@ -78,4 +102,30 @@ test('a workspace row shows the path its title does not already name', () => {
   // A title that already names the last segment, and a path with nothing left, add no column.
   assert.equal(workspaceDetail('tui', 'tui'), '');
   assert.equal(workspaceDetail('', 'tui'), '');
+});
+
+for (const operation of ['create', 'remove']) test(`a delayed ${operation} receipt cannot replace a newer selected session`, async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const app = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); await app.stop(); }); app.start();
+  await until(() => app.queries.connectionSettled && app.queries.record.ready);
+  const client = app.connection.require();
+  const call = client.call.bind(client);
+  let received = false;
+  client.call = async (method, ...args) => {
+    const result = await call(method, ...args);
+    if (method === (operation === 'create' ? 'session/create' : 'workspace/archiveSession')) { received = true; await gate; }
+    return result;
+  };
+  const writing = operation === 'create' ? app.actions.createSession()
+    : app.actions.removeTarget({ kind: 'session', id: 's1', name: 'First' });
+  await until(() => received);
+  await app.session.selectSession('s2');
+  release();
+  assert.equal(await writing, operation === 'remove');
+  assert.equal(app.state.sessionId, 's2');
+  assert.equal(app.state.screen, 'chat');
+  if (operation === 'remove') assert.equal(client.archivedSessionIds.has('s1'), true);
 });

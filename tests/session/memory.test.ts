@@ -136,11 +136,12 @@ test('paged search keeps live history unchanged, bounds matches, and loads only 
   assert.ok(matches.items.every(item => item.preview.length <= 160));
   assert.equal(source.retainedRecordCount, 20);
   assert.equal(source.retainedBytes, bytes);
-  const window = await controller.queries.historyAt(120, new AbortController().signal);
+  assert.equal(await controller.actions.openHistory(120, new AbortController().signal), true);
+  const window = controller.queries.window!;
   assert.equal(window.messages.at(-1)?.seq, 120);
   assert.ok(window.retainedRecordCount <= 80);
   assert.equal(controller.queries.record, source);
-  window.dispose();
+  controller.actions.showLatest();
   const abort = new AbortController(); abort.abort();
   assert.equal(await controller.actions.searchHistory('needle', abort.signal), undefined);
   assert.match(controller.state.lastFailure, /abort/i);

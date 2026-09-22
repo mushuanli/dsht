@@ -30,7 +30,7 @@ interface Listener {
   end(error?: Error): void;
 }
 
-/** A single authenticated host connection; close before reconnecting or exiting. */
+/** One client lifetime. Peer disconnects allow reconnect; close permanently ends the lifetime. */
 export class Client {
   readonly base: URL;
   private cookie = '';
@@ -38,6 +38,7 @@ export class Client {
   private socket: WebSocket | undefined;
   private listeners = new Map<string, Listener>();
   private lifetime = new AbortController();
+  private closeTask?: Promise<void>;
   constructor(base: string, readonly timeoutMs = 15_000) {
     this.base = new URL(base);
     if (!['http:', 'https:'].includes(this.base.protocol) || this.base.username || this.base.password
@@ -123,12 +124,15 @@ export class Client {
 
   /** Connect the physical mux. A disconnected instance may reconnect with its cookie. */
   async connect(): Promise<void> {
+    this.lifetime.signal.throwIfAborted();
     if (this.socket) throw new Error('Mux is already connected');
     const url = new URL('/api/remote.mux', this.base);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(url, { headers: { cookie: this.cookie }, handshakeTimeout: this.timeoutMs });
     this.socket = socket;
+    const closed = new Promise<void>(resolve => socket.once('close', () => resolve()));
     socket.on('message', (raw, binary) => {
+      if (this.socket !== socket || this.lifetime.signal.aborted) return;
       try {
         if (binary) throw new Error('Unexpected binary mux frame');
         const frame = object(JSON.parse(raw.toString()));
@@ -153,21 +157,31 @@ export class Client {
         socket.terminate();
       }
     });
-    socket.on('error', error => this.fail(error));
+    socket.on('error', error => { if (this.socket === socket) this.fail(error); });
     socket.on('close', () => {
-      if (this.socket === socket) this.socket = undefined;
+      if (this.socket !== socket) return;
+      this.socket = undefined;
       this.fail(new Error('Connection closed'));
     });
-    await once(socket, 'open');
+    try {
+      await once(socket, 'open', { signal: this.lifetime.signal });
+      this.lifetime.signal.throwIfAborted();
+    } catch (error) {
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+      await closed;
+      throw error;
+    }
   }
 
   /** Subscribe on the existing mux; each subscription has a fresh stream identity. */
   subscribe(endpoint: string, args: ObjectValue, listener: Listener): Subscription {
+    this.lifetime.signal.throwIfAborted();
     const socket = this.socket;
     if (socket?.readyState !== WebSocket.OPEN) throw new Error('Mux is not connected');
     const streamId = randomUUID();
     this.listeners.set(streamId, listener);
-    socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
+    try { socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } })); }
+    catch (error) { this.listeners.delete(streamId); throw error; }
     return { cancel: () => {
       if (!this.listeners.delete(streamId)) return;
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'cancel', streamId }));
@@ -178,47 +192,63 @@ export class Client {
   archivedSessionIds: ReadonlySet<string> = new Set();
 
   /** List workspaces by consuming and cancelling the authoritative opening baseline. */
-  async listWorkspaces(): Promise<ObjectValue[]> {
+  async listWorkspaces(signal?: AbortSignal): Promise<ObjectValue[]> {
+    signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
-      let sub: Subscription;
-      const timer = setTimeout(() => { sub.cancel(); reject(new Error('Workspace baseline timed out')); }, this.timeoutMs);
+      let sub: Subscription | undefined;
+      let settled = false;
+      const finish = (error?: unknown, items?: ObjectValue[]) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer); signal?.removeEventListener('abort', cancel); sub?.cancel();
+        if (error !== undefined) reject(error); else resolve(items!);
+      };
+      const cancel = () => finish(signal!.reason);
+      const timer = setTimeout(() => finish(new Error('Workspace baseline timed out')), this.timeoutMs);
+      signal?.addEventListener('abort', cancel, { once: true });
       try { sub = this.subscribe('workspace/follow', {}, {
         item: value => {
-          clearTimeout(timer);
-          sub.cancel();
+          if (settled) return;
           try {
             const frame = object(value);
             if (frame.type !== 'baseline') throw new Error('Workspace stream omitted its baseline');
             this.archivedSessionIds = new Set(array(object(frame.value).archivedSessionIds).map(string));
-            resolve(array(object(frame.value).items).map(object));
-          } catch (error) { reject(error); }
+            finish(undefined, array(object(frame.value).items).map(object));
+          } catch (error) { finish(error); }
         },
-        end: error => { clearTimeout(timer); reject(error ?? new Error('Workspace stream ended before baseline')); },
-      }); } catch (error) { clearTimeout(timer); reject(error); }
+        end: error => finish(error ?? new Error('Workspace stream ended before baseline')),
+      });
+        if (settled) sub.cancel();
+      } catch (error) { finish(error); }
     });
   }
 
   /** List visible sessions, optionally filtering by the workspace's accounted IDs. */
-  async listSessions(workspaceId?: string): Promise<ObjectValue[]> {
-    const sessions = array(object(await this.call('session/list', { _request: {} })).items).map(object);
+  async listSessions(workspaceId?: string, signal?: AbortSignal): Promise<ObjectValue[]> {
+    const sessions = array(object(await this.call('session/list', { _request: {} }, signal)).items).map(object);
     if (!workspaceId) return sessions;
-    const workspace = (await this.listWorkspaces()).find(item => item.workspaceId === workspaceId);
+    const workspace = (await this.listWorkspaces(signal)).find(item => item.workspaceId === workspaceId);
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`);
     const ids = new Set(array(workspace.sessionIds).map(string));
     return sessions.filter(item => ids.has(string(item.sessionId)));
   }
 
   /** Close all streams, abort in-flight HTTP, and await the physical socket's closure. */
-  async close(): Promise<void> {
-    this.lifetime.abort();
+  close(): Promise<void> {
+    if (this.closeTask) return this.closeTask;
     const socket = this.socket;
     this.socket = undefined;
+    // Reserve before publishing cancellation: termination callbacks may themselves call close.
+    this.closeTask = Promise.resolve().then(async () => {
+      if (socket && socket.readyState !== WebSocket.CLOSED) {
+        const closed = new Promise<void>(resolve => socket.once('close', () => resolve()));
+        socket.terminate();
+        await closed;
+      }
+    });
+    this.lifetime.abort();
     this.fail(new Error('Client closed'));
-    if (socket && socket.readyState !== WebSocket.CLOSED) {
-      const closed = new Promise<void>(resolve => socket.once('close', () => resolve()));
-      socket.terminate();
-      await closed;
-    }
+    return this.closeTask;
   }
 
   private signal(timeoutMs: number | null = this.timeoutMs): AbortSignal {

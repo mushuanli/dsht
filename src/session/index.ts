@@ -13,7 +13,7 @@ export type { QueuedInput } from './telemetry.ts';
 export { DEFAULT_HISTORY_LIMITS, historyLimits } from './memory.ts';
 export type { HistoryLimits } from './memory.ts';
 export { DEFAULT_PROMPT_LIMITS, promptText, PromptIndex, SessionInfo } from './info.ts';
-export type { InteractionState, ModelState, OptionState, PanelState, PromptEntry, PromptLimits, PromptRecord, } from './info.ts';
+export type { InteractionState, OptionState, PromptEntry, PromptLimits, PromptRecord, } from './info.ts';
 export { resolveTarget } from './navigation.ts';
 export { sessionLabel } from '../session-title.ts';
 export { fileReferences } from './references.ts';

@@ -1,5 +1,5 @@
 /** Slash-command catalog shared by completion, `/help` and the submission router. */
-import type { Command } from './parse.ts';
+import type { Command } from './types.ts';
 
 /** One slash command advertised by completion and `/help`. */
 export interface CommandHint {

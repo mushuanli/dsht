@@ -7,6 +7,7 @@
 import { runCommand, type CommandPort, type Controller } from '../controller/index.ts';
 import { errorText } from '../transport/wire.ts';
 import { dirname } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ensureDirectory, renameFile, writePrivateFile } from '../storage/index.ts';
 import { latestAssistantText } from '../controller/loop.ts';
 import { parseVerdict } from '../controller/loop-contract.ts';
@@ -57,11 +58,13 @@ const VERDICT_POLL_MS = 200;
  * @param what - Human-readable subject for the timeout message.
  * @param timeoutMs - Longest wait.
  */
-async function until(condition: () => boolean, what: string, timeoutMs = STEP_TIMEOUT_MS): Promise<void> {
+async function until(signal: AbortSignal, condition: () => boolean, what: string, timeoutMs = STEP_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
+  for (;;) {
+    signal.throwIfAborted();
+    if (condition()) return;
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${what}`);
-    await new Promise(resolve => setTimeout(resolve, POLL_MS));
+    await delay(POLL_MS, undefined, { signal });
   }
 }
 
@@ -72,9 +75,10 @@ async function until(condition: () => boolean, what: string, timeoutMs = STEP_TI
  * @returns Whether a started loop passed, nothing ran, or the run failed.
  */
 export async function runStartup(controller: Controller, plan: StartupPlan, log: (line: string) => void): Promise<StartupOutcome> {
+  const signal = controller.connection.signal();
   // `online` alone is too early: the startup picker runs after it and would overwrite a selection
   // made here, which is exactly how a forked verifier used to lose its session.
-  await until(() => controller.state.online && controller.queries.connectionSettled, 'the host connection');
+  await until(signal, () => controller.state.online && controller.queries.connectionSettled, 'the host connection');
   if (plan.workspace !== undefined && !await controller.actions.switchWorkspace(plan.workspace)) {
     throw new Error(`Workspace not found: ${plan.workspace}`);
   }
@@ -89,12 +93,13 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
 
   // A selected session is not sendable until its follow snapshot lands.
   if (plan.commands.length) {
-    await until(() => controller.state.screen === 'chat' && controller.state.sessionId !== undefined && controller.queries.record.ready, 'the session snapshot');
+    await until(signal, () => controller.state.screen === 'chat' && controller.state.sessionId !== undefined && controller.queries.record.ready, 'the session snapshot');
   }
   // Start-up lines are one-shot action commands; the cancellable port is only used by searches
   // and exports, which have no meaning before the operator is present.
   const port: CommandPort = { run: (_label, operation) => operation(controller.connection.signal()) };
   for (const line of plan.commands) {
+    signal.throwIfAborted();
     // The scripted half runs the same two stages the composer does after `interpret`: a headless
     // caller has no menus or screens, but it has every application fact `normalize`/`authorize` read.
     const command = normalize({ kind: 'line', line }, {
@@ -125,14 +130,19 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
     // Sending a prompt needs the follow snapshot, and a verifier starts the instant a busy turn ends,
     // so this wait is longer than a normal startup step: the host can be slow to open the new stream.
     try {
-      await until(() => controller.state.sessionId !== undefined && controller.queries.record.ready,
+      await until(signal, () => controller.state.sessionId !== undefined && controller.queries.record.ready,
         'the verifier session snapshot', PROMPT_SNAPSHOT_TIMEOUT_MS);
     } catch (error) {
+      signal.throwIfAborted();
       // Which of the three conditions failed is the whole diagnosis, so it travels with the error.
       throw new Error(`${errorText(error)} (screen=${controller.state.screen}, session=${controller.state.sessionId ?? 'none'},`
         + ` snapshot=${String(controller.queries.record.ready)}, online=${String(controller.state.online)})`);
     }
-    await controller.actions.prompt(plan.prompt);
+    if (!await controller.actions.prompt(plan.prompt)) {
+      signal.throwIfAborted();
+      const reason = controller.state.lastFailure;
+      throw new Error(`Prompt was not accepted${reason ? ` (${reason})` : ''}`);
+    }
   }
 
   if (controller.queries.loop !== undefined) return await waitForLoop(controller, plan.timeoutSeconds * 1000, log);
@@ -154,8 +164,10 @@ export async function runStartup(controller: Controller, plan: StartupPlan, log:
  * @returns The verdict once the line may run, or the refusal it will never outlive.
  */
 async function authorizeWhenReady(controller: Controller, command: LineCommand) {
+  const signal = controller.connection.signal();
   const deadline = Date.now() + STEP_TIMEOUT_MS;
   for (;;) {
+    signal.throwIfAborted();
     const verdict = authorize(command, {
       sessionSelected: controller.state.sessionId !== undefined,
       pending: controller.state.pending.length > 0,
@@ -164,7 +176,7 @@ async function authorizeWhenReady(controller: Controller, command: LineCommand) 
     });
     if (!verdict.allow || verdict.defer === undefined) return verdict;
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for the client to be free: ${command.kind}`);
-    await new Promise(resolve => setTimeout(resolve, POLL_MS));
+    await delay(POLL_MS, undefined, { signal });
   }
 }
 
@@ -181,6 +193,8 @@ async function authorizeWhenReady(controller: Controller, command: LineCommand) 
  * @param log - Progress sink.
  */
 async function writeVerdict(controller: Controller, target: VerdictTarget, repliesBefore: number, log: (line: string) => void): Promise<void> {
+  const signal = controller.connection.signal();
+  signal.throwIfAborted();
   const [, kind = '', step = '', attempt = ''] = target.identity.split('/');
   const expect = { verificationId: target.identity, kind, step: Number(step), attempt: Number(attempt) };
   // The host reports the turn idle just before that reply is committed, so an immediate parse can
@@ -193,7 +207,7 @@ async function writeVerdict(controller: Controller, target: VerdictTarget, repli
   let parsed = replyArrived() ? parseVerdict(latestAssistantText(controller.queries.record.messages), expect) : undefined;
   const deadline = Date.now() + VERDICT_GRACE_MS;
   while (parsed === undefined && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, VERDICT_POLL_MS));
+    await delay(VERDICT_POLL_MS, undefined, { signal });
     if (replyArrived()) parsed = parseVerdict(latestAssistantText(controller.queries.record.messages), expect);
   }
   if (parsed === undefined) {
@@ -233,15 +247,17 @@ async function writeVerdict(controller: Controller, target: VerdictTarget, repli
  * @returns `idle` when the turn ended, `failed` on timeout.
  */
 async function waitForTurn(controller: Controller, finishedBefore: number, timeoutMs: number, log: (line: string) => void): Promise<StartupOutcome> {
+  const signal = controller.connection.signal();
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    signal.throwIfAborted();
     if (controller.queries.turnsCompleted > finishedBefore) { log('Turn finished'); return 'idle'; }
     // A headless verifier cannot answer an approval or a question: stop and say what is needed,
     // instead of waiting for the deadline and being retried as an infrastructure failure.
     const request = humanRequest(controller);
     if (request !== undefined) { log(needsHumanLine(request)); return 'needs-human'; }
     if (Date.now() >= deadline) { log('Turn timed out'); return 'failed'; }
-    await new Promise(resolve => setTimeout(resolve, POLL_MS));
+    await delay(POLL_MS, undefined, { signal });
   }
 }
 
@@ -272,9 +288,11 @@ async function ensureWorkspace(controller: Controller, log: (line: string) => vo
  * @returns `passed` when the loop met its threshold, `failed` otherwise.
  */
 async function waitForLoop(controller: Controller, timeoutMs: number, log: (line: string) => void): Promise<StartupOutcome> {
+  const signal = controller.connection.signal();
   const deadline = Date.now() + timeoutMs;
   let previous = '';
   for (;;) {
+    signal.throwIfAborted();
     const progress = controller.queries.loop;
     if (progress === undefined || progress.phase !== 'running') {
       // A cancelled loop usually means the connection ended; say so, or the exit code is a mystery.
@@ -301,6 +319,6 @@ async function waitForLoop(controller: Controller, timeoutMs: number, log: (line
       log('Loop timed out and was stopped');
       return 'failed';
     }
-    await new Promise(resolve => setTimeout(resolve, POLL_MS));
+    await delay(POLL_MS, undefined, { signal });
   }
 }

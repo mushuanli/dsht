@@ -141,4 +141,8 @@ export interface VerifierPort {
    * @returns The verdict, or a note explaining why there is none.
    */
   verify(request: VerifierRequest, signal: AbortSignal): Promise<VerifierOutcome>;
+  /** Drain adapter-owned cleanup after all run signals have been aborted, before closing the host.
+   * Adapters with child processes or remote sessions implement this; pure in-memory judges need not.
+   */
+  settle?(): Promise<void>;
 }

@@ -279,8 +279,8 @@ npx @itookit/dsht list sessions --workspace WORKSPACE_ID --json
 ```sh
 npm start -- list workspaces --json
 npm start -- list sessions --json
-node --import tsx src/cli/index.tsx list workspaces --json
-node --import tsx src/cli/index.tsx list sessions --json
+node --import tsx src/cli/index.ts list workspaces --json
+node --import tsx src/cli/index.ts list sessions --json
 ```
 
 JSON 输出格式为 `{ "items": [...] }`；省略 `--json` 则输出制表符分隔的列表。工作区筛选使用服务端 `sessionIds` 成员关系。工作区列表读取 `workspace/follow` 的首个 baseline 后取消订阅，不会调用不存在的 `workspace/list` 端点。
@@ -398,6 +398,8 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 `/export-html [local.html]` 将当前已加载会话和实时尾部保存为包含 Mermaid SVG 图片及 MathJax 生成的 MathML 的页面。用浏览器打开文件可查看完整数学排版，不需要网络或脚本。尚未加载或已回收的消息不包含在内，工具行仍为摘要。默认文件名带时间戳并保存在当前工作目录，支持带引号的路径，不覆盖已有文件，取消时删除未完成输出。`/export` 仍下载服务端完整日志 ZIP。
 
+断线期间仍可编辑草稿，保存、编辑或删除本地快捷提示词。需要服务端的操作会报告未连接并保留草稿。重连只刷新数据和恢复订阅，保留当前会话、选择器筛选或路径输入页面，不会自动发送未提交的草稿。
+
 ## 实时状态
 
 底栏分组显示 `◐ Working · 8s · Ctrl+C Stop`、`● Ready`，或本客户端还欠一个审批／回答时的 `? Needs you`、模型与思考强度、本会话费用与「今天花费（历史总计）」、十格上下文进度条及百分比、会话轮次与累计 token 及缓存命中率。宽终端为运行状态预留固定宽度，完成后模型和指标保持对齐。窄终端依次回收留白、隐藏进度条、缩短模型名、省略次要指标，优先保留停止提示。`/status` 显示主机 URL、操作状态、工作区完整路径、完整供应商／模型、下次模型、各项用量、轮次、队列、后台任务和四位小数费用。`!` 表示有指标或模型目录错误，或计费覆盖不完整；详情中显示原因。运行中使用最近实际使用的模型，空闲时使用下次模型，新会话使用服务端模型目录默认值。服务端设置、凭据和适配器变更通知会刷新模型目录。
@@ -436,7 +438,7 @@ Slash 命令在选择器和对话输入框中均可使用。输入 `/` 会显示
 
 ## 客户端接口
 
-安装后的包通过 `@itookit/dsht` 导出 `Client`，通过 `@itookit/dsht/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/transport/client.ts` 导入，或构建后从 `dist/index.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces()` 和 `listSessions(workspaceId?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`。库调用方可使用 `src/transport/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
+安装后的包通过 `@itookit/dsht` 导出 `Client`，通过 `@itookit/dsht/auth` 导出 `login`／`CookieStore`，并提供 TypeScript 声明。源码调用方可通过 TypeScript loader 从 `src/transport/client.ts` 导入，或构建后从 `dist/index.js` 导入。`authenticate(token)` 兑换凭据；`connect()` 打开一条多路复用连接；`listWorkspaces(signal?)` 和 `listSessions(workspaceId?, signal?)` 返回服务端列表的 Promise。`call(endpoint, args, signal?)` 将服务端错误保留为带有 `code` 和 `details` 的 `RemoteError`。务必在 `finally` 中等待 `close()`；并发调用等待同一次关闭完成。关闭会永久结束该客户端，下一次使用需新建 `Client`。若只是对端断线而未调用 `close()`，可保留 Cookie 再次 `connect()`。库调用方可使用 `src/transport/auth.ts` 的 `login(client, token, new CookieStore())` 启用持久化；`Client.authenticate()` 本身仅在内存中保留凭据。
 
 会话和工作区命令在 `args` 内使用 `{ request: { ... } }`；会话列表使用 `{ _request: {} }`。`$events/result` 直接使用具名参数。重连后的 follow 快照整体替换保留状态；持久消息与临时助手文本分别保存。读取器同时支持 `event` 记录和旧版 `chunks` 包装；后者包含 `chunkrow/text-chunks`、`chunkrow/reasoning-chunks` 或 `chunkrow/tool-call-chunks`。不提供 `assistantStream` 的服务端通过日志 chunk 传递实时文本；TUI 只重建尚未完成的尝试，并保留每条压缩记录的起始序号用于翻页。
 
@@ -484,7 +486,7 @@ node dist/cli/index.js --help
 
 测试使用隔离的 HTTP/WebSocket 服务，驱动实际 Ink 选择器和输入框，在子进程中运行 CLI，并投影复制的 Harness v2 工作区编辑记录和 v0 压缩 chunk 记录。这些检查不需要模型凭据。记录和预期对话输出位于 `tests/`，不依赖父仓库。测试不覆盖真实模型供应商行为。
 
-源码在 `src/` 下按业务域组织：`transport/` 负责服务端 wire 协议并把宿主帧归一化为语义事件，`session/` 负责对话、历史、交互与会话运行态，`cost/` 负责计费账本，`catalog/` 负责模型与 preset，`shell/` 负责本地 `!` 命令，`controller/` 是应用门面与事件路由，`slash/` 负责命令语法，`ui/` 承载全部 React 与 Ink，`storage/` 负责全部文件系统操作，`cli/` 是组装入口，根文件（`state.ts`、`json.ts`、`text.ts`、`contracts.ts`、`session-title.ts`、`references.ts`）是共享契约。跨模块导入统一走各模块的 `index.ts` 或共享叶子，`tests/architecture/dependencies.test.ts` 以九条无豁免的禁止方向强制这些边界。
+源码在 `src/` 下按业务域组织：`transport/` 负责服务端 wire 协议并把宿主帧归一化为语义事件，`session/` 负责对话、历史、交互与会话运行态，`cost/` 负责计费账本，`catalog/` 负责模型与 preset，`shell/` 负责本地 `!` 命令，`controller/` 是应用门面与事件路由，`slash/` 负责命令语法，`ui/` 承载全部 React 与 Ink，`storage/` 负责全部文件系统操作，`cli/` 是组装入口，根文件（`state.ts`、`json.ts`、`text.ts`、`contracts.ts`、`session-title.ts`、`references.ts`）是共享契约。内部跨域导入沿允许的依赖方向，可使用域入口或具体模块；UI 叶子组件通过 `contracts.ts` 读取领域类型。`tests/architecture/dependencies.test.ts` 使用 TypeScript 语法解析，检查九条禁止方向、纯类型契约、可解析的字面量模块路径，以及包含类型边在内的无环依赖。
 
 `npm test` 渲染不带样式的帧，因为断言和 `tests/expected/` 中的预期输出描述的是文本。从终端启动的测试运行器会向每个测试文件导出 `FORCE_COLOR=1`，使 Ink 在提示符与文本之间插入 SGR 转义序列；`npm run test:terminal` 在任何主机上复现该环境，`prepublishOnly` 也会运行它，因此从终端发布时验证的就是终端实际渲染的结果。 主题测试在独立子进程中分别渲染真彩色和纯文本，并隔离父进程中影响终端和 CI 颜色检测的环境设置。
 

@@ -5,6 +5,22 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MAX_PROMPT_CHARS, PromptStore } from '../../src/controller/prompts.ts';
+import { Controller } from '../../src/controller/index.ts';
+
+test('shortcut prompt actions work offline and publish local errors', async t => {
+  const app = new Controller({ base: 'http://localhost' });
+  t.after(() => app.stop());
+  assert.equal(app.snapshot().online, false);
+  assert.equal(await app.actions.savePrompt('Review this code'), true);
+  const id = app.queries.prompts[0]!.id;
+  assert.equal(await app.actions.updatePrompt(id, 'Review the tests'), true);
+  assert.equal(app.queries.prompts[0]!.text, 'Review the tests');
+  assert.equal(await app.actions.updatePrompt('missing', 'Anything'), false);
+  assert.match(app.snapshot().lastFailure, /no longer exists/);
+  assert.equal(await app.actions.deletePrompt(id), true);
+  assert.equal(app.snapshot().lastFailure, '');
+  assert.deepEqual(app.queries.prompts, []);
+});
 
 test('an in-memory store saves, deduplicates, updates and removes prompts', async () => {
   const store = new PromptStore();

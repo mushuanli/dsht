@@ -153,7 +153,9 @@ async function main(): Promise<void> {
     cwd: localDirectory, env: process.env,
     timeoutMs: verifyTimeoutMs(process.env.DSHT_VERIFY_TIMEOUT_MS),
     createSession: (title: string): Promise<string | undefined> => controller.actions.createVerifierSession(title),
-    cancelSession: async (sessionId: string): Promise<void> => { await controller.actions.cancelVerifierSession(sessionId); },
+    cancelSession: async (sessionId: string): Promise<void> => {
+      if (!await controller.actions.cancelVerifierSession(sessionId)) throw new Error('Verifier cancellation was not accepted');
+    },
     onLine: line => { if (values.headless) log(line); },
     // Off by default: a verifier reason reaches the progress line and the trace, and that log may be
     // pasted into a report, so the child's own words are quoted only when the operator asks.

@@ -83,7 +83,7 @@ test('a caller that waits for the slot is served in arrival order, and never ove
   await blocking;
 });
 
-test('cancelling aborts the running work and settles its claim as undefined', async t => {
+test('cancelling aborts the running work and preserves its cooperative result', async t => {
   const { app } = await controller(t);
   let sawAbort = false;
   const claimed = app.actions.foreground('command', 'Compacting…', async signal => {
@@ -107,6 +107,90 @@ test('work started by the operation that owns the slot is never refused for bein
     await app.actions.older(undefined, app.queries.record));
   assert.equal(nested, true);
   assert.equal(app.state.lastFailure, '');
+});
+
+test('stopping aborts active foreground work, releases waiters and refuses new work', async () => {
+  const app = new Controller({ base: 'http://localhost' });
+  let signal!: AbortSignal;
+  const held = gate();
+  const running = app.actions.foreground('history', 'Reading', async current => {
+    signal = current;
+    await held.promise;
+  });
+  let dispatched = false;
+  const waiting = app.actions.foreground('search', 'Waiting', async () => { dispatched = true; }, true);
+  try {
+    await app.stop();
+    assert.equal(signal.aborted, true);
+    assert.equal(await waiting, undefined);
+    assert.equal(dispatched, false);
+  } finally { held.release(); await running; }
+  assert.equal(await app.actions.foreground('local', 'After stop', async () => 'unexpected'), undefined);
+});
+
+test('a detached callback cannot borrow a later operation\'s ownership or cancellation signal', async t => {
+  const app = new Controller({ base: 'http://localhost' });
+  t.after(() => app.stop());
+  const late = gate();
+  let detached!: Promise<unknown>;
+  let dispatched = false;
+  await app.actions.foreground('history', 'Old operation', async () => {
+    detached = late.promise.then(() => app.actions.foreground('search', 'Late callback', async () => {
+      dispatched = true;
+    }));
+  });
+  const held = gate();
+  const running = app.actions.foreground('model', 'New operation', async () => { await held.promise; });
+  try {
+    late.release();
+    await detached;
+    assert.equal(dispatched, false);
+    assert.equal(app.queries.foreground?.label, 'New operation');
+  } finally { held.release(); await running; }
+});
+
+test('a cancelled operation cannot dispatch more nested work', async t => {
+  const app = new Controller({ base: 'http://localhost' });
+  t.after(() => app.stop());
+  const held = gate();
+  let dispatched = false;
+  const running = app.actions.foreground('history', 'Reading pages', async () => {
+    await held.promise;
+    return app.actions.foreground('history', 'Next page', async () => { dispatched = true; });
+  });
+  app.actions.cancelForeground();
+  held.release();
+  await running;
+  assert.equal(dispatched, false);
+});
+
+test('a publish observer cannot take a slot already promised to a waiter', async t => {
+  const app = new Controller({ base: 'http://localhost' });
+  t.after(() => app.stop());
+  const held = gate();
+  const order: string[] = [];
+  const running = app.actions.foreground('history', 'First', async () => { await held.promise; });
+  const waiting = app.actions.foreground('search', 'Waiting', async () => { order.push('waiting'); }, true);
+  let barging: Promise<unknown> | undefined;
+  const unsubscribe = app.subscribe(() => {
+    if (app.queries.foreground !== undefined) return;
+    unsubscribe();
+    barging = app.actions.foreground('model', 'Barging', async () => { order.push('barging'); });
+  });
+  held.release();
+  await Promise.all([running, waiting]);
+  await barging;
+  assert.deepEqual(order, ['waiting']);
+});
+
+test('foreground snapshots expose display data without the cancellation controller', async t => {
+  const app = new Controller({ base: 'http://localhost' });
+  t.after(() => app.stop());
+  const held = gate();
+  const running = app.actions.foreground('history', 'Reading', async () => { await held.promise; });
+  try {
+    assert.deepEqual(Object.keys(app.queries.foreground!).sort(), ['id', 'kind', 'label', 'startedAt']);
+  } finally { held.release(); await running; }
 });
 
 test('each operation is traced with its kind and whether it was cancelled', async t => {

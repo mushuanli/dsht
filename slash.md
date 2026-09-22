@@ -493,7 +493,7 @@ headless 没有；而 authorize 处理的是业务前置条件，两个前端**�
 
 ### 5.3 面（surfaces）与键所有权【现状】
 
-`surfaces` 表描述每个面板：`open`、`arrows`、`blocksKeys`、`reserved`、`close`，由它派生
+`ui/dialogs/use-panels.ts` 集中面板状态，其 `surfaces` 表描述 `open`、`arrows`、`blocksKeys`、`reserved`，关闭操作由 `close`／`closeExcept` 统一处理。由这些状态派生
 `openSurfaces`、`recallBlocked`、`panelBlocksKeys`、`dialogOpen`。
 
 **为什么用表**：每加一个面都要同时改"Esc 关闭、方向键归属、是否屏蔽数字键、是否冻结状态栏"四处；

@@ -1,12 +1,18 @@
 /** Owns the physical connection, its generations, and the host event subscriptions. */
 import { setTimeout as delay } from 'node:timers/promises';
 import { AuthenticationRequired } from '../transport/auth.ts';
-import { Client, HttpError, RemoteError } from '../transport/client.ts';
-import { errorText, object, string, type Json } from '../transport/wire.ts';
-import { controlFrame, hostEvent, type HostEvent } from '../transport/events.ts';
+import { Client, HttpError } from '../transport/client.ts';
+import { errorText, type Json } from '../transport/wire.ts';
+import type { HostEvent } from '../transport/events.ts';
+import { ConnectionStreams } from './connection-streams.ts';
 import type { HostAccess } from '../transport/host.ts';
 import type { ConnectionView } from '../session/connection-view.ts';
-import type { ControllerStore } from '../state.ts';
+
+/** Connection publication cannot replace session, navigation, catalog or shell state. */
+export interface ConnectionStore {
+  readonly state: { readonly online: boolean };
+  update(patch: Partial<{ online: boolean; status: string; lastFailure: string; controlError: string | undefined }>): void;
+}
 
 /** Connection inputs resolved by the CLI or a library consumer. */
 export interface ConnectionOptions {
@@ -43,7 +49,7 @@ export class ConnectionController implements HostAccess, ConnectionView {
   private readonly abort = new AbortController();
   private runTask: Promise<void> | undefined;
   private generationFailed: ((error: Error) => void) | undefined;
-  constructor(private readonly store: ControllerStore, private readonly options: ConnectionOptions, private readonly listener: ConnectionListener) {}
+  constructor(private readonly store: ConnectionStore, private readonly options: ConnectionOptions, private readonly listener: ConnectionListener) {}
 
   /** Start one retry loop, with a fresh snapshot generation after every disconnect. */
   start(): void { this.runTask ??= this.run(); }
@@ -84,76 +90,54 @@ export class ConnectionController implements HostAccess, ConnectionView {
     let attempt = 0;
     while (!this.abort.signal.aborted) {
       this.listener.begin();
+      if (this.abort.signal.aborted) break;
       const client = this.options.makeClient();
       this.current = client;
+      const generation = new AbortController();
+      const signal = AbortSignal.any([this.abort.signal, generation.signal]);
+      let disconnect!: (error: Error) => void;
+      const disconnected = new Promise<Error>(resolve => { disconnect = resolve; });
+      const fail = (error: Error) => {
+        if (generation.signal.aborted) return;
+        generation.abort(error);
+        disconnect(error);
+        // End HTTP as well as streams, including requests the ready callback is awaiting.
+        void client.close();
+      };
+      this.generationFailed = fail;
+      const streams = new ConnectionStreams(client, {
+        identified: id => { this.clientId = id; }, event: event => this.listener.event(event),
+        changed: () => this.store.update({}), degraded: controlError => this.store.update({ controlError }), fail,
+      }, signal);
       try {
+        signal.throwIfAborted();
         await this.options.authenticate(client);
+        signal.throwIfAborted();
         await client.connect();
-        let fail!: (error: Error) => void;
-        const disconnected = new Promise<Error>(resolve => { fail = resolve; });
-        this.generationFailed = fail;
-        const ready = new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('Host ready timed out')), client.timeoutMs);
-          client.subscribe('$events', {}, {
-            item: value => {
-              const frame = object(value);
-              if (frame.type === 'ready') {
-                this.clientId = string(frame.clientId);
-                clearTimeout(timer);
-                resolve();
-                return;
-              }
-              const event = hostEvent(frame);
-              if (!event) return;
-              if (this.listener.event(event)) return;
-              // An unanswered waterfall would block the host's event chain, so it is always settled.
-              if ('eventId' in event) {
-                void client.call('$events/result', { clientId: this.clientId,
-                  eventId: event.eventId, outcome: { kind: 'next' } }).catch(error => fail(new Error(errorText(error))));
-              }
-            },
-            end: error => { clearTimeout(timer); const reason = error ?? new Error('Event stream ended'); reject(reason); fail(reason); },
-          });
-        });
-        await ready;
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('Session control baseline timed out')), client.timeoutMs);
-          client.subscribe('session/control', {}, {
-            item: value => {
-              try {
-                this.listener.event({ kind: 'control', frame: controlFrame(value) });
-                this.store.update({});
-                clearTimeout(timer); resolve();
-              } catch (error) {
-                // Live metrics are not worth the connection: a frame this client cannot decode is
-                // reported and skipped, because failing the generation would blind a running turn.
-                clearTimeout(timer);
-                this.store.update({ controlError: `Live metrics degraded: ${errorText(error)}` });
-                resolve();
-              }
-            },
-            end: error => {
-              clearTimeout(timer);
-              if (error instanceof RemoteError && error.code === 'gateway/method-unavailable') {
-                this.store.update({ controlError: 'Live metrics unavailable on this host' }); resolve();
-              } else { const reason = error ?? new Error('Session control stream ended'); reject(reason); fail(reason); }
-            },
-          });
-        });
+        signal.throwIfAborted();
+        await streams.start();
+        signal.throwIfAborted();
         await this.listener.ready();
+        signal.throwIfAborted();
         attempt = 0;
         const error = await disconnected;
         if (!this.abort.signal.aborted) throw error;
       } catch (error) {
-        if (error instanceof AuthenticationRequired || error instanceof HttpError && [401, 403].includes(error.status)) {
-          this.store.update({ lastFailure: `${errorText(error)}. Set DSH_TOKEN and restart to log in.`, status: 'Login required' });
+        if (this.abort.signal.aborted) break;
+        const reason = generation.signal.aborted ? generation.signal.reason : error;
+        if (reason instanceof AuthenticationRequired || reason instanceof HttpError && [401, 403].includes(reason.status)) {
+          this.store.update({ lastFailure: `${errorText(reason)}. Set DSH_TOKEN and restart to log in.`, status: 'Login required' });
           return;
         }
-        if (!this.abort.signal.aborted) this.store.update({ lastFailure: errorText(error), status: 'Reconnecting…' });
+        this.store.update({ lastFailure: errorText(reason), status: 'Reconnecting…' });
       } finally {
         this.generationFailed = undefined;
-        this.store.update({ online: false, pending: [] });
+        generation.abort();
+        streams.close();
+        this.clientId = '';
+        this.store.update({ online: false });
         await client.close();
+        if (this.current === client) this.current = undefined;
         await this.listener.ended();
       }
       if (!this.abort.signal.aborted) {

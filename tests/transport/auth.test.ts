@@ -5,7 +5,7 @@ import { mkdtemp, readdir, readFile, stat, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuthenticationRequired, CookieStore, login } from '../../src/transport/auth.ts';
-import { Client } from '../../src/transport/client.ts';
+import { Client, HttpError, RemoteError } from '../../src/transport/client.ts';
 import { host } from '../support/host.ts';
 
 test('saved cookies authenticate a new client without token and remain isolated by origin', async t => {
@@ -44,3 +44,18 @@ test('expired cookies require login and publicly readable cookie files are rejec
     await assert.rejects(store.load('http://127.0.0.1:3080'), /0600/);
   }
 });
+
+for (const failure of [new HttpError(403, 'session/list'), new HttpError(500, 'session/list'),
+  new RemoteError({ code: 'session/unavailable', message: 'Try later' }), new Error('Connection lost')]) {
+  test(`saved-cookie ${failure.message} does not replay a startup token`, async () => {
+    const store = new CookieStore('/unused');
+    store.load = async () => 'dsh-auth-fixture=saved';
+    const client = new Client('http://localhost');
+    client.call = async () => { throw failure; };
+    let exchanges = 0;
+    client.authenticate = async () => { exchanges++; };
+    await assert.rejects(login(client, 'must-not-be-sent', store), error => error === failure);
+    assert.equal(exchanges, 0);
+    await client.close();
+  });
+}

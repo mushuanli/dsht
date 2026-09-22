@@ -96,6 +96,8 @@ function rowAfter(layout: RowSource, anchor: number): number {
  */
 export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], width: number): {
   total: number;
+  /** Translate a host row to its position after local blocks are inserted. */
+  hostRow(row: number): number;
   /** Merged row index of each block bar that opens a readable source, to its source id. */
   sources: ReadonlyMap<number, string>;
   viewport(start: number, end: number): HistoryRow[];
@@ -131,6 +133,14 @@ export function mergeShellRuns(layout: RowSource, runs: readonly ShellBlock[], w
   return {
     total,
     sources,
+    hostRow(row) {
+      for (const segment of segments) {
+        if (segment.host !== undefined && row >= segment.host && row < segment.host + segment.count) {
+          return segment.from + row - segment.host;
+        }
+      }
+      return total;
+    },
     viewport(start, end) {
       const rows: HistoryRow[] = [];
       for (const segment of segments) {

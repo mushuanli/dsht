@@ -13,12 +13,16 @@ export type { LivePhase, Message } from './session/transcript.ts';
 export type { FileReference } from './references.ts';
 export type { HistorySearch, RemovalTarget } from './session/types.ts';
 export type { QueuedInput } from './session/telemetry.ts';
-export type { ModelState, PanelState } from './session/info.ts';
 export type { CostTotal, Coverage } from './cost/index.ts';
 export type { ShellBlock } from './shell/index.ts';
 
-import type { ModelState, PanelState } from './session/info.ts';
-import type { RemovalTarget } from './session/types.ts';
+import type { HistorySearch, RemovalTarget } from './session/types.ts';
+import type { ObjectValue } from './json.ts';
+
+/** Data delivered to dialogs; visibility and keyboard ownership belong to the UI. */
+export interface ModelState { catalog: ObjectValue; provider?: string; model?: ObjectValue }
+export interface HistoryPanel { query: string; contentSearch: boolean; matches?: HistorySearch }
+export interface SearchPanel { query: string; items: ObjectValue[]; hasMore: boolean }
 
 /** One user-saved shortcut prompt; the client owns the list, no session or host does. */
 export interface SavedPrompt { id: string; text: string }
@@ -265,8 +269,8 @@ export type ViewEffect =
   /** Close one panel. */
   | { kind: 'close'; panel: PanelName }
   /** Payload that opens its own panel. */
-  | { kind: 'history'; history: PanelState['history'] }
-  | { kind: 'search'; search: PanelState['search'] }
+  | { kind: 'history'; history: HistoryPanel | undefined }
+  | { kind: 'search'; search: SearchPanel | undefined }
   | { kind: 'model'; model: ModelState }
   | { kind: 'removal'; removal: RemovalTarget }
   /** Open the loop parameter form for one record, so its defaults are confirmed before the run. */

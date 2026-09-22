@@ -9,13 +9,10 @@
  * non-durable. A durable echo of a locally recorded prompt upgrades that entry instead of adding a
  * second copy, keeping the refill boundary (the oldest durable sequence) exact.
  */
-import { releaseHistoryLayout, type Reasoning } from './history.ts';
-import { Transcript } from './transcript.ts';
-import type { AnswerValue, HistorySearch } from './types.ts';
-import type { ObjectValue } from '../transport/wire.ts';
-
-/** A durable user prompt as the transcript reports it, before retention. */
-export interface PromptRecord { seq: number; text: string }
+import { releaseHistoryLayout } from './history.ts';
+import { Transcript, type PromptRecord } from './transcript.ts';
+export type { PromptRecord } from './transcript.ts';
+import type { AnswerValue } from './types.ts';
 
 /** One retained prompt: its text, plus the durable sequence when the host also recorded it. */
 export interface PromptEntry extends PromptRecord { durable: boolean }
@@ -34,26 +31,6 @@ const MAX_INTERNAL_PROMPTS = 512;
 
 /** Flatten one transcript prompt into the single line the composer recalls. */
 export function promptText(value: string): string { return value.replace(/\r?\n/g, ' ').trim(); }
-
-/** Model dialog step: the catalog plus the provider or model being inspected. */
-export interface ModelState { catalog: ObjectValue; provider?: string; model?: ObjectValue }
-
-/** Panels the reader opened; visibility and query text only, so the UI owns them.
- *
- * One container rather than one flag per call site, so the composition root has a single panel set
- * to gate keys, reset on a session switch and close from a command. Every session panel's rows come
- * from the selected record and its cursor is focus held by `Picker`; the one exception is `prompts`,
- * which lists a client-global file and is therefore not derived from the record.
- */
-export interface PanelState {
-  thoughts: boolean;
-  queue: boolean;
-  /** Saved shortcut prompts opened by `/prompt`; a client-global list, kept here for one registry. */
-  prompts?: boolean;
-  model?: ModelState;
-  history?: { query: string; contentSearch: boolean; matches?: HistorySearch };
-  search?: { query: string; items: ObjectValue[]; hasMore: boolean };
-}
 
 /** Keyboard state of one pending question's options. */
 export interface OptionState { key: string; cursor: number; selected: string[]; custom: boolean }

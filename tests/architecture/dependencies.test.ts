@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sourceDependencies, dependencyGraph, dependencyCycles, type SourceFile } from '../support/source-dependencies.ts';
 
 const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
 
@@ -21,10 +22,10 @@ const UNITS: Record<string, readonly string[]> = {
   slash: ['slash'],
   storage: ['storage'],
   transport: ['transport', 'storage', 'json.ts', 'text.ts'],
-  session: ['transport', 'session', 'state.ts', 'storage', 'text.ts', 'json.ts', 'session-title.ts', 'references.ts'],
+  session: ['transport', 'session', 'storage', 'text.ts', 'json.ts', 'session-title.ts', 'references.ts'],
   shell: ['shell', 'storage', 'text.ts', 'json.ts'],
   cost: ['transport', 'cost', 'storage', 'text.ts', 'json.ts'],
-  catalog: ['transport', 'catalog', 'state.ts', 'json.ts'],
+  catalog: ['transport', 'catalog', 'json.ts'],
   controller: ['transport', 'session', 'cost', 'catalog', 'controller', 'shell', 'state.ts', 'storage',
     'text.ts', 'json.ts', 'contracts.ts', 'slash', 'session-title.ts'],
   ui: ['ui', 'controller', 'contracts.ts', 'json.ts', 'text.ts', 'slash', 'session-title.ts', 'references.ts'],
@@ -49,20 +50,10 @@ const FILESYSTEM_MODULES = new Set(['fs', 'node:fs', 'fs/promises', 'node:fs/pro
 /** Process-execution modules that may only appear inside the shell unit. */
 const PROCESS_MODULES = new Set(['child_process', 'node:child_process']);
 
-interface SourceFile { path: string; source: string }
-
 /** The architectural unit owning one repository-relative source path. */
 function unitOf(path: string): string {
   const slash = path.indexOf('/');
   return slash === -1 ? path : path.slice(0, slash);
-}
-
-/** Import and re-export specifiers, including dynamic imports. */
-function specifiers(source: string): string[] {
-  const out: string[] = [];
-  const pattern = /(?:from\s*|import\s*\(\s*|import\s+)['"]([^'"]+)['"]/g;
-  for (const match of source.matchAll(pattern)) out.push(match[1]!);
-  return out;
 }
 
 /** Check every file against the dependency rules.
@@ -75,10 +66,12 @@ function violations(files: readonly SourceFile[]): string[] {
     const unit = unitOf(file.path);
     const allowed = UNITS[unit];
     if (!allowed) { problems.push(`${file.path}: no dependency rule for unit ${unit}`); continue; }
-    if (file.path === 'contracts.ts' && /(^|\n)\s*(export\s+)?(const|function|class)\s/.test(file.source)) {
+    const parsed = sourceDependencies(file);
+    if (file.path === 'contracts.ts' && !parsed.typesOnly) {
       problems.push(`${file.path}: the UI contract must be types only`);
     }
-    for (const spec of specifiers(file.source)) {
+    for (const line of parsed.unresolved) problems.push(`${file.path}:${line}: module target must be a literal`);
+    for (const { specifier: spec } of parsed.dependencies) {
       if (spec.startsWith('.')) {
         const target = posix.normalize(posix.join(posix.dirname(file.path), spec));
         if (target.startsWith('..')) { problems.push(`${file.path}: relative import escapes src (${spec})`); continue; }
@@ -119,9 +112,17 @@ test('source modules obey the directory dependency rules', () => {
   const files = sourceFiles(SRC);
   assert.ok(files.length > 20, `expected the whole source tree, found ${files.length} files`);
   assert.deepEqual(violations(files), []);
+  const graph = dependencyGraph(files);
+  assert.deepEqual(graph.problems, []);
+  assert.deepEqual(dependencyCycles(graph.edges), [], 'value-capable imports must not form cycles');
+  assert.deepEqual(dependencyCycles(graph.edges, true), [], 'shared types must not introduce reverse dependencies');
 });
 
 test('the dependency check rejects each forbidden direction', () => {
+  assert.deepEqual(violations([{ path: 'session/controller.ts', source: "import type { ControllerStore } from '../state.ts';" }]),
+    ['session/controller.ts: session must not import state.ts (../state.ts)']);
+  assert.deepEqual(violations([{ path: 'catalog/controller.ts', source: "import type { ControllerStore } from '../state.ts';" }]),
+    ['catalog/controller.ts: catalog must not import state.ts (../state.ts)']);
   // B1: a UI leaf must not know the application capability; only the entry points may.
   assert.deepEqual(violations([{ path: 'ui/chat/panel.tsx', source: "import { Controller } from '../../controller/index.ts';" }]),
     ['ui/chat/panel.tsx: only ui/app.tsx and ui/mount.tsx may import the application controller (../../controller/index.ts)']);
@@ -234,4 +235,89 @@ test('Escape is decided by one ordered table, not by a chain of guards', () => {
   // no `key.escape && …` guard may decide anything before the table gets its say.
   assert.equal([...source.matchAll(/key\.escape &&/g)].length, 0, 'no Escape guard may bypass the table');
   assert.equal([...source.matchAll(/key\.escape/g)].length, 2, 'Escape may appear only in copy mode and the lookup');
+});
+
+test('dependency scanning ignores code samples in comments and strings', () => {
+  const source = `// import { Box } from 'ink';
+    /* export * from '../ui/app.tsx'; */
+    const example = "import('../ui/app.tsx')";`;
+  assert.deepEqual(violations([{ path: 'session/example.ts', source }]), []);
+});
+
+test('dependency scanning sees commented syntax, import types, and CommonJS loads', () => {
+  for (const source of [
+    "import /* why */ { Box } from /* here */ 'ink';",
+    "type Props = import /* why */ ('../ui/app.tsx').Props;",
+    "const view = import(`../ui/app.tsx`);",
+    "import View = require('../ui/app.tsx');",
+    "const view = require('../ui/app.tsx');",
+  ]) assert.equal(violations([{ path: 'session/example.ts', source }]).length, 1, source);
+});
+
+test('contracts reject all executable declarations and value imports', () => {
+  for (const source of [
+    'export let active = true;', 'export var active = true;', 'export enum Choice { Yes }',
+    'export async function load() {}', 'export namespace State { export const n = 1; }',
+    "import './session/index.ts';", "export * from './session/index.ts';",
+    "import { Transcript } from './session/transcript.ts';", 'void doWork();',
+  ]) assert.ok(violations([{ path: 'contracts.ts', source }]).includes('contracts.ts: the UI contract must be types only'), source);
+});
+
+test('module targets must be literals so computed imports cannot bypass the graph', () => {
+  for (const source of ['const x = import(path);', 'const x = require(path);', 'const x = import(`./${name}.ts`);']) {
+    assert.deepEqual(violations([{ path: 'session/example.ts', source }]),
+      ['session/example.ts:1: module target must be a literal']);
+  }
+});
+
+test('explicit type dependencies remain separate from value-capable module edges', () => {
+  const parsed = sourceDependencies({ path: 'example.ts', source: `
+    import type Default from './a.ts';
+    import { type A, type B } from './b.ts';
+    import Value, { type C } from './c.ts';
+    import {} from './empty.ts';
+    import './side-effect.ts';
+    export type * from './d.ts';
+    export { type E } from './e.ts';
+    export { type F, run } from './f.ts';
+    type Lookup = import('./g.ts').Value;
+    type Query = typeof import('./h.ts');
+    import Alias = require('./i.ts');
+    import type TypeAlias = require('./j.ts');
+    const task = import('./k.ts');
+    const other = require('./l.ts');
+  ` });
+  assert.deepEqual(parsed.dependencies.map(({ specifier, typeOnly }) => [specifier, typeOnly]), [
+    ['./a.ts', true], ['./b.ts', true], ['./c.ts', false], ['./empty.ts', false], ['./side-effect.ts', false],
+    ['./d.ts', true], ['./e.ts', true], ['./f.ts', false], ['./g.ts', true], ['./h.ts', true],
+    ['./i.ts', false], ['./j.ts', true], ['./k.ts', false], ['./l.ts', false],
+  ]);
+  assert.deepEqual(parsed.unresolved, []);
+  assert.equal(sourceDependencies({ path: 'types.ts', source: `import { type A } from './a.ts';
+    export { type A }; export interface B { value: A }; export type C = B;` }).typesOnly, true);
+  assert.equal(sourceDependencies({ path: 'view.tsx', source: `const node = <div title="from '../bad.ts'"/>;` }).dependencies.length, 0);
+});
+
+test('dependency graph resolves the source tree and rejects missing relative targets', () => {
+  const graph = dependencyGraph([
+    { path: 'entry.ts', source: "import './view.js'; import type { T } from './types'; import './missing.ts';" },
+    { path: 'view.tsx', source: 'export const node = <div/>;' },
+    { path: 'types/index.ts', source: 'export interface T {}' },
+  ]);
+  assert.deepEqual(graph.edges.map(({ from, to, typeOnly }) => [from, to, typeOnly]),
+    [['entry.ts', 'view.tsx', false], ['entry.ts', 'types/index.ts', true]]);
+  assert.deepEqual(graph.problems, ['entry.ts:1: unresolved local module ./missing.ts']);
+});
+
+test('cycle detection distinguishes type backreferences, value cycles and self imports', () => {
+  const graph = dependencyGraph([
+    { path: 'a.ts', source: "import './b.ts'; import './c.ts';" },
+    { path: 'b.ts', source: "import type { A } from './a.ts';" },
+    { path: 'c.ts', source: "export * from './d.ts';" },
+    { path: 'd.ts', source: "import './c.ts';" },
+    { path: 'self.ts', source: "import './self.ts';" },
+  ]);
+  assert.deepEqual(graph.problems, []);
+  assert.deepEqual(dependencyCycles(graph.edges), [['c.ts', 'd.ts'], ['self.ts']]);
+  assert.deepEqual(dependencyCycles(graph.edges, true), [['a.ts', 'b.ts'], ['c.ts', 'd.ts'], ['self.ts']]);
 });

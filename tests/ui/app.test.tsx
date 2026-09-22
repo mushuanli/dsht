@@ -65,7 +65,7 @@ test('startup status refreshes after connection and reconnect while copy mode re
     await until(() => !controller.state.online && ui.lastFrame()?.includes('Offline') === true);
     await connected();
     await until(() => controller.state.workspaces !== workspaces);
-    await until(() => controller.state.screen === (screen === 'path' ? 'workspaces' : screen));
+    await until(() => controller.state.screen === screen);
   }
 });
 
@@ -1508,6 +1508,38 @@ test('recall reaches prompts from before the seeded window with no extra request
 });
 
 
+for (const outcome of ['unchanged', 'edit', 'backfill', 'cancel']) test(`lazy recall handles ${outcome} while paging`, async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const records = (seq: number) => [{ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: `prompt-${seq}` }] } } }];
+  fixture.followSnapshot = { type: 'snapshot', cursor: 2, hasMore: false, header: { id: 's1' }, records: records(2) };
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.record.ready && controller.queries.connectionSettled);
+  await until(() => controller.state.session.prompts.exhausted);
+  // Model an index whose old prefix was evicted after startup backfill finished.
+  controller.state.session.prompts.reset();
+  controller.state.session.prompts.append([{ seq: 2, text: 'prompt-2' }]);
+  controller.queries.record.hasMore = true;
+  fixture.onPage = async () => { await gate; return { records: records(1), hasMore: false }; };
+  await pressKey(ui, '\u001b[A');
+  assert.match(ui.lastFrame()!, /❯ prompt-2/);
+  await pressKey(ui, '\u001b[A');
+  await until(() => controller.queries.foreground?.label === 'Loading older prompts…');
+  if (outcome === 'edit') await pressKey(ui, ' edited');
+  if (outcome === 'backfill') controller.state.session.prompts.prepend([{ seq: 1, text: 'prompt-1' }]);
+  if (outcome === 'cancel') await pressKey(ui, '\u001b');
+  release();
+  await until(() => controller.queries.foreground === undefined);
+  if (outcome !== 'cancel') assert.equal(controller.queries.recallLength, 2, 'the lazy scan refills the recall index');
+  if (outcome === 'unchanged' || outcome === 'backfill') await until(() => ui.lastFrame()?.includes('❯ prompt-1') === true);
+  await pressKey(ui, '!');
+  assert.match(ui.lastFrame()!, outcome === 'edit' ? /❯ prompt-2 edited!/ : outcome === 'cancel' ? /❯ prompt-2!/ : /❯ prompt-1!/);
+});
+
 test('recall recovers prompts a scroll already loaded without paging again', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const prompts = (start: number, end: number) => Array.from({ length: end - start }, (_, index) => ({
@@ -2283,6 +2315,33 @@ test('lines the policy holds run in arrival order once the turn ends', async t =
     methods.join(','));
 });
 
+test('a held line survives reconnect when the foreground operation finishes offline', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.queries.running);
+  await pressKey(ui, '/compact'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Queued /compact') === true);
+  const operation = controller.actions.foreground('command', 'Controlled operation', () => gate);
+  await until(() => controller.queries.foreground !== undefined);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', false] });
+  await until(() => !controller.queries.running);
+  fixture.disconnect();
+  await until(() => !controller.state.online);
+  release(); await operation;
+  await pressKey(ui, 'Next draft');
+  await until(() => controller.state.online && controller.queries.connectionSettled && controller.queries.record.ready);
+  await until(() => fixture.calls.some(call => call.method === 'commands/execute'));
+  assert.equal(fixture.calls.filter(call => call.method === 'commands/execute').length, 1);
+  assert.match(ui.lastFrame()!, /Next draft/);
+});
+
 test('/loop form Start is held while a turn runs, then starts with the confirmed values', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
@@ -2638,4 +2697,51 @@ test('a finished loop line stays readable until the next line runs, then goes', 
   await until(() => controller.queries.loop === undefined);
   await until(() => ui.lastFrame()?.includes('· cancelled') === false);
   assert.doesNotMatch(ui.lastFrame()!, /attempt \d+\/\d+ · best/);
+});
+
+for (const leave of ['unmount', 'scroll']) test(`a delayed history jump cannot install its window after ${leave}`, async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const records = (start: number, end: number) => Array.from({ length: end - start }, (_, index) => ({
+    type: 'event', event: { seq: start + index, type: 'user/message', surfaceOp: 'append',
+      data: { content: [{ type: 'text', text: `jump-record-${start + index}` }] } },
+  }));
+  fixture.followSnapshot = { type: 'snapshot', cursor: 39, hasMore: true, header: { id: 's1' }, records: records(20, 40) };
+  fixture.onPage = async () => ({ records: records(0, 20), hasMore: false });
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.connectionSettled && controller.queries.record.ready);
+  await pressKey(ui, '/search jump-record-5'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('#5 You · jump-record-5') === true && controller.queries.foreground === undefined);
+  let started = false;
+  fixture.onPage = async () => { started = true; await gate; return { records: records(0, 6), hasMore: false }; };
+  await pressKey(ui, '\r'); await until(() => started);
+  if (leave === 'unmount') ui.unmount();
+  else await pressKey(ui, '\u001b[6~');
+  release(); await until(() => controller.queries.foreground === undefined);
+  assert.equal(controller.queries.window, undefined);
+});
+
+test('a cross-session search cannot reopen its panel after a newer session selection', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.searchResult = { items: [{ sessionId: 's2', snippet: 'needle' }], hasMore: false };
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.connectionSettled && controller.queries.record.ready);
+  await pressKey(ui, '/wsearch needle'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('s2 · needle') === true && controller.queries.foreground === undefined);
+  let searching = false;
+  controller.actions.searchHistory = async () => {
+    searching = true; await gate; return { items: [{ seq: 0, role: 'You', preview: 'stale-search-match' }], truncated: false };
+  };
+  await pressKey(ui, '\r'); await until(() => searching);
+  await controller.session.selectSession('s1');
+  release(); await until(() => controller.queries.foreground === undefined);
+  assert.equal(controller.state.sessionId, 's1');
+  assert.doesNotMatch(ui.lastFrame()!, /stale-search-match|Search · session history/);
 });

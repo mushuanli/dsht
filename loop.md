@@ -66,7 +66,7 @@
 ```
                        ┌─────────────────────────── parent dsht ───────────────────────────┐
                        │                                                                    │
-  slash /loop <name> ──────▶ commands.runCommand ──▶ Controller.startLoop(protocol, limits) │
+  slash /loop <name> ──────▶ commands.runCommand ──▶ LoopCoordinator.start(protocol, limits) │
                        │                                      │                             │
                        │                            ScoredLoop（纯状态机，无 I/O）            │
                        │                                      │                             │
@@ -74,12 +74,12 @@
                        │        │                                                           │
    host ◀──────────────┘        │ agent-status running:false                             │
                                 ▼                                                        │
-                        Controller.trySettleLoop()                                       │
+                        LoopExecution.trySettleLoop()                                       │
                                 │                                                        │
               verifier 已配置? ─┤ 否 ─▶ parseLoopResult(回复正文最后一块) ─▶ settleWith     │
                                 │ 是                                                        │
                                 ▼                                                        │
-                     Controller.verifyRound()  ──▶ VerifierPort.verify(request, signal)   │
+                     LoopExecution.verifyRound()  ──▶ VerifierPort.verify(request, signal)   │
                                 │                                    │                    │
                                 │                          ProcessVerifier（cli）          │
                                 │                                    │                    │
@@ -124,9 +124,9 @@
  2. parent: session/prompt  ──▶ host
  3. host:  agent 干活（读产出物、改文件、跑命令），subagent 被明确禁止
  4. host:  api-session/status(<本 session>, running=false)   （其他 session/子代理的 idle 被 sessionId 过滤掉）
- 5. parent: Controller.settleLoop() → trySettleLoop()
+ 5. parent: LoopCoordinator.idle() → LoopExecution.settleLoop() → trySettleLoop()
             ↳ loop.protocol.verify 存在且 verifier 存在 → verifyRound()
- 6. parent: seq = ++loopVerifySeq   ← 本次验证任务的序号；一次故障重试或人工恢复都是一次新任务
+ 6. parent: seq = ++verificationSeq   ← 本次验证任务的序号；一次故障重试或人工恢复都是一次新任务
             file = verdictFile(verdictRoot, runId, kind, step, attempt, seq)
             = <verdictRoot>/.dsht/verify/<runId>/<kind>-<step>-<attempt>-<seq>.json   （CLI 把 verdictRoot 设为客户端进程 cwd，`DSHT_VERDICT_ROOT` 可改指）
  7. parent: VerifierPort.verify({verificationId,kind,step,attempt,prompt,title,file,workspace,artifact?}, signal)
@@ -149,7 +149,12 @@
 15. parent: loop.note(说明) → UI 进度行追加显示；下一次 sent() 时清空
 ```
 
-取消/替换路径：`stopLoop()` / `forgetLoop()`（含切换 session）→ `abortVerification()` → `ProcessVerifier` 向 host 请求 `session/cancel(<verifierSessionId>)`，**最多等 `CANCEL_CONFIRM_MS`（1s）**确认，然后/同时终止本地子进程组（`SIGTERM`→2s→`SIGKILL`）；确认结果只影响 reason 文案（`remote cancel confirmed | rejected | unconfirmed after 1000 ms`），**本地回收从不等待 host**。验证回调返回时有两道门：`this.loopVerifyIdentity !== identity`（本次任务是否仍是被等待的那一个）与 `this.loop !== loop || !loop.active || !loop.settled`（loop 是否还在）。
+取消/替换路径：`stopLoop()` / `forgetLoop()`（含切换 session）→ `abortVerification()` → `ProcessVerifier` 向 host 请求 `session/cancel(<verifierSessionId>)`，**最多等 `CANCEL_CONFIRM_MS`（1s）**确认，然后/同时终止本地子进程组（`SIGTERM`→2s→`SIGKILL`）；确认结果只影响 reason 文案（`remote cancel confirmed | rejected | unconfirmed after 1000 ms`），**宿主确认等待有界，本地进程回收不依赖无限等待**。验证回调返回时有两道门：`this.verificationIdentity !== identity`（本次任务是否仍是被等待的那一个）与 `!this.isCurrent(loop) || !loop.settled`（loop 是否还在）。
+
+运行编排实现在 `src/controller/loop-coordinator.ts`：`LoopCoordinator` 选择当前运行，内部每个 `LoopExecution` 独占自己的验证标志、定时器和异步回调；`ScoredLoop` 仍只负责评分状态机。应用通过 `LoopHost` 提供少量状态事实、当前回复文本、发送与通知能力，不把 Controller 或 Transcript 交给运行协调器。替换后迟到的验证或发送失败不能修改新运行。
+
+退出时先关闭前台入口并取消 Loop，再等待 `ProcessVerifier.settle()` 完成子进程与宿主取消的有界收尾，然后断开连接。验证器取消使用会话 control lane，不占前台槽位；CLI 必须检查取消返回值，拒绝不能被记成确认成功。待发送的下一步还会等待当前会话快照恢复就绪，避免重连窗口把运行误判为发送失败。
+
 
 **已收口的缺口（原 G1/G2/G3 的本地部分）**：重试与人工恢复各自换新 `seq`，因此旧任务既不能覆盖新文件、也不会被父进程接受（G1）；创建期取消会取消刚建立的 session 且不再 spawn，超时的任务即使写下了合法 verdict 也判 `unavailable`，`session/cancel` 变为有界确认（G2）；child 只接受 **prompt 基线之后出现的 assistant 回复**（G3 的最小绑定；仍未绑定 host 的 turn 标识）。
 
@@ -398,7 +403,7 @@ retry：followUp 附上验证者的原文意见（findingsLines）
 ```
 
 * `LoopResult` 现在携带 `score / status / findings / evidence`（`readResultFields` 统一校验，findings 最多 8 条、每条 300 字，evidence 600 字——都是不可信模型输出，必须设上限）。
-* 回灌点只有一处：`Controller.settleWith()` 在判定后把 `findingsLines(result)` 追加到 `loopPrompt`；`Controller.loopPrevious` 记住同一 step 上一次的 verdict 并交给 `protocol.verify(..., previous)`。换 step 时清空。
+* 回灌点只有一处：`LoopExecution.settleWith()` 在判定后把 `findingsLines(result)` 追加到 `pendingPrompt`；`LoopExecution.previous` 记住同一 step 上一次的 verdict 并交给 `protocol.verify(..., previous)`。换 step 时清空。
 * **无进展早停（预算策略，不是收敛证明）**：`ScoredLoop` 记录「连续未超过本 step 历史最高分」的次数（`noProgress`）：`score > best` 时清零，否则 `attempt > 1` 时加一；累计到 `STALL_STREAK = 2` 进 `phase: 'stalled'`。
   * 为什么是 2：独立验证者对同一份产出物有抖动，一次持平可能是噪声。但「连续两次没有提高」只能说明**重试没有带来更高分**，不能证明产出物没有进展、更不能证明已经收敛——它是保守的预算停止策略，UI 必须显示停止原因。
   * 想改成「必须严格下降才继续」需要改比较条件（只有 `score < best` 才计数），**不是**把 `STALL_STREAK` 改成 1：改成 1 只是把「一次未提高（含持平）即停」变成默认行为，两者不是同一件事。
@@ -408,7 +413,7 @@ retry：followUp 附上验证者的原文意见（findingsLines）
 
 ## 7. 状态所有权与取消
 
-* loop 状态只存在于 client 内存（`Controller.loop`），host 不感知；进程退出即消失（沿用既有设计）。
+* loop 状态只存在于 client 内存（`LoopCoordinator` 当前持有的 `LoopExecution`），host 不感知；进程退出即消失（沿用既有设计）。
 * 取消触发：输入文字、`/loop stop`／`/loop abort`、`/cancel`、Esc、Ctrl+C、**切换 session**；**重连不取消**（host 还在跑，重连后按 §1 故障 3 的修法重挂 session）。`/loop answer` 与 `/loop abort` 走 `slash/registry.ts` 的 `loopAnswer` 策略（`ANSWERS_WHILE_RUNNING`／`ANSWERS_WHILE_BUSY`），由 `slash/pipeline.ts` 的 `authorize` 只读这张表判定，因此在「输入文字即取消」这条通用规则**之前**被识别——恢复命令不会先把 loop 取消。
 * 验证进程与该次尝试同生命周期：`stopLoop`/`forgetLoop` 会 abort 本地子进程组，避免孤儿进程继续烧 token。**远端取消是请求 + 有界确认**：`session/cancel` 最多等 `CANCEL_CONFIRM_MS`(1s)，本地回收不等待 host；reason 如实区分 `confirmed / rejected / unconfirmed`，host 不支持取消时写 `host cannot cancel`。创建期取消会取消刚建立的 session 并**不再 spawn**。
 * 子进程凭据：继承父进程环境（含 `DSH_TOKEN`），`--url` 用操作者原始写法，`--auth-dir` 显式透传；子进程额外带 `--no-memory-log`，避免污染父的 memory log。
@@ -472,14 +477,14 @@ fork 路径已在 tsx 启动方式（`npx tsx src/cli/index.ts`）下跑通过�
 
 | # | 目标 | 现状与缺口 | 验收（必须由测试证明） |
 |---|---|---|---|
-| **G1** | **每个实际验证任务有唯一身份**：`runId` = 整个 loop，`step/attempt` = 产出物的评审进度，`verificationId` = **这一次启动的验证任务**，三者不可互相代替 | ✅ **已实现**：`seq` 每次实际启动验证都自增（含故障重试与人工恢复），身份为 `<runId>/<kind>/<step>/<attempt>/<seq>`，文件名含 `seq`；父进程用 `loopVerifyIdentity` 只接受「当前等待的那一个」结果 | `loop-verify.test.ts`「a verification retry is a new task with its own identity and file」+ 原有的陈旧/越轮 verdict 拒绝用例 |
+| **G1** | **每个实际验证任务有唯一身份**：`runId` = 整个 loop，`step/attempt` = 产出物的评审进度，`verificationId` = **这一次启动的验证任务**，三者不可互相代替 | ✅ **已实现**：`seq` 每次实际启动验证都自增（含故障重试与人工恢复），身份为 `<runId>/<kind>/<step>/<attempt>/<seq>`，文件名含 `seq`；父进程用 `verificationIdentity` 只接受「当前等待的那一个」结果 | `loop-verify.test.ts`「a verification retry is a new task with its own identity and file」+ 原有的陈旧/越轮 verdict 拒绝用例 |
 | **G2** | **取消的边界可确认**：本地一定回收；远端取消有短等待上限并如实报告「未确认」；创建期取消不留孤儿 session；已废弃任务的结果永不复活 | ✅ **已实现**：`signal` 已 abort → 不建 session/不 spawn；创建期取消/超时 → 取消刚建的 session 并直接返回；超时任务即使落下合法 verdict 也判 `unavailable`；`session/cancel` 等待上限 `CANCEL_CONFIRM_MS = 1_000`，reason 区分 confirmed/rejected/unconfirmed；`spawnLines` 在 spawn 前检查 aborted | `verifier.test.ts`：cancel-before-start、abort-during-create、timeout-with-late-verdict、cancel-rejected、cancel-never-answered（有界）、超时也取消 host；`runner.test.ts`：aborted 不 spawn |
 | **G3** | **「完成」= 本回合的最终回复已可读**，不只是观察到 idle 边沿 | 🟡 **最小绑定已实现**：child 记录 prompt 之前的消息基线，只接受**基线之后出现的 assistant 回复**；仍不绑定 host 的 turn/回复标识（协议没有），超时仍走有界 grace | `startup.test.ts`：prompt 前的旧 verdict 块（身份还完全匹配）不会被采用；prompt 后的回复正常写出 |
 | **G4** | **分开两件事**：验证者不能写被评审对象；结论对应哪一份产出物 | 🟡 **一期已实现（检测，不阻止）**：请求显式声明被评审 workspace（`VerifierRequest.workspace`，取自 `Controller.localDirectory`），artifact 绝对路径由它拼出；验证前后取 SHA-256，变化即作废本次结论（`unavailable` + 前后哈希）并重验；验证在飞时 loop 不发写入（`flushLoop`）。**未做**：阻止写入（需 OS 级隔离）、检测「改完又改回」、归因到进程 | 指纹只认请求声明的 workspace；产出物被改时该轮 verdict 作废并重验；验证期间 loop 不写入 |
 | **G5** | **`passed` 要么表示「整份产出物满足全部要求」，要么不再这么声称** | ✅ **已实现（范围语义 + 全量收尾复核）**：`LoopProgress.scope` 把 `passed` 写成「本次 run 覆盖的轮次」；只有 `from=1 && to=steps` 的 run 才把最后一轮标为收尾轮——工作 brief 要求修回被破坏的前序要求，verdict brief 收到前面每一轮的 rubric 全文并被要求逐轮复核 | 「第 5 步改坏第 2 步」时最后一次验证的 prompt 必含第 2 轮 rubric 与逐轮复核指令（`loop-protocols.test.ts`）；部分范围／从中间开始／非末轮都不出现复核段 |
 | **G6** | **验证者可提前停下，但不得跳过未验证的范围**：`cannot-fix` → blocked；`needs-human` → 暂停 + `/loop answer`（host 交互才是终态 + exit 3）；`no-change-needed` 只是解释字段；`starts` 阶段顺序；`tries` = 每 step 评审次数 | 🟡 **已实现**：`abstained` 是第四种 `status`；`readResultFields` 整体校验（恰一种判断、`reason` 必填、两种停下都不得带 `score`、`exit_reason` 与 `status` 自洽），不合格按「无判定」→ `unavailable` 重试；`settle` 把 `abstained` 映射为暂停（`/loop answer` 以新 `verificationId` 重判、不消耗评审次数）、`blocked` 映射为 `blocked`（`reason` 进 `progress.exit`）。**二期**：`code`、每 step 一次人工补充 | step 3 高分后 step 4 仍运行；`explanation` 不改变控制流（用例：`loop.test.ts` 硬校验表） |
 | **G7** | **命令面收敛为单一 `/loop <name> [score] [tries]`**：协议、附加标准、`vars` 与默认值都由 `loop.yaml` 记录承载，`/verify` 删除 | ✅ **已实现**：`loop-protocols.ts` 装配记录，`/loop` 按名字取用；`design-review.ts`／`designdoc-review.ts`／`loop-prompt.ts` 与 `/design-review`、`/designdoc-review`、`/verify` 一并删除；自由 prompt 形式取消；`answer`／`abort` 为保留名，未知占位符在发送前报错 | 测试：`loop-protocols.test.ts`（记录→协议、vars、forked verify、`roundStandard`）、`commands.test.ts`（按名字运行/位置 score tries/未知名字列出记录/反向区间）、`ui/commands.test.ts`（新语法、保留前缀、旧命令已成未知）、`loop-prompts.test.ts`（schema 与 vars/defaults） |
-| **G8** | **run 级预算**：每 step 评审次数 + 每次验证故障重试 + **整个 run 截止时间**；重试按责任分类；远端未确认停止时不得重试 | 🟡 **已实现**：`--deadline <minutes>`／`DSHT_LOOP_DEADLINE` → `Controller.deadlineMs`，到期即终态 `deadline`（不消耗 attempt、不自动重试、取消在飞的验证）；`VerifierOutcome.unavailable.retryable === false` 时 controller 直接报告、不花重试预算（远端取消未确认/被拒绝、缺 fork 入口）。**尚缺**：断连/配置错误的更细分类（目前除上述两类外统一按可重试处理） | 测试：`loop.test.ts` 的终态不变量、`loop-verify.test.ts` 的 deadline 中止与迟到 verdict、`retryable:false` 只验证一次、`verifier.test.ts` 的 unconfirmed → `retryable:false`、`cli.test.ts` 拒绝非法 `--deadline` |
+| **G8** | **run 级预算**：每 step 评审次数 + 每次验证故障重试 + **整个 run 截止时间**；重试按责任分类；远端未确认停止时不得重试 | 🟡 **已实现**：`--deadline <minutes>`／`DSHT_LOOP_DEADLINE` → `LoopCoordinatorOptions.deadlineMs`，到期即终态 `deadline`（不消耗 attempt、不自动重试、取消在飞的验证）；`VerifierOutcome.unavailable.retryable === false` 时 controller 直接报告、不花重试预算（远端取消未确认/被拒绝、缺 fork 入口）。**尚缺**：断连/配置错误的更细分类（目前除上述两类外统一按可重试处理） | 测试：`loop.test.ts` 的终态不变量、`loop-verify.test.ts` 的 deadline 中止与迟到 verdict、`retryable:false` 只验证一次、`verifier.test.ts` 的 unconfirmed → `retryable:false`、`cli.test.ts` 拒绝非法 `--deadline` |
 | **G9** | **协议在 run 内冻结**；默认值优先级 命令 > 记录 > 全局；`vars` 相对被评审 workspace 解析；未知占位符在发送前报错；`answer`／`abort` 为保留名 | ✅ **已实现**：`loopProtocolFor` 启动时读一次记录并闭包保存（标题、rubric、standard、vars、默认值），`LoopLimits` 在 `startLoop` 解析一次；YAML 是构建期内联，运行中改磁盘本就不影响本次 run。**将来若启用运行时加载**，仍需保留这层快照 | `loop-protocols.test.ts`（协议字段来自记录）、`loop-prompts.test.ts`（未知占位符/保留名/默认值校验在生成期失败）、`commands.test.ts`（命令参数覆盖记录默认值） |
 | **G10** | **运行中的人工请求通道** | 🟡 **一期已实现**：child 在自己 session 上看到未决审批/提问 → 打标记行退出；`ProcessVerifier` 解析标记、取消该 turn（有界确认）、返回 `needs-human`；controller 以终态 `needs-human` 结束（不消耗评审次数、不重试），headless exit 3——这条通道是 host 的审批/提问，本客户端无法代答，因此**不**适用 `/loop answer`（它只恢复 verdict 弃权的暂停，见 G6）。**尚缺**：代答 host 交互并恢复原 turn（二期，需要 App Server 类双向协议） | 已覆盖：child 检测、标记解析＋取消、loop 不重试、headless 映射 |
 | **G11** | **验收由程序组合**：身份 ∧ 产出物版本 ∧ 覆盖范围 ∧ 必需检查 ∧ 评分；硬条件不被高分覆盖 | 🟡 **一期已实现（产出物形态）**：每次判定都过 `settleChecked`——身份／归属、产出物未被改动、**本轮产出物小节存在**（客户端读文件核对 `artifactMarker`）、分数达阈值；缺小节即置空 `score` 并按失败尝试回灌。**未做**：需 host 侧执行的测试／接口检查 | 「9 分但缺本轮小节」必须不通过（`loop-run.test.ts`／`loop-verify.test.ts`）；产出物不可读时不检查 |
@@ -640,7 +645,7 @@ G7（命令面）**已实现**；G12 属于下一阶段。
 #### 验收由程序组合，分数只是其中一项
 
 - 最终接受 = **身份与回复归属有效**（G1／G3）∧ **产出物版本一致**（G4：验证前后指纹相同）∧ **所需范围已覆盖**（G5：`passed` 只声称跑过的轮次，整份记录的最后一轮带全量回归清单）∧ **必需检查通过**（G11：本轮产出物小节存在）∧ **评分达阈值**。硬条件不得被高分覆盖；`evidence: "测试全绿"` 只是模型陈述，能用工具结果的地方一律用真实结果。
-- **实现**：三处判定都汇进 `Controller.settleChecked()`：先跑协议自带的产出物检查（`artifactMarker` 渲染成「## 第 N 轮 · 主题」，客户端读 `join(localDirectory, artifact)` 自己核对），不满足就把 `score` 置空、把「缺少本轮小节」并进 findings、把原因写进进度行，于是它按一次失败尝试计入 `tries`，与低分走同一条路——**不存在「分数高就跳过」的分支**。产出物对本机不可读时不做检查（与 G4 同一边界），判定照旧。
+- **实现**：三处判定都汇进 `LoopExecution.settleChecked()`：先跑协议自带的产出物检查（`artifactMarker` 渲染成「## 第 N 轮 · 主题」，客户端读 `join(localDirectory, artifact)` 自己核对），不满足就把 `score` 置空、把「缺少本轮小节」并进 findings、把原因写进进度行，于是它按一次失败尝试计入 `tries`，与低分走同一条路——**不存在「分数高就跳过」的分支**。产出物对本机不可读时不做检查（与 G4 同一边界），判定照旧。
 - **仍未做**：必需测试退出码、必需接口存在性等需要**在 host 侧执行**的检查（客户端只能读文件，不能假定 workspace 在本机），以及把检查结果持久化为可审计记录。这些属二期；纯设计评审不强行加测试门禁：用明确 rubric、可定位的问题与可核查证据即可。
 - 上一轮 findings 允许被新 verifier 依据证据纠正，不要求无条件维护旧判断。
 
@@ -708,7 +713,7 @@ codex --ask-for-approval never exec --json --sandbox read-only \
 | 不变量 | 状态 | 实现与证据范围 |
 |---|---|---|
 | **verifier 不可用 ≠ 评审失败** | ✅ 已实现（live 未覆盖该分支） | `VerifierOutcome = verified \| unavailable \| cancelled \| needs-human`；`unavailable` 不消耗评审次数、重试 ≤2 次（共 3 次）后置 `phase: 'unavailable'`（`retryable: false` 直接报告）；默认严格，只有显式传 `ControllerOptions.allowSelfFallback`（CLI 不传）才允许父回复块并标 `⚠ verification fallback · self-reported`。证据：`loop-verify.test.ts`、`verifier.test.ts` |
-| **一次 verification 只属于一个验证任务** | ✅ 已实现 | `runId`（`randomUUID`）+ 路径 `<verdictRoot>/.dsht/verify/<runId>/<kind>-<step>-<attempt>-<seq>.json` + verdict 内嵌 `verificationId = <runId>/<kind>/<step>/<attempt>/<seq>`，解析前校验；父进程另用 `loopVerifyIdentity` 只接受当前等待的任务。**重试与人工恢复各自换新 `seq`**，因此旧任务既不能覆盖新文件、也不会被接受。测试：重试换新身份、越轮/陈旧文件被拒 |
+| **一次 verification 只属于一个验证任务** | ✅ 已实现 | `runId`（`randomUUID`）+ 路径 `<verdictRoot>/.dsht/verify/<runId>/<kind>-<step>-<attempt>-<seq>.json` + verdict 内嵌 `verificationId = <runId>/<kind>/<step>/<attempt>/<seq>`，解析前校验；父进程另用 `verificationIdentity` 只接受当前等待的任务。**重试与人工恢复各自换新 `seq`**，因此旧任务既不能覆盖新文件、也不会被接受。测试：重试换新身份、越轮/陈旧文件被拒 |
 | **cancel 必须同时终止 local waiter 与 remote generation** | ✅ 已实现（远端为「有界确认」而非强保证） | 本地：`abortVerification()` 终止子进程组（SIGTERM→2s→SIGKILL），`stopLoop()` 后端口 signal 已 abort。远端：请求 `session/cancel` 并最多等 1s 确认，结果写进 reason（`confirmed/rejected/unconfirmed` / `host cannot cancel`），本地从不阻塞。测试：cancel-before-start 不建 session/不 spawn、abort-during-create 取消新 session、超时也取消 host、host 拒绝或永不回答仍有界返回、`runner` 对已 abort 的信号不 spawn。**仍不保证** host 一定停了那个 generation |
 | **状态由状态机推导，而非模型自报** | ✅ 已实现 | `score` 是唯一推进依据；`blocked`／`abstained` 是仅有的两种能覆盖 `score` 的事实；`status` 只是标签。测试：`9 + retry` 前进、`3 + done` 消耗 attempt、`blocked` 终止、`abstained` 暂停为 `needs-human` |
 | **验证者可以提前停下，但拿不到分也跳不过范围** | 🟡 已实现（`code` 属二期） | 两种停下（`blocked`＝不可完成、`abstained`＝需要人）都必须给 `reason` 且**不许带 `score`**；`readResultFields` 整块校验，不合格 → verdict 报 `unavailable` 重试而不当成停下；`settle` 把 `blocked` 映射到终态、把 `abstained` 映射到暂停（`/loop answer` 恢复），`explanation` 与 `score` 都没有跳步能力。证据：`loop.test.ts` 硬校验表、`loop-verify.test.ts` 两种 verdict 的端到端、`loop-status.test.tsx` 的 `exit.reason` |
@@ -718,7 +723,7 @@ codex --ask-for-approval never exec --json --sandbox read-only \
 | **独立评审不得修改被评审对象** | 🟡 已检测 + 已验证期间不写入（G4 一期） | 请求显式声明被评审 workspace，指纹在该 workspace 上做 before/after SHA-256，变化即作废该轮结论并重验；验证在飞时 loop 不发送任何写入（`flushLoop` 门禁）。**仍不阻止**修改（需要独立用户/只读挂载）、不能检测「改完又改回」、不能归因；跨 step 的被评审范围不在覆盖内 |
 | **`passed` 表示整份产出物满足全部要求** | 🟡 提示词层面已保证（G5 已实现；真正的程序化验收属 G11） | 整份记录（`from=1 && to=steps`）的最后一轮被标记为收尾轮：工作 brief 要求不得破坏前序要求，verdict brief 拿到前面每一轮的 rubric 全文并被要求逐轮复核、把回归计入扣分。**但「验证者是否真的逐条复核」取决于模型**，与 `score` 一样属于 §10 的诚实边界；dsht 保证的是「指令与 rubric 一定送达」+「范围不被夸大」 |
 | **step 通过 ≠ run 通过，范围必须可见** | ✅ 已实现（G5） | `LoopProgress.scope`（`rounds 1–3/10 · selected range`）由 `coversWholeProtocol` 推导，UI 与 headless 在 `passed` 时都打印；部分范围、从中间开始、非最后一轮都不会出现全量复核段。测试：`loop.test.ts`（谓词）、`loop-protocols.test.ts`、`loop-verify.test.ts`（端到端 scope）、`loop-status.test.tsx`、`startup.test.ts`（headless 行） |
-| **run 有全局预算** | 🟡 已实现（缺细分分类） | `--deadline <minutes>`／`DSHT_LOOP_DEADLINE` → `Controller.deadlineMs`，到期为终态 `deadline`（不消耗 attempt、取消在飞验证、迟到 verdict 不复活）；另有每次验证的故障重试 `VERIFIER_RETRIES` 与不可重试分类（`retryable:false` 直接报告）。**尚缺**：断连与配置错误的更细重试分类。测试：`loop.test.ts`、`loop-verify.test.ts`（deadline 中止 + 迟到 verdict）、`cli.test.ts`（非法值） |
+| **run 有全局预算** | 🟡 已实现（缺细分分类） | `--deadline <minutes>`／`DSHT_LOOP_DEADLINE` → `LoopCoordinatorOptions.deadlineMs`，到期为终态 `deadline`（不消耗 attempt、取消在飞验证、迟到 verdict 不复活）；另有每次验证的故障重试 `VERIFIER_RETRIES` 与不可重试分类（`retryable:false` 直接报告）。**尚缺**：断连与配置错误的更细重试分类。测试：`loop.test.ts`、`loop-verify.test.ts`（deadline 中止 + 迟到 verdict）、`cli.test.ts`（非法值） |
 | **协议在 run 内冻结（G9；YAML 为构建期内联）** | ✅ 已实现 | 启动时 `loopProtocolFor` 读一次记录并由闭包保存（标题/rubric/standard/vars/默认值），`LoopLimits` 在 `startLoop` 解析一次；YAML 构建期内联进 `loop-prompts.generated.ts`，运行中改磁盘不影响本次 run；未知占位符与保留名在生成期失败。**将来若启用运行时加载**，仍需保留这层快照。测试：`loop-protocols.test.ts`、`loop-prompts.test.ts`、`commands.test.ts` |
 | **验收由程序组合** | 🟡 一期已实现（G11） | 判定 = 身份/归属 ∧ 产出物未被改动（G4）∧ 本轮产出物小节存在（`artifactMarker`，客户端自己核对）∧ 分数达阈值；缺小节时 `score` 被置空并按失败尝试处理，任何分数都不能覆盖。**未做**：需要 host 侧执行的必需测试/接口检查 |
 | **人工阻塞不重复消耗评审次数** | ✅ 一期已实现 | child 检测未决审批/提问 → `needs-human` 终态（不重试、不消耗 attempt、headless exit 3）；verdict 弃权则是暂停，`/loop answer` 恢复（同样不重试、不消耗 attempt）。测试：`startup.test.ts` 的 child 检测、`verifier.test.ts` 的标记解析＋取消、`loop-verify.test.ts` 的不重试与 headless 映射。**二期**：代答 host 交互并恢复原 turn |

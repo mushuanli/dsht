@@ -1,11 +1,12 @@
-/** Application state shared by the controller facade and every domain controller. */
+/** Application composition of session state and the other domains' published snapshots. */
 import { SessionInfo } from './session/info.ts';
-import type { HistorySearch, PendingInteraction, RemovalTarget } from './session/types.ts';
+import type { HistorySearch, RemovalTarget } from './session/types.ts';
+import type { SessionState } from './session/state.ts';
 import type { ShellSnapshot } from './shell/index.ts';
 import type { ObjectValue } from './transport/wire.ts';
 
 /** State shared by the picker and conversation view. */
-export interface State {
+export interface State extends SessionState {
   version: number;
   /** The last failure the application recorded, for a diagnostic line and a refusal's reason.
    *
@@ -14,15 +15,6 @@ export interface State {
    * Whether an operation is running is not stored here — that is `queries.foreground`.
    */
   lastFailure: string;
-  online: boolean;
-  screen: 'workspaces' | 'sessions' | 'chat' | 'path';
-  status: string;
-  workspaces: ObjectValue[];
-  sessions: ObjectValue[];
-  showAllSessions: boolean;
-  workspaceId?: string;
-  sessionId?: string;
-  pending: PendingInteraction[];
   controlError?: string;
   modelError?: string;
   presetError?: string;
@@ -30,13 +22,11 @@ export interface State {
   defaultModel?: ObjectValue;
   /** Local `!` runs, published so the UI never reads the shell service object. */
   shell: ShellSnapshot;
-  /** Record, prompt index, composer, view and interaction state of the selected session. */
-  session: SessionInfo;
 }
 
-/** The state contract every domain controller writes through. */
+/** Application state access used by connection orchestration. Feature domains use their own ports. */
 export interface ControllerStore {
-  /** Current immutable state snapshot. */
+  /** Current application snapshot; nested session data remains owned by the session domain. */
   readonly state: State;
   /** Publish a state patch and notify observers. */
   update(patch: Partial<State>): void;
