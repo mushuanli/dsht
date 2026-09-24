@@ -16,6 +16,8 @@ import { historyLimits } from '../session/memory.ts';
 import { ProcessVerifier } from './verifier.ts';
 import type { VerifierPort } from '../controller/verifier.ts';
 import { Controller } from '../controller/controller.ts';
+import { loadLoopSource } from '../controller/loop-source.ts';
+import { installLoopSource } from '../controller/loop-prompts.ts';
 import { endpoint } from '../transport/endpoint.ts';
 import { errorText, object, string } from '../transport/wire.ts';
 import { formatTraceSummary, summarizeTrace } from './trace-summary.ts';
@@ -53,10 +55,12 @@ With no command, choose a workspace and session interactively.
 The default host is http://127.0.0.1:3080.
 First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
-/cost shows the session and today CNY estimates.
+/cost shows the session, day, week and month CNY estimates.
 /prompt lists saved shortcut prompts; /prompt TEXT saves one in <state>/prompts.json.
 !command runs on this machine, not on the host, and prints its output in the transcript.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
+The shipped loop.yaml is read at startup; a loop.yaml in the config directory adds to it, and a
+record with the same name replaces the shipped one. DSHT_LOOP_FILE names another file instead.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
 The transition trace defaults to <state>/trace.log; DSHT_TRACE sets another path or 'off'.
 prices.json overrides the shipped rates and is seeded on first use; every scan re-decides the
@@ -136,6 +140,15 @@ async function main(): Promise<void> {
   await ensureDirectory(config);
   const { prices, custom } = await loadPrices(config);
   const stateRoot = process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht');
+  // The loop records are configuration: the shipped file is read now, a user file layered over it and
+  // the result installed before anything can list or run a record. An invalid user file stops the
+  // client here rather than running shipped records while the operator believes their own are in
+  // force; a shipped file that cannot be read falls back to the compiled-in records with a warning.
+  const loopSource = await loadLoopSource({
+    ...(process.env.DSHT_LOOP_FILE === undefined ? {} : { overlayFile: process.env.DSHT_LOOP_FILE }),
+    configDirectory: config, stateDirectory: stateRoot,
+  });
+  installLoopSource(loopSource.source, loopSource.info);
   const costDirectory = join(stateRoot, 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory, custom);
   await costs.load();
@@ -185,6 +198,8 @@ async function main(): Promise<void> {
     timeoutSeconds: 3600,
   };
   const log = (line: string) => process.stderr.write(`${line}\n`);
+  // Headless runs have no record list, so the loop source's notes would otherwise never be read.
+  if (values.headless) for (const warning of loopSource.info.warnings) log(warning);
   controller.start();
   if (values.headless) {
     // No renderer: run the plan, follow a started loop to its verdict, and report it as the exit code.

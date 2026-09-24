@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CostLedger, DEFAULT_PRICES, pricesDigest, pricesFrom, priceAt, chargeFor, candidates, canonicalModel, costRecords, costAddresses, costDay, type CostTotal } from '../../src/cost/index.ts';
+import { CostLedger, COST_WINDOW_DAYS, DEFAULT_PRICES, costDay, costDaysBefore, costMonthStart, costRecords, costWeekStart, costWindowStart, costAddresses, pricesDigest, pricesFrom, priceAt, chargeFor, candidates, canonicalModel, type CostTotal } from '../../src/cost/index.ts';
 import { costText } from '../../src/ui/status/model.ts';
 import { Controller } from '../../src/controller/controller.ts';
 import { host, until } from '../support/host.ts';
@@ -39,6 +39,13 @@ test('tariffs use Beijing weekdays and half-open morning/afternoon windows', () 
   const exact = { ...prices[0]!, id: 'custom', model: 'custom-model', peak: { ...prices[0]!.peak, input: 42 } };
   assert.equal(priceAt(pricesFrom([...prices, exact]), 'deepseek-official', 'custom-model', at('2026-09-10T10:00:00'))?.rates.input, 42);
   assert.equal(costDay(Date.parse('2026-09-10T16:00:00Z')), '2026-09-11');
+  // The natural periods the panel reports are Beijing calendar boundaries, and the retention window
+  // comes from the same calendar arithmetic, so display and pruning can never disagree on a boundary.
+  assert.equal(costWeekStart('2026-09-13'), '2026-09-07');  // A Sunday belongs to the week starting Monday.
+  assert.equal(costWeekStart('2026-09-14'), '2026-09-14');  // A Monday starts its own week.
+  assert.equal(costMonthStart('2026-09-10'), '2026-09-01');
+  assert.equal(costDaysBefore('2026-03-01', 1), '2026-02-28');  // Calendar arithmetic, not a 30-day month.
+  assert.equal(costWindowStart(at('2026-09-24T12:00:00')), costDaysBefore('2026-09-24', COST_WINDOW_DAYS - 1));
   assert.throws(() => pricesFrom([...prices, { ...prices[0], id: 'overlap' }]), /Overlapping/);
   assert.throws(() => pricesFrom([{ ...prices[0], peak: { input: -1 } }]), /rate/);
   assert.throws(() => pricesFrom([{ ...prices[0], windows: [[720, 540]] }]), /schedule/);
@@ -176,7 +183,7 @@ test('coverage reports missing data and failures without distrusting cached char
   assert.equal(ledger.coverage, 'partial');
 });
 
-test('session and today totals retain unknowns and avoid replacement/retry duplication', async () => {
+test('session, day, week and month totals retain unknowns and avoid replacement/retry duplication', async () => {
   const ledger = new CostLedger();
   const now = at('2026-09-13T12:00:00');
   const records = [record(0, at('2026-09-10T10:00:00')), record(1, at('2026-09-10T11:00:00'), 0),
@@ -186,8 +193,15 @@ test('session and today totals retain unknowns and avoid replacement/retry dupli
   await ledger.replace('s1', 6, costRecords(records), now);
   assert.deepEqual(summary(ledger.total('s1')), { amount: 30.12, unknown: 1, records: 5 });
   assert.deepEqual(summary(ledger.today(now)), { amount: OFF_PEAK, unknown: 0, records: 1 });
-  // Only the day the scan ran is kept, so another day reads as nothing spent today.
-  assert.deepEqual(summary(ledger.today(at('2026-09-12T12:00:00'))), { amount: 0, unknown: 0, records: 0 });
+  // Every day inside the window is a real bucket, so asking for another day reports that day rather
+  // than nothing: the 12th holds one request no table prices.
+  assert.deepEqual(summary(ledger.today(at('2026-09-12T12:00:00'))), { amount: 0, unknown: 1, records: 1 });
+  // The week starts on Monday and the month on the 1st, both counted through the day asked about.
+  assert.deepEqual(summary(ledger.week(now)), { amount: 30.12, unknown: 1, records: 5 });
+  assert.deepEqual(summary(ledger.month(now)), { amount: 30.12, unknown: 1, records: 5 });
+  assert.deepEqual(summary(ledger.today(at('2026-09-14T12:00:00'))), { amount: 0, unknown: 0, records: 0 });
+  // Days the fold dropped as out-of-window read as zero rather than as a stale bucket.
+  assert.deepEqual(summary(ledger.today(at('2026-01-05T12:00:00'))), { amount: 0, unknown: 0, records: 0 });
   await ledger.replace('s1', 6, costRecords(records), now);
   assert.equal(ledger.total('s1').records, 5);
   await ledger.replace('s1', 0, [], now);
@@ -205,22 +219,26 @@ test('fork seed records are excluded while inherited request routes remain usabl
 
 test('a table change reaches history on the next scan and the file keeps no request detail', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-cost-')); t.after(() => rm(directory, { recursive: true, force: true }));
-  const ledger = new CostLedger(DEFAULT_PRICES, directory); await ledger.load();
+  // The clock is the fixture's own day, so the retention pass judges the slice by when it was written.
+  const clock = at('2026-09-10T12:00:00');
+  const ledger = new CostLedger(DEFAULT_PRICES, directory); await ledger.load(clock);
   const events = costRecords([record(0, at('2026-09-10T10:00:00'))]);
-  await ledger.replace('s1', 0, events);
+  await ledger.replace('s1', 0, events, clock);
   assert.equal(summary(ledger.total('s1')).amount, 10.04);
   // A slice is a projection: a stored total loads as it was folded, and the next scan folds the
   // history again with the table this process holds, so an edited rate reaches it.
   const changed = DEFAULT_PRICES.map(p => ({ ...p, peak: { ...p.peak, input: 999 } }));
-  const restarted = new CostLedger(changed, directory); await restarted.load();
+  const restarted = new CostLedger(changed, directory); await restarted.load(clock);
   assert.equal(summary(restarted.total('s1')).amount, 10.04);
-  await restarted.replace('s1', 1, events);
+  await restarted.replace('s1', 1, events, clock);
   // 999 + 8 + 0.04 at peak.
   assert.equal(summary(restarted.total('s1')).amount, 1007.04);
   const files = await readdir(directory); assert.equal(files.length, 1);
   // The file holds totals only: no prompt text, and nothing per request but the reason a total is inexact.
   const stored = JSON.parse(await readFile(join(directory, files[0]!), 'utf8')) as ObjectValue;
-  assert.deepEqual(Object.keys(stored).sort(), ['catalog', 'cut', 'day', 'engine', 'sessionId', 'total', 'unpriced', 'version']);
+  assert.deepEqual(Object.keys(stored).sort(), ['catalog', 'cut', 'days', 'engine', 'sessionId', 'total', 'unpriced', 'version']);
+  // One entry per day, oldest first, which is what a retention pass reads to decide the slice's age.
+  assert.deepEqual(stored.days, [{ day: '2026-09-10', amount: 1007.04, unknown: 0, records: 1 }]);
   assert.doesNotMatch(JSON.stringify(stored), /PRIVATE PROMPT|deepseek|provider|usage|content/);
 });
 
@@ -304,6 +322,31 @@ test('billing scans all HTTP sessions without changing the selected session', as
   assert.equal(fixture.calls.some(c => c.method === 'session/prompt'), false);
 });
 
+test('a scan skips sessions that cannot have spent inside the window, but never the one on screen', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 0, hasMore: false, header: { id: 's1' }, records: [record(0, at('2026-09-10T10:00:00'))] };
+  // s1 is neither running nor recently updated, so paging its whole history would only refold days
+  // the ledger has stopped keeping.
+  fixture.sessionUpdatedAt = Date.now() - 400 * 86_400_000;
+  const ledger = new CostLedger();
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's2', costs: ledger });
+  t.after(() => controller.stop()); controller.start();
+  await until(() => ledger.scannedAt !== undefined);
+  assert.equal(ledger.hasSession('s1'), false);
+  // s2 is running, and a running session is read whatever its update time says.
+  assert.equal(ledger.hasSession('s2'), true);
+  assert.equal(ledger.lastScan?.sessions, 1);
+
+  // The session the operator opens is read even when it is older than the window: the panel reports
+  // its own total, so the floor must not turn it into an unknown.
+  const selected = new CostLedger();
+  const picked = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: selected });
+  t.after(() => picked.stop()); picked.start();
+  await until(() => selected.scannedAt !== undefined);
+  assert.equal(selected.hasSession('s1'), true);
+  assert.equal(summary(selected.total('s1')).amount, 10.04);
+});
+
 test('price updates select new intervals and inconsistent usage stays unpriced', async () => {
   const original = DEFAULT_PRICES[0]!;
   const prices = pricesFrom([{ ...original, until: '2026-09-11T00:00:00+08:00' },
@@ -365,7 +408,8 @@ test('subagent list rows yield the parent address in both delivery modes', () =>
 test('a subagent session is read under its parent address and its other delivery mode', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.followSnapshot = { type: 'snapshot', cursor: 1, hasMore: false, header: { id: 'child' }, records: [record(0, at('2026-09-10T10:00:00'))] };
-  fixture.subagent = { sessionId: 'child', updatedAt: 1, running: false, origin: 'subagent', parentSessionId: 'parent' };
+  // A recently updated non-running session is inside the retention window, so the scan reads it.
+  fixture.subagent = { sessionId: 'child', updatedAt: Date.now(), running: false, origin: 'subagent', parentSessionId: 'parent' };
   // The list omits the delivery mode, so the continuable form is rejected before the scan succeeds.
   fixture.subagentMode = 'one-shot';
   const ledger = new CostLedger();

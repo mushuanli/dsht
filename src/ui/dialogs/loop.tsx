@@ -1,7 +1,7 @@
 /** The `/loop` record list and the parameter form that confirms a chosen record's defaults. */
 import { useMemo, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import type { LoopLimits, LoopRecord } from '../../contracts.ts';
+import type { LoopLimits, LoopRecord, LoopSourceInfo } from '../../contracts.ts';
 import { validLoopOption } from '../../slash/parse.ts';
 import { safeText } from '../../text.ts';
 import { useCopyMode } from '../copy-mode.ts';
@@ -77,14 +77,27 @@ function labelWidth(rows: readonly LoopRow[]): number {
  *
  * It offers the same names and defaults the runner reads, so choosing from it cannot start a run
  * other than the one the row describes.
- * @param props - Matching records and the highlighted row.
- * @returns The key line and up to six record rows.
+ * @param props - Matching records, the highlighted row, and where the records came from.
+ * @returns The key line, the source line, any warning, and up to six record rows.
  */
-export function LoopMenu({ records, index }: { records: readonly LoopRecord[]; index: number }) {
+export function LoopMenu({ records, index, source }: {
+  records: readonly LoopRecord[];
+  index: number;
+  source?: LoopSourceInfo;
+}) {
   const theme = useTheme();
   const start = Math.max(0, index - 5);
+  // Records are configuration now: whenever a user file supplied or replaced one, the list says so,
+  // because an operator who overrode a shipped record cannot tell the two apart from the name alone.
+  const origin = source?.file === undefined ? undefined : [
+    `Records from ${source.file}`,
+    ...(source.overridden.length === 0 ? [] : [`replaced: ${source.overridden.join(', ')}`]),
+    ...(source.added.length === 0 ? [] : [`added: ${source.added.join(', ')}`]),
+  ].join(' · ');
   return <Box flexDirection="column">
     <Text dimColor>Loop records · ↑ ↓ select · Enter confirm defaults · Tab finish the name · Esc close</Text>
+    {origin !== undefined && <Text dimColor wrap="truncate-end">{safeText(origin)}</Text>}
+    {(source?.warnings ?? []).map(warning => <Text key={warning} color={theme.colors.error} wrap="truncate-end">{safeText(warning)}</Text>)}
     {records.slice(start, start + 6).map((record, offset) => {
       const current = start + offset === index;
       // The record's own inputs come before the artifact file: they are what the form will edit, and
@@ -92,8 +105,9 @@ export function LoopMenu({ records, index }: { records: readonly LoopRecord[]; i
       const vars = Object.entries(record.vars).map(([name, value]) => `${name} ${value}`).join(' · ');
       const target = vars === '' ? '' : ` · ${vars}`;
       const artifact = record.artifact === undefined ? '' : ` · ${record.artifact}`;
+      const mine = record.fromFile === true ? ' · yours' : '';
       return <Text key={record.name} color={current ? theme.accent : undefined} wrap="truncate-end">
-        {current ? '❯ ' : '  '}{record.name} · {record.title} · {record.steps} rounds · pass {record.defaultScore} · ≤{record.defaultTries} tries{target}{artifact}
+        {current ? '❯ ' : '  '}{record.name} · {record.title} · {record.steps} rounds · pass {record.defaultScore} · ≤{record.defaultTries} tries{target}{artifact}{mine}
       </Text>;
     })}
   </Box>;
@@ -190,7 +204,7 @@ export function LoopDialog({ record, enabled, onStart, onBack, onClose }: {
     onStart({ limits: values, vars });
   }, { isActive: !copyMode });
   return <Box flexDirection="column" marginY={1}>
-    <Text bold>Run loop record · {safeText(record.name)} · Esc close</Text>
+    <Text bold>Run loop record · {safeText(record.name)}{record.fromFile === true ? ' · your file' : ''} · Esc close</Text>
     <Text dimColor wrap="truncate-end">{record.steps} rounds{record.artifact === undefined ? '' : ` · ${safeText(record.artifact)}`} · ↑ ↓ to a row, then type</Text>
     {rows.map((item, index) => {
       const selected = index === row;

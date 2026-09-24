@@ -6,7 +6,7 @@
  * record without code knowing which one it is.
  */
 import { LOOP_MARKER, followUpContract, resultContract, verdictBrief } from './loop-contract.ts';
-import { loopPrompts } from './loop-prompts.ts';
+import { loopPrompts, loopSourceInfo } from './loop-prompts.ts';
 import { coversWholeProtocol, type LoopLimits, type LoopProtocol, type PriorVerdict, type VerifyTarget } from './loop.ts';
 import type { LoopRecord } from '../contracts.ts';
 
@@ -18,17 +18,22 @@ export function loopProtocolNames(): string[] {
 /** Every record `/loop` may run, in file order, with the defaults a run would start from.
  *
  * The list and the run read the same records, so a chooser can show exactly the name, round count,
- * artifact and defaults the runner would use — never a second table that could drift.
+ * artifact and defaults the runner would use — never a second table that could drift. A record the
+ * user's own file supplied is marked, because an operator who overrode a shipped record can no longer
+ * tell the two apart from the name alone.
  * @returns One summary per record.
  */
 export function loopRecords(): LoopRecord[] {
+  const { overridden, added } = loopSourceInfo();
+  const mine = new Set([...overridden, ...added]);
   return loopPrompts().names.flatMap(name => {
     const text = loopPrompts().find(name);
     if (text === undefined) return [];
     return [{ name, title: text.title, steps: text.steps,
       ...(text.artifact === undefined ? {} : { artifact: text.artifact }),
       defaultScore: text.defaultScore, defaultTries: text.defaultTries,
-      vars: loopPrompts().vars(name) }];
+      vars: loopPrompts().vars(name),
+      ...(mine.has(name) ? { fromFile: true as const } : {}) }];
   });
 }
 

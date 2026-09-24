@@ -21,8 +21,9 @@ import { PromptStore } from './prompts.ts';
 import { latestAssistantText, type LoopLimits, type LoopProtocol } from './loop.ts';
 import { LoopCoordinator } from './loop-coordinator.ts';
 import { loopRecords as listLoopRecords } from './loop-protocols.ts';
+import { loopSourceInfo } from './loop-prompts.ts';
 import type { VerifierPort } from './verifier.ts';
-import type { ClientActivity, ForegroundKind, ForegroundSnapshot, LoopProgress, LoopRecord, OutputSource, PeekSnapshot } from '../contracts.ts';
+import type { ClientActivity, ForegroundKind, ForegroundSnapshot, LoopProgress, LoopRecord, LoopSourceInfo, OutputSource, PeekSnapshot } from '../contracts.ts';
 import { SessionPeek } from '../session/peek.ts';
 import { costAddresses } from '../cost/scanner.ts';
 import { sessionLabel } from '../session-title.ts';
@@ -198,6 +199,8 @@ export interface Queries {
   readonly peek: PeekSnapshot | undefined;
   /** Every `loop.yaml` record, so the picker can offer names and their defaults without a lookup. */
   readonly loopRecords: readonly LoopRecord[];
+  /** Where those records came from, so the picker can say which file supplied or replaced them. */
+  readonly loopSource: LoopSourceInfo;
   /** Why the saved prompts could not be read, when the file was malformed. */
   readonly promptsError: string | undefined;
   pendingCounts(): ReadonlyMap<string, number>;
@@ -356,6 +359,9 @@ export class Controller implements ControllerStore, ConnectionListener {
       online: () => this.state.online,
       signal: () => this.connection.signal(),
       publish: () => this.update({}),
+      // The session on screen is scanned whatever its age: `/cost` reports its own total, and the
+      // window filter exists to skip sessions nobody is looking at.
+      selectedSessionId: () => this.state.sessionId,
       // The scan already reads every session's whole history; handing its pages to the session
       // domain lets the prompt cache pick them up, so one open does not pay for a second walk.
       scanPage: (sessionId, records) => this.session.rememberScanPage(sessionId, records),
@@ -572,6 +578,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       get peek() { return controller.peekSnapshot(); },
       get activity() { return controller.activity; },
       get loopRecords() { return listLoopRecords(); },
+      get loopSource() { return loopSourceInfo(); },
       pendingCounts: () => controller.pendingCounts(),
       recall: (direction, current) => controller.recall(direction, current),
       references: (query, signal) => controller.references(query, signal),

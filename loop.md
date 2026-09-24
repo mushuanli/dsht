@@ -24,6 +24,7 @@
 | 接口、port 与 verdict 文件契约 | §4.1–§4.4 |
 | CLI 参数与子进程构造 | §4.5 |
 | 命令面（单一 `/loop <name>` 与记录） | §4.6 |
+| 记录从哪个文件来、用户怎么覆盖、升级怎么办 | §4.7 |
 | 改了哪些模块 | §5 |
 | 出错时会怎样 | §6 |
 | 验证意见怎么回灌、何时早停、各终止状态 | §6.1 |
@@ -313,7 +314,7 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 | `vars` | 记录输入的**默认值**（如 `path: tui-design.md`），与运行时的 `step`／`attempt`／`score`／`tries`／`title` 一起填充占位符；相对被评审 workspace 解析。一次运行可用表单覆盖（`/loop` 表单里每个名字一行），记录本身不变 |
 | `defaults` | 本记录的 `score`／`tries`，覆盖全局默认值 |
 
-装配只有一处：`controller/loop-protocols.ts` 的 `loopProtocolFor(name, forked, vars, selfScoring)` 把记录（合入本次运行的 `vars`）变成 `LoopProtocol`，`/loop` 只是按名字取用。因此**新增一个审查协议 = 往 `loop.yaml` 加一条记录 + `npm run build:prompts`**，不需要新的命令、slash 语法或 UI 分支；记录声明了 `vars`，参数表单就自动多出可编辑行。
+装配只有一处：`controller/loop-protocols.ts` 的 `loopProtocolFor(name, forked, vars, selfScoring)` 把记录（合入本次运行的 `vars`）变成 `LoopProtocol`，`/loop` 只是按名字取用。因此**新增一个审查协议 = 加一条记录**，不需要新的命令、slash 语法或 UI 分支；记录声明了 `vars`，参数表单就自动多出可编辑行。记录本身来自哪张表见 §4.7——内置记录之外还可以有一层用户文件，改记录不必再重新构建。
 
 已删除（迁移对照）：
 
@@ -325,6 +326,31 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 | `/loop <score> <tries> <prompt>` | 删除：loop 只执行记录。一次性目标写成一条记录，目标放进它的 `brief` |
 
 `answer`、`abort` 与 `stop` 是保留给 `/loop` 子命令的名字（三者都已实现：`stop`／`abort` 结束运行、`answer <text>` 恢复暂停的判断，见 §7 取消触发与 §9「回到流程」），schema 拒绝同名记录；模板里出现未知占位符会在**发送 prompt 之前**报错（`loop-prompts.ts` 的渲染器），不会把 `{{name}}` 原样发给模型。子进程侧参数（`--wait`、`--verdict`、`--verdict-identity`、`DSHT_NO_VERIFY`、`DSHT_VERDICT_ROOT`，§4.5）与命令面无关，不受影响。
+
+---
+
+### 4.7 记录来源（**已实现**：随包文件 + 用户覆盖层 + 编译兜底）
+
+`loop.yaml` 是**配置**，不再只是构建输入。`controller/loop-source.ts` 在启动时确定本进程运行哪张记录表，只有一处：
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| 内置 | 包根 `loop.yaml`；`shippedLoopFile()` = `fileURLToPath(new URL('../../loop.yaml', import.meta.url))`，源码树（`src/controller/`）与发布物（`dist/controller/`）都解析到仓库根／包根 | 随包发布的记录表，**启动时读取** |
+| 用户层 | `DSHT_LOOP_FILE`，否则 `<config>/loop.yaml`（`DSHT_CONFIG_DIR`，默认 `~/.config/dsht`） | 逐记录叠加 |
+| 兜底 | `controller/loop-prompts.generated.ts`（`npm run build:prompts` 由内置文件生成、提交进仓库） | 内置文件缺失或损坏时仍能启动 |
+
+合并规则：**按记录名，整条替换**——不做字段级深合并，因为 `brief`／`rounds`／`artifactMarker` 是一份整体契约，半新半旧的记录是没人写过的协议。用户新增的名字追加到列表末尾（`{...builtin, ...overlay}` 保持键序），未点名的内置记录继续跟随包内版本，这正是升级能到达已定制安装的原因。`mergeLoopSource()` 是纯函数，其 `overridden`／`added` 供 `/loop` 列表标注 `· yours` 并在列表上方写明文件名。
+
+装配点是 `loop-prompts.ts` 的 `installLoopSource(source, info)`：启动时调用一次，`loopPrompts()` 的渲染缓存随之清空重建；此后运行期间不再读文件，所以文件在飞行中被改写不会改变已经发出的 brief（§4.6 中 `loopProtocolFor` 的既有承诺不变）。`loopSourceInfo()`／`Queries.loopSource` 把来源与提示交给 UI，UI 只显示、不判断。
+
+失败语义刻意分两类：
+
+- **用户文件非法**（YAML 解析失败，或 `validateLoopOverlayPrompts` 报错）→ 启动即失败，消息带**文件路径 + 逐字段说明**。渲染器分不出用户记录与内置记录，两者规则完全相同；静默回退会让操作者以为自己的记录生效，实际跑的却是内置记录（与 `prices.json` 非法即失败一致）。
+- **内置文件缺失或损坏** → 回退到编译进包的记录表并给出一条 warning（这是打包事故，不该让客户端起不来）；用户文件**不存在**是最常见情况，不产生任何提示。
+
+覆盖层是 partial 的：`version` 仍必须为 `1`（写了别的版本就明确报错，而不是按版本 1 的字段去读）；`defaults` 与 `protocols` 都可缺省，`protocols: {}` 合法。`validateLoopOverlayPrompts` 与 `validateLoopPrompts` 共用同一份逐记录规则（`validateProtocols`）；只有"顶层必须有 `version`、非空 `protocols`、两个全局默认值"这层收紧留给内置文件。overlay 的全局默认值额外做范围校验（0–10、正整数），因为它是唯一由用户直接写进真实运行的数值。
+
+**升级语义**：没被覆盖的记录随包更新；被覆盖的记录永远不会被自动更新——工具无法判断用户的副本是有意的还是手抄的——因此内置定义的 sha256 记在 `<state>/loop-overrides.json`，内置定义变化后的第一次启动给出 warning「内置更新没有到达你的副本」，既不自动改写也不阻断启动。stamp 写入是 best-effort：state 目录不可写只损失这条提示。
 
 ---
 
@@ -340,20 +366,22 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 | `src/controller/loop.ts` | `LoopProtocol.verify?`；`readResultFields`；`ScoredLoop.note()`；`ScoredLoop.startedAt`（`LoopProgress.startedAt`，供状态栏计时） | controller |
 | `src/controller/loop-contract.ts` | `resultContract(..., mode, selfScoring)`、`followUpContract(..., selfScoring)`；`verdictBrief`；`parseVerdict` | controller |
 | `src/controller/verifier.ts` | **新增** port + verdict 路径 | controller |
-| `src/controller/loop-protocols.ts` | **新增**：把 `loop.yaml` 记录装配成 `LoopProtocol`；`loopRecords()` 供记录列表读取同一份名字/默认值/产出物/`vars`；`loopRecordVars(name)` 供校验变量名；`loopProtocolFor(name, forked, vars, selfScoring)` 合入本次运行的覆盖，并按 `selfScoring` 决定 brief/followUp 是否索要回复块；`design-review.ts` / `designdoc-review.ts` / `loop-prompt.ts` 已删除 | controller |
-| `src/controller/loop-prompts.ts` | `find(name, overrides)` 把覆盖合进 `vars` 后再渲染（默认渲染按记录缓存，只有覆盖时重渲染）；`vars(name)` 暴露记录声明的名字与默认值；`LoopPromptText.vars` | controller |
+| `src/controller/loop-protocols.ts` | **新增**：把 `loop.yaml` 记录装配成 `LoopProtocol`；`loopRecords()` 供记录列表读取同一份名字/默认值/产出物/`vars`，并按 `loopSourceInfo()` 给用户文件来的记录标 `fromFile`；`loopRecordVars(name)` 供校验变量名；`loopProtocolFor(name, forked, vars, selfScoring)` 合入本次运行的覆盖，并按 `selfScoring` 决定 brief/followUp 是否索要回复块；`design-review.ts` / `designdoc-review.ts` / `loop-prompt.ts` 已删除 | controller |
+| `src/controller/loop-source.ts` | **新增**（§4.7）：`loadLoopSource()` 启动时读内置 `loop.yaml`（`shippedLoopFile()`）、叠加 `DSHT_LOOP_FILE`／`<config>/loop.yaml`、内置不可读时回退编译兜底；`mergeLoopSource()`（纯函数，按记录名整条替换）；`stampOverrides()` 把被覆盖记录的内置摘要记到 `<state>/loop-overrides.json` 并在变化时给出 warning | controller |
+| `src/controller/loop-prompts.ts` | `installLoopSource(source, info)`／`loopSourceInfo()`：启动时装入合并后的记录表并清空渲染缓存；`find(name, overrides)` 把覆盖合进 `vars` 后再渲染（默认渲染按记录缓存，只有覆盖时重渲染）；`vars(name)` 暴露记录声明的名字与默认值；`LoopPromptText.vars` | controller |
+| `src/controller/loop-prompts-schema.ts` | `validateLoopPrompts()`（内置文件：必须有 `version`、`defaults`、非空 `protocols`）与 `validateLoopOverlayPrompts()`（用户覆盖层：`defaults`／`protocols` 可缺省，`version` 仍必须为 1，全局默认值额外做范围校验）；两者共用 `validateProtocols()` 这一份逐记录规则 | controller |
 | `src/controller/commands.ts` | `/loop` 按记录装配时传 `queries.forkedVerification` 与 `queries.selfScoring`；`CommandPort.interactive` 让 `/loop <name>` 在可交互调用方返回表单意图、在脚本调用方直接运行；`loops` 命令列出可用记录；用 `loopRecordVars` 校验本次运行的变量名，未知变量报错并列出该记录接受的变量；`loop` 迁移事件（`command`/`form`/`rejected`/`not-started`），`startLoop` 失败时返回可读的 `error` 而不是静默 `undefined` | controller |
 | `src/controller/index.ts` | 导出 `loopProtocolFor`／`loopProtocolNames`／`roundStandard` 等 | controller |
 | `src/slash/parse.ts` | `/loop <name> [score] [tries] [flags]` 语法；`/loop` 单独出现 → `loops` 命令；`LoopOptions.vars` 承载表单确认的记录变量（命令行无语法）；导出 `loopNameQuery`（记录名菜单）与 `validLoopOption`（表单与命令行共用校验）；`designReview`/`designdocReview`/`verify` 三个命令已删除 | slash |
 | `src/slash/registry.ts` / `index.ts` | 命令表与导出各加一行；`/loop` usage 改为 `[name] [score] [tries]`，`COMMAND_POLICY.loops`；`argumentHint(line)` 给出「命令名 + 空格」后的用法提示 | slash |
-| `src/ui/dialogs/loop.tsx` | **新增**：`LoopMenu`（输入框下方的记录列表，含记录指向的 `vars`）与 `LoopDialog`（参数表单：记录变量在前、四个数字在后；**离开一行即提交**，不合法则留在该行并说明；返回 `LoopRun{limits, vars}`） | ui |
+| `src/ui/dialogs/loop.tsx` | **新增**：`LoopMenu`（输入框下方的记录列表，含记录指向的 `vars`、`source` 给出的「Records from …」行与 warning、用户记录行的 `· yours`）与 `LoopDialog`（参数表单：记录变量在前、四个数字在后；**离开一行即提交**，不合法则留在该行并说明；标题标出来自用户文件；返回 `LoopRun{limits, vars}`） | ui |
 | `src/ui/app.tsx` | 记录菜单的键处理（↑/↓、Tab 补名、Esc 仅隐藏）、`loopForm` 面板、应用 effect `{kind:'loop'}`、通用用法提示行；`/loop` 的 UI 决策迁移事件（`loop-ui` `choose`/`open`/`start`）；Start 无结果时给出可见原因；`/loop <name>` 的"确认默认值"由应用决定而非根组件 | ui |
 | `src/session/controller.ts` | `createNamedSession()`（创建+命名，不选中） | session |
 | `src/shell/runner.ts` / `index.ts` | `runProcess()`（`runShell` 与它共用 `spawnLines`） | shell |
 | `src/cli/verifier.ts` | **新增** `ProcessVerifier`（fork + 读文件 + 超时 + 取消）；子进程退出却没有 verdict（或 verdict 不可用）时，把子进程最后一行输出并入 `reason`，因为交互式客户端不显示子进程输出 | cli |
 | `src/cli/startup.ts` | **新增** `plan.prompt` / `plan.wait` / `plan.verdict` / `waitForTurn` / `writeVerdict`（解析回复后原子写 verdict 文件） | cli |
-| `src/cli/dsht.tsx` | `--prompt` / `--wait` / `--verdict` / `--verdict-identity` 解析；构造 `ProcessVerifier`（`DSHT_NO_VERIFY=1` 可关掉）；verdict 根设为客户端进程 cwd（`verdictRoot`，`DSHT_VERDICT_ROOT` 可改指） | cli |
-| `src/contracts.ts` | `LoopProgress.note?`、`LoopProgress.startedAt`；`LoopRecord`（记录列表的行）、`LoopLimits`（表单与运行共用）、`ViewEffect` 的 `{kind:'loop'}`、`PanelName` 加 `loop` | types |
+| `src/cli/dsht.tsx` | `--prompt` / `--wait` / `--verdict` / `--verdict-identity` 解析；构造 `ProcessVerifier`（`DSHT_NO_VERIFY=1` 可关掉）；verdict 根设为客户端进程 cwd（`verdictRoot`，`DSHT_VERDICT_ROOT` 可改指）；启动时 `loadLoopSource()` + `installLoopSource()`（`DSHT_LOOP_FILE` 指定覆盖文件），headless 下把 source warning 写到 stderr | cli |
+| `src/contracts.ts` | `LoopProgress.note?`、`LoopProgress.startedAt`；`LoopRecord`（记录列表的行，含 `fromFile`）、`LoopSourceInfo`（记录来自哪些文件、覆盖了谁、有什么 warning）、`LoopLimits`（表单与运行共用）、`ViewEffect` 的 `{kind:'loop'}`、`PanelName` 加 `loop` | types |
 | `src/ui/chat/loop-status.tsx` | 进度行追加 note | ui |
 | `src/ui/chat/status.tsx` | `StatusSource.loop`（loop 在工作但没有宿主 turn 时），`busy = running \|\| loop` 驱动状态词／时钟／阶段／`^C`，展开面板同源 | ui |
 | `.gitignore` | 忽略 `.dsht/` | — |

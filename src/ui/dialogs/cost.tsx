@@ -12,6 +12,8 @@ export interface CostLine { text: string; unknown: number; records: number }
 export interface CostSource {
   session?: CostLine;
   today: CostLine;
+  week: CostLine;
+  month: CostLine;
   scanning: boolean;
   coverage: Coverage;
   scannedAt?: number;
@@ -21,6 +23,10 @@ export interface CostSource {
 }
 
 /** Render cached totals while the independent HTTP cost scan refreshes.
+ *
+ * The three periods are natural Beijing periods counted from their own start through today, not
+ * sliding windows, so "this week" and "this month" match what an invoice would name. They only reach
+ * back as far as the retained ledger does, which is why the panel says how old its cached totals are.
  * @param source - Plain billing summary, absent when this run has no ledger.
  * @returns Billing panel, including unpriced models and refresh errors.
  */
@@ -28,7 +34,7 @@ export function CostPanel({ source }: { source?: CostSource }) {
   const theme = useTheme();
   const costs = source;
   if (!costs) return <Text>Cost tracking is unavailable</Text>;
-  const rows = [['Session', costs.session], ['Today', costs.today]] as const;
+  const rows = [['Session', costs.session], ['Today', costs.today], ['This week', costs.week], ['This month', costs.month]] as const;
   return <Box flexDirection="column" borderStyle="single" paddingX={1}>
     <Text bold>Cost · CNY estimate · Asia/Shanghai · /cost closes</Text>
     {rows.map(([label, total]) => <Text key={label}>{label}: {total ? `${total.text} · ${total.unknown} unpriced / ${total.records} requests` : '?'}</Text>)}

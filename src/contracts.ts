@@ -31,6 +31,27 @@ export interface SavedPrompt { id: string; text: string }
 export type PanelName = 'help' | 'cost' | 'status' | 'queue' | 'prompts'
   | 'thoughts' | 'history' | 'search' | 'model' | 'removal' | 'loop';
 
+/** Where the loop records one client runs came from.
+ *
+ * The shipped file travels with the package and a user file may layer over it, so a record list is no
+ * longer one file's content: this says which files were read and which records the user's own file
+ * replaced or added. The warnings are the client's own notes — a shipped file it could not read, or a
+ * record the user overrides that the package has since changed — and the UI shows them rather than
+ * acting on them.
+ */
+export interface LoopSourceInfo {
+  /** Shipped `loop.yaml` that was read; absent when the compiled-in records were used instead. */
+  builtin?: string;
+  /** User file layered over the shipped records; absent when there is none. */
+  file?: string;
+  /** Shipped records the user's file replaced, in that file's order. */
+  overridden: readonly string[];
+  /** Records the user's file added. */
+  added: readonly string[];
+  /** Notes to show the operator, in the order they were discovered. */
+  warnings: readonly string[];
+}
+
 /** One `loop.yaml` record as the record list offers it.
  *
  * The name is what `/loop` runs; the rest is what a chooser shows about it, plus the defaults a run
@@ -56,6 +77,8 @@ export interface LoopRecord {
    * document under review, a target, a threshold) is retargeted without editing `loop.yaml`.
    */
   vars: Readonly<Record<string, string>>;
+  /** Set when this record came from the user's own file rather than from the shipped one. */
+  fromFile?: true;
 }
 
 /** The four numbers one loop run uses.

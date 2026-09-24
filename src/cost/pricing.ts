@@ -115,6 +115,58 @@ export function pricesFrom(value: unknown): PriceVersion[] {
  */
 export function costDay(time: number): string { return new Date(time + 8 * 3600_000).toISOString().slice(0, 10); }
 
+/** Beijing days of cost the ledger keeps, folds and reports.
+ *
+ * One number decides three things that have to agree: how much per-session history a slice stores,
+ * which slices a retention pass may delete, and how far back the day/week/month totals reach. Sixty
+ * days covers a natural month with room to compare it against the previous one.
+ */
+export const COST_WINDOW_DAYS = 60;
+
+/** First millisecond of a Beijing calendar day.
+ *
+ * China has had no daylight saving since 1991, so a Beijing day is exactly 24 hours and an explicit
+ * offset is exact rather than an approximation.
+ * @param day - Beijing calendar date, YYYY-MM-DD.
+ * @returns Epoch milliseconds.
+ */
+export function costDayStart(day: string): number { return Date.parse(`${day}T00:00:00+08:00`); }
+
+/** The Beijing day a whole number of days before another.
+ *
+ * The arithmetic is on the calendar date, not on an instant, so it cannot drift across a month, a
+ * year or a leap day.
+ * @param day - Beijing calendar date, YYYY-MM-DD.
+ * @param days - Days to subtract, zero or more.
+ * @returns Beijing calendar date, YYYY-MM-DD.
+ */
+export function costDaysBefore(day: string, days: number): string {
+  const [year, month, date] = day.split('-').map(Number);
+  return new Date(Date.UTC(year!, month! - 1, date! - days)).toISOString().slice(0, 10);
+}
+
+/** The Monday that begins the natural week containing a Beijing day.
+ * @param day - Beijing calendar date, YYYY-MM-DD.
+ * @returns Beijing calendar date of that week's Monday.
+ */
+export function costWeekStart(day: string): string {
+  const [year, month, date] = day.split('-').map(Number);
+  const weekday = new Date(Date.UTC(year!, month! - 1, date!)).getUTCDay();
+  return costDaysBefore(day, (weekday + 6) % 7);
+}
+
+/** The first day of the natural month containing a Beijing day.
+ * @param day - Beijing calendar date, YYYY-MM-DD.
+ * @returns Beijing calendar date, YYYY-MM-01.
+ */
+export function costMonthStart(day: string): string { return `${day.slice(0, 8)}01`; }
+
+/** Oldest Beijing day a ledger still keeps, so every retention decision uses one boundary.
+ * @param now - Clock that names the current day.
+ * @returns Beijing calendar date, YYYY-MM-DD.
+ */
+export function costWindowStart(now: number): string { return costDaysBefore(costDay(now), COST_WINDOW_DAYS - 1); }
+
 /** Canonical form of a model name before matching.
  *
  * The host reports names that differ from the published table by width, case, surrounding space, or

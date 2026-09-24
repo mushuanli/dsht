@@ -28,7 +28,7 @@ export interface PriceDecision { amount?: number; reason?: string }
  */
 export interface CostTotal { amount: number; unknown: number; records: number }
 
-/** One Beijing calendar day's requests, kept only for the day a scan ran on. */
+/** One Beijing calendar day's requests, kept for every day inside the retention window. */
 export interface DayTotal extends CostTotal { day: string }
 
 /** One session's persisted ledger slice.
@@ -39,14 +39,20 @@ export interface DayTotal extends CostTotal { day: string }
  * rules and the table behind these totals, so a process holding an older one cannot overwrite them.
  */
 export interface SavedCost {
-  version: 3;
+  version: 4;
   sessionId: string;
   /** Durable sequence the fold reached; a scan that opened an older cut may not replace this slice. */
   cut: number;
   engine: number;
   catalog: string;
   total: CostTotal;
-  day: DayTotal;
+  /** One entry per Beijing day this session spent inside the retention window, oldest first.
+   *
+   * Days older than the window are dropped as the slice is written, so the file cannot grow with a
+   * session's history. A day a later scan no longer reports is simply gone from the next slice: the
+   * host log, not this file, is what a day's total is re-derived from.
+   */
+  days: DayTotal[];
   /** Distinct reasons an amount is missing, bounded, so a panel can say what makes a total inexact. */
   unpriced: string[];
 }

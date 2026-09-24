@@ -1,7 +1,8 @@
 /** Generate src/controller/loop-prompts.generated.ts from loop.yaml.
  *
- * The YAML is the human-editable source: reviewers read and diff it, and the text is inlined into
- * the build so the shipped package stays self-contained (no YAML parser or data file at runtime).
+ * `loop.yaml` is the editable source and the file the client reads at runtime: it travels in the
+ * package and a user file layers over it. This module compiles the same records into TypeScript so a
+ * package whose data file is missing or corrupt still starts on the table this build was made with.
  * The generated module is committed; `npm test` fails when it is stale, so a YAML edit cannot be
  * forgotten. Run through `npm run build:prompts` (tsx), which is why this file is TypeScript.
  */
@@ -19,7 +20,8 @@ if (errors.length > 0) {
   process.exitCode = 1;
 } else {
   const body = '// GENERATED FILE — do not edit. Edit loop.yaml and run `npm run build:prompts`.\n'
-    + '// Kept in sync by tests/controller/loop-prompts.test.ts.\n\n'
+    + '// The fallback table: loop.yaml is read at runtime, and this is what a package whose file is\n'
+    + '// missing or unreadable starts on. Kept in sync by tests/controller/loop-prompts.test.ts.\n\n'
     + `export const LOOP_PROMPTS = ${JSON.stringify(source, null, 2)} as const;\n`;
   let current: string | undefined;
   try { current = readFileSync(TARGET, 'utf8'); } catch { current = undefined; }

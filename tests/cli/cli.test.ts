@@ -9,9 +9,16 @@ import { host } from '../support/host.ts';
 
 async function run(args: string[], env: NodeJS.ProcessEnv = {}) {
   const authDirectory = await mkdtemp(join(tmpdir(), 'tui-cli-auth-'));
+  // The entry reads configuration, state and a loop overlay while starting up, and prunes the cost
+  // ledger as it loads it. Every run therefore gets its own directories and a URL nothing listens on,
+  // so a test can neither read nor delete the real install, nor reach whatever host happens to be
+  // running on the default port.
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'tui-cli-state-'));
+  const configDirectory = await mkdtemp(join(tmpdir(), 'tui-cli-config-'));
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', ...args], {
     cwd: new URL('../..', import.meta.url),
-    env: { PATH: process.env.PATH, DSHT_AUTH_DIR: authDirectory, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, DSH_URL: 'http://127.0.0.1:1', DSHT_AUTH_DIR: authDirectory,
+      DSHT_STATE_DIR: stateDirectory, DSHT_CONFIG_DIR: configDirectory, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = ''; let stderr = '';
   child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
@@ -23,7 +30,12 @@ async function run(args: string[], env: NodeJS.ProcessEnv = {}) {
       child.on('close', (code, signal) => signal ? reject(new Error(`CLI killed by ${signal}`)) : resolve(code));
     });
     return { code, stdout, stderr };
-  } finally { clearTimeout(timer); await rm(authDirectory, { recursive: true, force: true }); }
+  } finally {
+    clearTimeout(timer);
+    await rm(authDirectory, { recursive: true, force: true });
+    await rm(stateDirectory, { recursive: true, force: true });
+    await rm(configDirectory, { recursive: true, force: true });
+  }
 }
 
 test('list commands print parseable JSON and exit without opening a TUI', async t => {

@@ -3,7 +3,7 @@ export { CostController } from './controller.ts';
 export type { CostHost } from './controller.ts';
 export { CostLedger } from './ledger.ts';
 export { loadPrices } from './config.ts';
-export { candidates, canonicalModel, chargeFor, costDay, DEFAULT_PRICES, isUncorrectedSeed, priceAt, PRICES_REVISION, PRICING_ENGINE_VERSION, pricesDigest, pricesFrom } from './pricing.ts';
+export { candidates, canonicalModel, chargeFor, costDay, costDayStart, costDaysBefore, costMonthStart, costWeekStart, costWindowStart, COST_WINDOW_DAYS, DEFAULT_PRICES, isUncorrectedSeed, priceAt, PRICES_REVISION, PRICING_ENGINE_VERSION, pricesDigest, pricesFrom } from './pricing.ts';
 export { costRecords, foldSamples } from './records.ts';
 export { costAddresses, sessionCostHistory } from './scanner.ts';
 export { MISSING_TIME, MISSING_USAGE, UNSUPPORTED_USAGE } from './types.ts';

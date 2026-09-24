@@ -1,9 +1,10 @@
 /** Pack and execute the published entry in a temporary npx installation, without publishing. */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -17,10 +18,28 @@ try {
   assert(pack.files.some(file => file.path === 'dist/cli/index.js'));
   assert(pack.files.some(file => file.path === 'dist/index.d.ts'));
   assert(pack.files.some(file => file.path === 'dsht-m.png'));
+  assert(pack.files.some(file => file.path === 'loop.yaml'));
   assert(pack.files.some(file => file.path === 'LICENSE'));
-  assert(pack.files.every(file => file.path.startsWith('dist/') || ['package.json', 'README.md', 'README.zh.md', 'README.i18n.yaml', 'dsht-m.png', 'LICENSE'].includes(file.path)));
+  assert(pack.files.every(file => file.path.startsWith('dist/') || ['package.json', 'loop.yaml', 'README.md', 'README.zh.md', 'README.i18n.yaml', 'dsht-m.png', 'LICENSE'].includes(file.path)));
   const result = await run(['exec', '--yes', '--offline', '--', `file:${join(root, pack.filename)}`, '--help'], root);
   assert.match(result.stdout, /Usage: dsht/);
   assert.match(result.stdout, /list workspaces/);
-  console.log(`Packed ${pack.filename}; isolated npx entry passed.`);
+  // The loop records are configuration: the installed entry must read the loop.yaml that travelled
+  // with it, not quietly fall back to the table compiled into the build. The tarball is unpacked and
+  // given this checkout's dependencies, so the real dist module runs offline — no host, no client.
+  const unpacked = join(root, 'unpacked');
+  const packageRoot = join(unpacked, 'package');
+  await mkdir(unpacked, { recursive: true });
+  await exec('tar', ['-xzf', join(root, pack.filename), '-C', unpacked]);
+  await symlink(fileURLToPath(new URL('../../node_modules', import.meta.url)), join(packageRoot, 'node_modules'), 'dir');
+  const probe = [
+    `const { loadLoopSource } = await import(${JSON.stringify(join(packageRoot, 'dist', 'controller', 'loop-source.js'))});`,
+    `const load = await loadLoopSource({ configDirectory: ${JSON.stringify(join(root, 'config'))} });`,
+    `if (load.info.builtin === undefined || !load.source.protocols['design-review'])`,
+    `  throw new Error('the packed records were not read: ' + load.info.warnings.join(' '));`,
+    `process.stdout.write(Object.keys(load.source.protocols).join(','));`,
+  ].join('\n');
+  const loaded = await exec(process.execPath, ['--input-type=module', '-e', probe], { cwd: packageRoot, timeout: 30_000 });
+  assert.equal(loaded.stdout, 'design-review,designdoc-review');
+  console.log(`Packed ${pack.filename}; isolated npx entry passed; packed loop.yaml read.`);
 } finally { await rm(root, { recursive: true, force: true }); }

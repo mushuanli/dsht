@@ -1,5 +1,6 @@
 // GENERATED FILE — do not edit. Edit loop.yaml and run `npm run build:prompts`.
-// Kept in sync by tests/controller/loop-prompts.test.ts.
+// The fallback table: loop.yaml is read at runtime, and this is what a package whose file is
+// missing or unreadable starts on. Kept in sync by tests/controller/loop-prompts.test.ts.
 
 export const LOOP_PROMPTS = {
   "version": 1,

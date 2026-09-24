@@ -858,6 +858,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     return {
       ...(session === undefined ? {} : { session: line(session) }),
       today: line(ledger.today()),
+      week: line(ledger.week()),
+      month: line(ledger.month()),
       scanning: ledger.scanning, coverage: ledger.coverage,
       ...(ledger.scannedAt === undefined ? {} : { scannedAt: ledger.scannedAt }),
       customPrices: ledger.customPrices,
@@ -975,7 +977,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           width={draftWidth} maxRows={composerRows} promptColor={answerPending ? theme.colors.muted : theme.accent}
           focus={!copyMode && !answerPending && !loopForm} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
-      {loopMenuOpen && <LoopMenu records={loopCandidates} index={loopMenuCursor} />}
+      {loopMenuOpen && <LoopMenu records={loopCandidates} index={loopMenuCursor} source={controller.queries.loopSource} />}
       </Box>}
       {commandSuggestions && <Text dimColor>{commandSuggestions.join('  ')}</Text>}
       {commandHint && <Text dimColor><Text color={theme.accent}>{commandHint.command}{commandHint.usage === undefined ? '' : ` ${commandHint.usage}`}</Text> · {commandHint.description}</Text>}

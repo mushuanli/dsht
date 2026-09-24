@@ -1,14 +1,14 @@
-/** CNY estimates folded from host history: per-session totals, re-decided by every scan. */
+/** CNY estimates folded from host history: per-session totals and per-day buckets, re-decided by every scan. */
 import type { ObjectValue } from '../transport/wire.ts';
-import { chargeFor, costDay, DEFAULT_PRICES, pricesDigest, PRICING_ENGINE_VERSION } from './pricing.ts';
+import { chargeFor, costDay, costMonthStart, costWeekStart, costWindowStart, DEFAULT_PRICES, pricesDigest, PRICING_ENGINE_VERSION } from './pricing.ts';
 import { foldSamples } from './records.ts';
-import { loadLedgers, saveLedger } from './ledger-files.ts';
+import { loadLedgers, pruneLedgers, saveLedger } from './ledger-files.ts';
 import { MISSING_USAGE, type CostTotal, type Coverage, type DayTotal, type PriceVersion, type SavedCost } from './types.ts';
 
 /** Reasons one slice keeps at most, so a broken table cannot grow the ledger without bound. */
 const UNPRICED_LIMIT = 8;
 
-/** Per-origin cache of folded session totals; every scan replaces a session at its cut. */
+/** Per-origin cache of folded session totals and day buckets; every scan replaces a session at its cut. */
 export class CostLedger {
   private sessions = new Map<string, SavedCost>();
   private totals = new Map<string, CostTotal>();
@@ -33,10 +33,19 @@ export class CostLedger {
     return this.scannedAt !== undefined || this.sessions.size > 0 ? 'complete' : 'partial';
   }
 
-  /** Load the newest cut per session; a stored total is read as it was decided. */
-  async load(): Promise<void> {
+  /** Load the newest cut per session; a stored total is read as it was decided.
+   *
+   * Slices and dead files that have left the retention window are deleted in the same pass, so the
+   * directory cannot grow with every session this client has ever seen. A slice is a projection of the
+   * host log, so letting one go costs a rescan of that session, never data.
+   * @param now - Clock that names the window, so a caller or a test can pin the boundary.
+   */
+  async load(now = Date.now()): Promise<void> {
     this.totals.clear();
     this.sessions = await loadLedgers(this.directory);
+    for (const sessionId of await pruneLedgers(this.directory, costWindowStart(now), this.sessions)) {
+      this.sessions.delete(sessionId);
+    }
   }
 
   /** Replace one session using all billing events through the opening snapshot cut.
@@ -53,16 +62,27 @@ export class CostLedger {
   async replace(sessionId: string, cut: number, events: ObjectValue[], now = Date.now()): Promise<void> {
     const current = this.sessions.get(sessionId);
     if ((current?.cut ?? -2) > cut) return;
-    const day = costDay(now);
+    const scanDay = costDay(now);
+    const floor = costWindowStart(now);
     const total: CostTotal = { amount: 0, unknown: 0, records: 0 };
-    const today: DayTotal = { day, amount: 0, unknown: 0, records: 0 };
+    const days = new Map<string, DayTotal>();
     const unpriced = new Set<string>();
+    /** The day bucket to add to, created on first use so a session reports only the days it touched. */
+    const dayBucket = (day: string): DayTotal => {
+      const found = days.get(day);
+      if (found !== undefined) return found;
+      const created: DayTotal = { day, amount: 0, unknown: 0, records: 0 };
+      days.set(day, created);
+      return created;
+    };
     for (const sample of foldSamples(events)) {
       const decision = chargeFor(this.prices, sample.provider, sample.model, sample.time, sample.usage);
-      // A request belongs to the day it settled on, so the day bucket only counts the requests of
-      // the calendar day this scan is running on; another day reads as nothing spent today. A request
-      // with no settlement time belongs to no day, so it is counted as unknown wherever it is read.
-      const buckets = sample.time === undefined || costDay(sample.time) === day ? [total, today] : [total];
+      // A request belongs to the day it settled on. One with no settlement time is attributed to the
+      // day of this scan, which is the only day it can reach without guessing a tariff band, and is
+      // where a reader looks for what makes today's total inexact.
+      const day = sample.time === undefined ? scanDay : costDay(sample.time);
+      // Only the window is stored, so a session a year old writes days, not a year of them.
+      const buckets = day < floor ? [total] : [total, dayBucket(day)];
       for (const bucket of buckets) {
         bucket.records++;
         if (decision.amount === undefined) bucket.unknown++;
@@ -70,8 +90,8 @@ export class CostLedger {
       }
       if (decision.amount === undefined && unpriced.size < UNPRICED_LIMIT) unpriced.add(`${sample.provider}/${sample.model}: ${decision.reason}`);
     }
-    const saved: SavedCost = { version: 3, sessionId, cut, engine: PRICING_ENGINE_VERSION, catalog: this.catalog,
-      total, day: today, unpriced: [...unpriced] };
+    const saved: SavedCost = { version: 4, sessionId, cut, engine: PRICING_ENGINE_VERSION, catalog: this.catalog,
+      total, days: [...days.values()].sort((a, b) => a.day < b.day ? -1 : a.day > b.day ? 1 : 0), unpriced: [...unpriced] };
     // Another process may have persisted a newer cut of this session since it was last read.
     if (this.directory && !await saveLedger(this.directory, saved)) return;
     this.sessions.set(sessionId, saved);
@@ -113,21 +133,55 @@ export class CostLedger {
 
   /** Every session's requests on one Beijing calendar day.
    *
-   * A slice keeps only the day its last scan ran on, so another day reads as nothing spent today
-   * rather than as the last day that was scanned.
+   * The day is a real bucket rather than only the day a scan ran on, so asking for another day
+   * reports that day's spend; the retention window is what limits how far back the answer reaches.
    * @param now - Clock that names the day to report.
    * @returns The day's total across cached sessions.
    */
   today(now = Date.now()): CostTotal {
     const day = costDay(now);
-    const cached = this.totals.get(`d:${day}`);
+    return this.period(day, day);
+  }
+
+  /** Every session's requests in the natural week containing a day, through that day.
+   * @param now - Clock that names the day to report.
+   * @returns The week-to-date total across cached sessions.
+   */
+  week(now = Date.now()): CostTotal {
+    const day = costDay(now);
+    return this.period(costWeekStart(day), day);
+  }
+
+  /** Every session's requests in the natural month containing a day, through that day.
+   * @param now - Clock that names the day to report.
+   * @returns The month-to-date total across cached sessions.
+   */
+  month(now = Date.now()): CostTotal {
+    const day = costDay(now);
+    return this.period(costMonthStart(day), day);
+  }
+
+  /** Sum stored day buckets over a Beijing day range, inclusive at both ends.
+   *
+   * Days outside the retention window are absent rather than zero, so a range wider than the window
+   * reports what is still kept — which is why the fold and this sum share one window constant.
+   * @param from - First day to include, YYYY-MM-DD.
+   * @param to - Last day to include, YYYY-MM-DD.
+   * @returns The range's total across cached sessions.
+   */
+  private period(from: string, to: string): CostTotal {
+    const key = `p:${from}..${to}`;
+    const cached = this.totals.get(key);
     if (cached) return cached;
     const result: CostTotal = { amount: 0, unknown: 0, records: 0 };
     for (const session of this.sessions.values()) {
-      if (session.day.day !== day) continue;
-      result.amount += session.day.amount; result.unknown += session.day.unknown; result.records += session.day.records;
+      for (const day of session.days) {
+        // ISO day strings compare chronologically, so a lexical range is the day range.
+        if (day.day < from || day.day > to) continue;
+        result.amount += day.amount; result.unknown += day.unknown; result.records += day.records;
+      }
     }
-    this.totals.set(`d:${day}`, result);
+    this.totals.set(key, result);
     return result;
   }
 }

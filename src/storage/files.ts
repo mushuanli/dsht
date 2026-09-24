@@ -1,6 +1,6 @@
 /** Every filesystem read and write the client performs; no other module opens a file. */
 import { constants } from 'node:fs';
-import { open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
@@ -10,6 +10,18 @@ import { dirname, join } from 'node:path';
  */
 export async function readText(path: string): Promise<string | undefined> {
   try { return await readFile(path, 'utf8'); }
+  catch (error) { if (isMissing(error)) return undefined; throw error; }
+}
+
+/** Last modification time of a file, without reading it.
+ *
+ * Used where only a file's age matters, so a file whose contents this build cannot parse is still
+ * judgeable — a generation of ledger written by an older build has to age out like any other.
+ * @param path - Absolute file path.
+ * @returns Epoch milliseconds, or undefined when the file does not exist.
+ */
+export async function modifiedAt(path: string): Promise<number | undefined> {
+  try { return (await stat(path)).mtimeMs; }
   catch (error) { if (isMissing(error)) return undefined; throw error; }
 }
 

@@ -1,13 +1,17 @@
 /** Typed access to the loop prompts and the placeholder renderer.
  *
- * `loop.yaml` is the editable source; `loop-prompts.generated.ts` is its inlined form and
- * `loop-prompts-schema.ts` holds the shape and the rules. This module turns one record into the
- * strings a protocol needs, so the dynamic parts (this round's title, its checklist, the record's
- * own vars) are filled here and nowhere else. A template may only use placeholders the caller can
- * supply; anything else throws rather than putting a literal `{{name}}` into a prompt.
+ * The loop record is configuration, not code: the shipped `loop.yaml` is read at startup from beside
+ * the package and a user file may be layered over it (`loop-source.ts`), then the merged table is
+ * installed here once. `loop-prompts-schema.ts` holds the shape and the rules, and
+ * `loop-prompts.generated.ts` is the compiled-in fallback for a package whose file is missing. This
+ * module turns one record into the strings a protocol needs, so the dynamic parts (this round's title,
+ * its checklist, the record's own vars) are filled here and nowhere else. A template may only use
+ * placeholders the caller can supply; anything else throws rather than putting a literal `{{name}}`
+ * into a prompt.
  */
 import { LOOP_PROMPTS } from './loop-prompts.generated.ts';
 
+import type { LoopSourceInfo } from '../contracts.ts';
 import type { LoopPromptSource, LoopProtocolText, LoopRoundText } from './loop-prompts-schema.ts';
 
 export type { LoopPromptSource, LoopProtocolText, LoopRoundText } from './loop-prompts-schema.ts';
@@ -52,7 +56,9 @@ export interface LoopPromptText {
 }
 
 const PLACEHOLDER = /\{\{(\w+)\}\}/g;
-const SOURCE = LOOP_PROMPTS as unknown as LoopPromptSource;
+/** The records in force: the shipped file with the user's layered on top, installed once at startup
+ * and replaced only by another install, never by a reload while a run is in flight. */
+let SOURCE = LOOP_PROMPTS as unknown as LoopPromptSource;
 
 /** Every record's rendered prompts and its static inputs. */
 export interface LoopPrompts {
@@ -133,11 +139,34 @@ function render(kind: string, protocol: LoopProtocolText, overrides?: Readonly<R
   };
 }
 
-/** All records, rendered once at module load: the config cannot change under a running client. */
+/** All records, rendered when the source is installed: a file edited mid-run cannot change a brief. */
 let cache: LoopPrompts | undefined;
+/** Where the installed records came from, for the record list to show. */
+let info: LoopSourceInfo = { overridden: [], added: [], warnings: [] };
 
-/** The records of loop.yaml.
- * @returns Names, lookups and the declared vars of each record, built once.
+/** Put the records this process runs in place, before any run or record list reads them.
+ *
+ * The files are read and merged at startup rather than at module load, so a bad user file can be
+ * reported and refused before the client opens, and a run keeps the rubric it started with even if
+ * the file is edited underneath it.
+ * @param source - Merged records: shipped ones with the user's file layered on top.
+ * @param sourceInfo - Where they came from, and what the user's file changed.
+ */
+export function installLoopSource(source: LoopPromptSource, sourceInfo: LoopSourceInfo): void {
+  SOURCE = source;
+  info = { ...sourceInfo, overridden: [...sourceInfo.overridden], added: [...sourceInfo.added], warnings: [...sourceInfo.warnings] };
+  cache = undefined;
+}
+
+/** Where the installed records came from.
+ * @returns The installed source info; the compiled-in records are the empty default.
+ */
+export function loopSourceInfo(): LoopSourceInfo {
+  return info;
+}
+
+/** The records in force.
+ * @returns Names, lookups and the declared vars of each record, built once per installed source.
  */
 export function loopPrompts(): LoopPrompts {
   if (cache !== undefined) return cache;

@@ -2,6 +2,7 @@
 import type { Client } from '../transport/client.ts';
 import { array, errorText, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { CostLedger } from './ledger.ts';
+import { costDayStart, costWindowStart } from './pricing.ts';
 import { sessionCostHistory } from './scanner.ts';
 
 /** Host access a scan needs; supplied by the controller facade. */
@@ -14,6 +15,8 @@ export interface CostHost {
   signal(): AbortSignal;
   /** Re-publish controller state after the ledger changes. */
   publish(): void;
+  /** Session the operator is reading; always scanned, so its own total is shown even when it is old. */
+  selectedSessionId?(): string | undefined;
   /** Hand one already-read history page to another consumer, which owns what it does with it. */
   scanPage?(sessionId: string, records: readonly Json[]): void;
   /** Report that a session's history was read to its beginning. */
@@ -84,10 +87,20 @@ export class CostController {
         combined.throwIfAborted();
         const failures: string[] = [];
         let scanned = 0, pages = 0, events = 0;
+        // Sessions that cannot have spent anything inside the retained window are not worth paging:
+        // their whole history would fold into days the ledger does not keep. Billable activity moves
+        // `updatedAt`, so anything that happened while this client was away is still read.
+        const floor = costDayStart(costWindowStart(Date.now()));
+        const selected = this.host.selectedSessionId?.();
         for (const session of sessions) {
           combined.throwIfAborted();
           const sessionId = string(session.sessionId);
-          if (!session.running && typeof session.updatedAt === 'number' && this.updates.get(sessionId) === session.updatedAt) continue;
+          // The selected session is exempt from the window, not from the within-generation skip: the
+          // panel reports its own total, but an unchanged history is still not read twice a minute.
+          if (!session.running && typeof session.updatedAt === 'number') {
+            if (sessionId !== selected && session.updatedAt < floor) continue;
+            if (this.updates.get(sessionId) === session.updatedAt) continue;
+          }
           try {
             const history = await sessionCostHistory(client, session, combined, () => { pages++; },
               records => this.host.scanPage?.(sessionId, records));

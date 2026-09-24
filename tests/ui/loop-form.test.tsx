@@ -48,6 +48,31 @@ test('a record defaults a full run from its first round', () => {
   assert.deepEqual(loopRecordDefaults(RECORD), { from: 1, to: 10, score: 8, tries: 10 });
 });
 
+test('the record list names the user file behind a record, and marks the rows it supplied', () => {
+  const mine = { ...RECORD, fromFile: true as const };
+  const source = {
+    file: '/home/me/.config/dsht/loop.yaml',
+    overridden: ['design-review'], added: ['my-review'],
+    warnings: ['Your design-review in /home/me/.config/dsht/loop.yaml replaces a shipped record that changed in this version.'],
+  };
+  const ui = render(<LoopMenu records={[mine, SECOND]} index={0} source={source} />);
+  try {
+    const frame = ui.lastFrame()!;
+    // An operator who overrode a shipped record has to be able to see it before starting a run.
+    assert.match(frame, /Records from \/home\/me\/\.config\/dsht\/loop\.yaml · replaced: design-review · added: my-review/);
+    assert.match(frame, /design-review · Design review · 10 rounds · pass 8 · ≤10 tries · DESIGN-REVIEW\.md · yours/);
+    assert.match(frame, /Your design-review in \/home\/me/);
+    // A record this install did not supply is not marked as the operator's.
+    assert.doesNotMatch(frame, /designdoc-review[^\n]*yours/);
+  } finally { ui.unmount(); ui.cleanup(); }
+});
+
+test('the form says when the record it edits came from the user file', () => {
+  const { ui, frame } = mount(true, { ...RECORD, fromFile: true });
+  try { assert.match(frame(), /Run loop record · design-review · your file/); }
+  finally { ui.unmount(); ui.cleanup(); }
+});
+
 test('a record pointed at something lists that input beside its defaults', () => {
   // The artifact column is dropped here so the variable survives the row's width limit.
   const target = { ...RECORD, artifact: undefined, vars: { path: 'tui-design.md' } };
