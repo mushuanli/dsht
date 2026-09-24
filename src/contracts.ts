@@ -33,16 +33,13 @@ export type PanelName = 'help' | 'cost' | 'status' | 'queue' | 'prompts'
 
 /** Where the loop records one client runs came from.
  *
- * The shipped file travels with the package and a user file may layer over it, so a record list is no
- * longer one file's content: this says which files were read and which records the user's own file
- * replaced or added. The warnings are the client's own notes — a shipped file it could not read, or a
- * record the user overrides that the package has since changed — and the UI shows them rather than
- * acting on them.
+ * The runtime file is in the configuration directory. Shipped updates are merged into that file;
+ * this says which records the operator changed or added and reports any missed shipped update.
  */
 export interface LoopSourceInfo {
   /** Shipped `loop.yaml` that was read; absent when the compiled-in records were used instead. */
   builtin?: string;
-  /** User file layered over the shipped records; absent when there is none. */
+  /** Runtime file read after creation and merging. */
   file?: string;
   /** Shipped records the user's file replaced, in that file's order. */
   overridden: readonly string[];

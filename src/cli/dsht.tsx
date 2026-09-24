@@ -59,8 +59,8 @@ Cookies are saved per server origin and reused on later starts. Tokens are never
 /prompt lists saved shortcut prompts; /prompt TEXT saves one in <state>/prompts.json.
 !command runs on this machine, not on the host, and prints its output in the transcript.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
-The shipped loop.yaml is read at startup; a loop.yaml in the config directory adds to it, and a
-record with the same name replaces the shipped one. DSHT_LOOP_FILE names another file instead.
+The config directory's loop.yaml is created from the shipped file when absent. On startup,
+unedited shipped records are merged into it. DSHT_LOOP_FILE names another runtime file instead.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
 The transition trace defaults to <state>/trace.log; DSHT_TRACE sets another path or 'off'.
 prices.json overrides the shipped rates and is seeded on first use; every scan re-decides the
@@ -140,13 +140,11 @@ async function main(): Promise<void> {
   await ensureDirectory(config);
   const { prices, custom } = await loadPrices(config);
   const stateRoot = process.env.DSHT_STATE_DIR ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'dsht');
-  // The loop records are configuration: the shipped file is read now, a user file layered over it and
-  // the result installed before anything can list or run a record. An invalid user file stops the
-  // client here rather than running shipped records while the operator believes their own are in
-  // force; a shipped file that cannot be read falls back to the compiled-in records with a warning.
+  // Materialize the merged config file before installing the runtime source. An invalid user file
+  // stops startup; a missing or invalid shipped file uses the compiled-in fallback with a warning.
   const loopSource = await loadLoopSource({
     ...(process.env.DSHT_LOOP_FILE === undefined ? {} : { overlayFile: process.env.DSHT_LOOP_FILE }),
-    configDirectory: config, stateDirectory: stateRoot,
+    configDirectory: config,
   });
   installLoopSource(loopSource.source, loopSource.info);
   const costDirectory = join(stateRoot, 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));

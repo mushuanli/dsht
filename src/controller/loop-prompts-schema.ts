@@ -78,12 +78,10 @@ export function validateLoopPrompts(source: unknown): string[] {
   return errors;
 }
 
-/** Check a user file that layers over the shipped records.
+/** Check an existing runtime file before merging shipped records into it.
  *
- * It is a whole `loop.yaml` in shape, but partial in content: an overlay that only adds one record
- * or only moves the global defaults is exactly what it is for, so a missing or empty `protocols` is
- * valid here. Every record it does declare is held to the same rules as a shipped one, because the
- * renderer cannot tell the two apart once they are merged.
+ * Older user files may be partial: one record or one changed default is valid, so a missing or empty
+ * `protocols` is accepted here. Every declared record follows the shipped record rules.
  * @param source - Parsed overlay file.
  * @returns One message per problem; an empty list means valid.
  */

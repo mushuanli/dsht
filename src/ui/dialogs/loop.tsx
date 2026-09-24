@@ -87,8 +87,7 @@ export function LoopMenu({ records, index, source }: {
 }) {
   const theme = useTheme();
   const start = Math.max(0, index - 5);
-  // Records are configuration now: whenever a user file supplied or replaced one, the list says so,
-  // because an operator who overrode a shipped record cannot tell the two apart from the name alone.
+  // The runtime file is in the config directory; mark records the operator edited or added.
   const origin = source?.file === undefined ? undefined : [
     `Records from ${source.file}`,
     ...(source.overridden.length === 0 ? [] : [`replaced: ${source.overridden.join(', ')}`]),

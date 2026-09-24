@@ -24,9 +24,8 @@ try {
   const result = await run(['exec', '--yes', '--offline', '--', `file:${join(root, pack.filename)}`, '--help'], root);
   assert.match(result.stdout, /Usage: dsht/);
   assert.match(result.stdout, /list workspaces/);
-  // The loop records are configuration: the installed entry must read the loop.yaml that travelled
-  // with it, not quietly fall back to the table compiled into the build. The tarball is unpacked and
-  // given this checkout's dependencies, so the real dist module runs offline — no host, no client.
+  // The packed entry must seed a runtime file from its shipped loop.yaml, then read that file.
+  // The tarball is given this checkout's dependencies so the real dist module runs offline.
   const unpacked = join(root, 'unpacked');
   const packageRoot = join(unpacked, 'package');
   await mkdir(unpacked, { recursive: true });
@@ -35,11 +34,14 @@ try {
   const probe = [
     `const { loadLoopSource } = await import(${JSON.stringify(join(packageRoot, 'dist', 'controller', 'loop-source.js'))});`,
     `const load = await loadLoopSource({ configDirectory: ${JSON.stringify(join(root, 'config'))} });`,
-    `if (load.info.builtin === undefined || !load.source.protocols['design-review'])`,
+    `const { readFile } = await import('node:fs/promises');`,
+    `const runtime = await readFile(${JSON.stringify(join(root, 'config', 'loop.yaml'))}, 'utf8');`,
+    `if (load.info.builtin === undefined || load.info.file !== ${JSON.stringify(join(root, 'config', 'loop.yaml'))}`,
+    `    || !load.source.protocols['design-review'] || !runtime.includes('design-review:'))`,
     `  throw new Error('the packed records were not read: ' + load.info.warnings.join(' '));`,
     `process.stdout.write(Object.keys(load.source.protocols).join(','));`,
   ].join('\n');
   const loaded = await exec(process.execPath, ['--input-type=module', '-e', probe], { cwd: packageRoot, timeout: 30_000 });
   assert.equal(loaded.stdout, 'design-review,designdoc-review');
-  console.log(`Packed ${pack.filename}; isolated npx entry passed; packed loop.yaml read.`);
+  console.log(`Packed ${pack.filename}; isolated npx entry passed; config loop.yaml created and read.`);
 } finally { await rm(root, { recursive: true, force: true }); }

@@ -1,8 +1,8 @@
 /** Typed access to the loop prompts and the placeholder renderer.
  *
- * The loop record is configuration, not code: the shipped `loop.yaml` is read at startup from beside
- * the package and a user file may be layered over it (`loop-source.ts`), then the merged table is
- * installed here once. `loop-prompts-schema.ts` holds the shape and the rules, and
+ * The loop record is configuration: `loop-source.ts` creates or merges the config directory's
+ * `loop.yaml` from the shipped table, then reads that runtime file and installs its table here once.
+ * `loop-prompts-schema.ts` holds the shape and the rules, and
  * `loop-prompts.generated.ts` is the compiled-in fallback for a package whose file is missing. This
  * module turns one record into the strings a protocol needs, so the dynamic parts (this round's title,
  * its checklist, the record's own vars) are filled here and nowhere else. A template may only use

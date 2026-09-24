@@ -1,14 +1,14 @@
 /** The loop record source: the shipped file, a user overlay, the merged table and its fallback. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { stringify } from 'yaml';
+import { parse, stringify } from 'yaml';
 import { LOOP_PROMPTS } from '../../src/controller/loop-prompts.generated.ts';
 import { installLoopSource, loopPrompts, loopSourceInfo } from '../../src/controller/loop-prompts.ts';
 import { loopRecords } from '../../src/controller/loop-protocols.ts';
-import { loadLoopSource, loopOverlayFile, mergeLoopSource, shippedLoopFile }
+import { loadLoopSource, loopOverlayFile, shippedLoopFile }
   from '../../src/controller/loop-source.ts';
 import { validateLoopOverlayPrompts } from '../../src/controller/loop-prompts-schema.ts';
 import type { LoopProtocolText, LoopPromptSource } from '../../src/controller/loop-prompts-schema.ts';
@@ -43,17 +43,47 @@ async function writeLoopFile(directory: string, name: string, document: unknown)
   return path;
 }
 
-test('the shipped file is read at runtime and is the source of the records', async () => {
-  // No overlay anywhere: the records come from the loop.yaml beside the package, not from the module
-  // compiled into it, which is what makes the file the configuration rather than the build output.
+test('a missing config loop.yaml is created from the shipped file and then read at runtime', async () => {
   await withTemp(async directory => {
-    const load = await loadLoopSource({ configDirectory: join(directory, 'config') });
+    const config = join(directory, 'config');
+    const load = await loadLoopSource({ configDirectory: config });
     assert.equal(load.info.builtin, shippedLoopFile());
     assert.deepEqual(load.info.overridden, []);
     assert.deepEqual(load.info.added, []);
     assert.deepEqual(load.info.warnings, []);
-    assert.equal(load.info.file, undefined);
+    assert.equal(load.info.file, join(config, 'loop.yaml'));
+    assert.equal(await readFile(join(config, 'loop.yaml'), 'utf8'), await readFile(shippedLoopFile(), 'utf8'));
     assert.deepEqual(Object.keys(load.source.protocols), ['design-review', 'designdoc-review']);
+  });
+});
+
+test('a shipped update changes only unedited records and defaults in the config file', async () => {
+  await withTemp(async directory => {
+    const builtInFile = await writeLoopFile(directory, 'shipped.yaml', shipped(['a', 'b']));
+    const config = join(directory, 'config');
+    const options = { configDirectory: config, builtinFile: builtInFile };
+    await loadLoopSource(options);
+    const original = shipped(['a', 'b']);
+    const reordered = Object.fromEntries(Object.entries(original.protocols.a!).reverse()) as unknown as LoopProtocolText;
+    const edited = { ...original, protocols: { ...original.protocols, a: reordered,
+      b: protocol({ title: 'My b' }), mine: protocol({ title: 'Mine' }) }, defaults: { score: 9, tries: 10 } };
+    await writeFile(join(config, 'loop.yaml'), stringify(edited));
+    const updated = shipped(['a', 'b', 'c']);
+    const next = { ...updated, protocols: { ...updated.protocols,
+      a: protocol({ title: 'New a' }), b: protocol({ title: 'New b' }) }, defaults: { score: 7, tries: 12 } };
+    await writeFile(builtInFile, stringify(next));
+    const load = await loadLoopSource(options);
+    assert.equal(load.source.protocols.a!.title, 'New a');
+    assert.equal(load.source.protocols.b!.title, 'My b');
+    assert.equal(load.source.protocols.c!.title, 'Shipped c');
+    assert.equal(load.source.protocols.mine!.title, 'Mine');
+    assert.deepEqual(load.source.defaults, { score: 9, tries: 12 });
+    assert.deepEqual(load.info.overridden, ['b']);
+    assert.deepEqual(load.info.added, ['mine']);
+    assert.match(load.info.warnings[0]!, /shipped record that changed/);
+    const persisted = parse(await readFile(join(config, 'loop.yaml'), 'utf8')) as LoopPromptSource;
+    assert.deepEqual(persisted, load.source);
+    assert.deepEqual((await loadLoopSource(options)).info.warnings, []);
   });
 });
 
@@ -70,24 +100,11 @@ test('a user file adds records and replaces shipped ones, one record at a time',
     assert.equal(load.info.file, overlay);
     assert.deepEqual(load.info.overridden, ['design-review']);
     assert.deepEqual(load.info.added, ['my-review']);
-    // The shipped record the file does not name is still the shipped one, in its own position, so a
-    // later version's fix to it still arrives.
-    assert.deepEqual(Object.keys(load.source.protocols), ['design-review', 'designdoc-review', 'my-review']);
+    // The runtime file keeps its existing order; newly supplied shipped records are appended.
+    assert.deepEqual(Object.keys(load.source.protocols), ['design-review', 'my-review', 'designdoc-review']);
     assert.equal(load.source.protocols['design-review']!.title, 'My design review');
     assert.equal(load.source.protocols['designdoc-review']!.title, LOOP_PROMPTS.protocols['designdoc-review'].title);
   });
-});
-
-test('a record is taken whole, never field-merged with the shipped copy', () => {
-  const builtin = shipped(['design-review']);
-  const overlay = { version: 1, protocols: { 'design-review': protocol({ steps: 2,
-    rounds: [{ title: 'a', checks: 'b' }, { title: 'c', checks: 'd' }] }) } };
-  const merged = mergeLoopSource(builtin, overlay);
-  // The shipped record's defaults survive only where the replacement does not speak for them.
-  assert.equal(merged.source.protocols['design-review']!.defaults, undefined);
-  assert.equal(merged.source.protocols['design-review']!.steps, 2);
-  assert.deepEqual(merged.overridden, ['design-review']);
-  assert.deepEqual(merged.added, []);
 });
 
 test('a user file may move the global defaults without touching a record', async () => {
@@ -158,10 +175,9 @@ test('a shipped file that is not a loop file falls back with the reason', async 
 
 test('a shipped record changed under an override is reported, and the override still wins', async () => {
   await withTemp(async directory => {
-    const state = join(directory, 'state');
     const shippedFile = await writeLoopFile(directory, 'shipped.yaml', shipped(['mine']));
     await writeLoopFile(directory, 'loop.yaml', { version: 1, protocols: { mine: protocol({ title: 'Mine' }) } });
-    const options = { configDirectory: directory, builtinFile: shippedFile, stateDirectory: state };
+    const options = { configDirectory: directory, builtinFile: shippedFile };
     const first = await loadLoopSource(options);
     assert.deepEqual(first.info.warnings, []);
     assert.equal(first.source.protocols['mine']!.title, 'Mine');
@@ -185,10 +201,10 @@ test('an installed source is what /loop lists and runs, and marks the user recor
       'design-review': protocol({ title: 'My design review' }),
       'my-review': protocol({ title: 'My review' }),
     } });
-    const load = await loadLoopSource({ configDirectory: directory, stateDirectory: join(directory, 'state') });
+    const load = await loadLoopSource({ configDirectory: directory });
     installLoopSource(load.source, load.info);
     try {
-      assert.deepEqual(loopPrompts().names, ['design-review', 'designdoc-review', 'my-review']);
+      assert.deepEqual(loopPrompts().names, ['design-review', 'my-review', 'designdoc-review']);
       assert.equal(loopPrompts().find('design-review')!.title, 'My design review');
       const records = loopRecords();
       assert.equal(records.find(record => record.name === 'my-review')!.fromFile, true);

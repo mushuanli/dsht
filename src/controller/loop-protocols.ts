@@ -19,8 +19,7 @@ export function loopProtocolNames(): string[] {
  *
  * The list and the run read the same records, so a chooser can show exactly the name, round count,
  * artifact and defaults the runner would use — never a second table that could drift. A record the
- * user's own file supplied is marked, because an operator who overrode a shipped record can no longer
- * tell the two apart from the name alone.
+ * operator edited is marked, so a shipped update can be distinguished from a local override.
  * @returns One summary per record.
  */
 export function loopRecords(): LoopRecord[] {

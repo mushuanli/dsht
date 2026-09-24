@@ -4,15 +4,11 @@
 # contract (result block, verdict brief, retry clause) stays in src/controller/loop-contract.ts;
 # this file holds the objective, the rubric, the templates and the fixed inputs of one record.
 #
-# It is configuration, read at startup, not compiled in: the shipped copy travels with the package
-# and a user file layers over it per record.
-#   - To add or replace records without touching the package, write a loop.yaml in the config
-#     directory (default ~/.config/dsht, or $DSHT_CONFIG_DIR) with the same `version`, the records
-#     you want, and optionally `defaults`. A name that exists here is replaced whole; a new name is
-#     added; every record you do not name keeps following this file, so upgrades still reach it.
-#     $DSHT_LOOP_FILE points at another file instead of the config directory one.
-#   - src/controller/loop-source.ts merges the two; src/controller/loop-prompts-schema.ts holds the
-#     rules (the overlay is checked by validateLoopOverlayPrompts, which allows a partial file).
+# It is configuration: this shipped copy seeds ~/.config/dsht/loop.yaml (or $DSHT_CONFIG_DIR).
+# On later starts, unedited shipped records and defaults are merged into that runtime file; user
+# edits and additions stay there. $DSHT_LOOP_FILE selects another runtime file with the same rules.
+# The previous shipped digests live beside the runtime file in loop.yaml.seed.json.
+# src/controller/loop-source.ts performs the merge; loop-prompts-schema.ts validates both files.
 #   - `npm run build:prompts` inlines this file into the committed fallback module used only when the
 #     data file cannot be read, and `npm test` keeps the two in sync.
 #
@@ -43,8 +39,9 @@
 # earlier round's rubric to re-check, and only then may "passed" mean the whole artifact rather than
 # just the rounds that happened to run.
 #
-# After editing, run `npm run build:prompts` to regenerate src/controller/loop-prompts.generated.ts;
-# `npm test` fails when the generated file is stale. A record named `answer` or `abort` is refused,
+# When editing this shipped copy in the source repo, run `npm run build:prompts` to regenerate
+# src/controller/loop-prompts.generated.ts; edits to the config directory's runtime copy take effect
+# on restart without a build. A record named `answer` or `abort` is refused,
 # because those are `/loop` subcommands rather than protocols.
 
 version: 1

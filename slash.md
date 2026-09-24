@@ -307,7 +307,7 @@ foreground 还是 ui。它既不能按 kind 静态决定，也不该由第二个
 
 | 命令 | 情况 | 实际执行类别 | 为什么 |
 |---|---|---|---|
-| `/loop` | bare | `ui` | 记录列表来自启动时装入的记录表（随包 `loop.yaml` + 用户覆盖层），无网络、无 action |
+| `/loop` | bare | `ui` | 记录列表来自启动时合并并读取的配置目录 `loop.yaml`，无网络、无 action |
 | `/loop name` | 无旗标 | `ui` | 只是返回表单意图（`interactive` 时） |
 | `/loop name 9` | 有旗标 | `foreground` → `LoopRun` | `startLoop` 走 busy 信封，随后交给 LoopRun |
 | `/model` | bare | **`foreground`** + UI effect | 先 `modelCatalog()` 拉目录（网络），再开对话框 |
