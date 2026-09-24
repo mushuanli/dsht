@@ -1,11 +1,12 @@
 /** Versioned CNY price tables and the price decision taken for one request sample. */
 import { createHash } from 'node:crypto';
+import workday from 'workday-cn';
 import { object } from '../transport/wire.ts';
 import { MISSING_TIME, MISSING_USAGE, UNSUPPORTED_USAGE, type PriceDecision, type PriceVersion, type Rates, type Usage } from './types.ts';
 
 const clocks = new Map<string, Intl.DateTimeFormat>();
 
-/** Published rates verified on 2026-09-12; preceding dates require historical configuration.
+/** Published rates verified on 2026-09-24; preceding dates require historical configuration.
  * Flash and Pro are priced independently, and a separate cache write uses the cache-miss input rate.
  */
 const OFFICIAL_PRICING = 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/';
@@ -37,7 +38,7 @@ export const DEFAULT_PRICES: PriceVersion[] = [
  * to the rules that produced it. Version 1 matched a model by the substring `pro` and priced a
  * request with no settlement time at the cheapest off-peak rate.
  */
-export const PRICING_ENGINE_VERSION = 2;
+export const PRICING_ENGINE_VERSION = 3;
 
 /** Revision of the shipped table, recorded beside a seeded file so a correction can replace it. */
 export const PRICES_REVISION = '2026-09-12';
@@ -231,12 +232,19 @@ export function priceAt(prices: PriceVersion[], provider: string, model: string,
   if (candidate === undefined) return;
   const { price, matchedBy } = candidate;
   let clock = clocks.get(price.timezone);
-  if (!clock) { clock = new Intl.DateTimeFormat('en-US', { timeZone: price.timezone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); clocks.set(price.timezone, clock); }
+  if (!clock) { clock = new Intl.DateTimeFormat('en-US', { timeZone: price.timezone, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); clocks.set(price.timezone, clock); }
   const parts = clock.formatToParts(time);
   const part = (name: string) => parts.find(p => p.type === name)!.value;
   const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(part('weekday'));
+  const date = `${part('year')}-${part('month')}-${part('day')}`;
   const minute = Number(part('hour')) * 60 + Number(part('minute'));
-  return { price, matchedBy, rates: price.weekdays.includes(day) && price.windows.some(([a, b]) => minute >= a && minute < b) ? price.peak : price.offPeak };
+  const peakWindow = price.weekdays.includes(day) && price.windows.some(([a, b]) => minute >= a && minute < b);
+  // The package reads a Date through local getters. Build local noon from the date already resolved
+  // in the price's timezone so the result does not shift to the previous day west of UTC.
+  const [year, month, dateOfMonth] = date.split('-').map(Number);
+  const holiday = peakWindow && price.timezone === 'Asia/Shanghai'
+    && workday.isHoliday(new Date(year!, month! - 1, dateOfMonth!, 12));
+  return { price, matchedBy, rates: peakWindow && !holiday ? price.peak : price.offPeak };
 }
 
 /** Decide the amount for one request sample using the table loaded at decision time.

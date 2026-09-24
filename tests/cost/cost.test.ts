@@ -8,6 +8,7 @@ import { CostLedger, COST_WINDOW_DAYS, DEFAULT_PRICES, costDay, costDaysBefore, 
 import { costText } from '../../src/ui/status/model.ts';
 import { Controller } from '../../src/controller/controller.ts';
 import { host, until } from '../support/host.ts';
+import { statusSource } from '../support/status-source.ts';
 import type { ObjectValue } from '../../src/transport/wire.ts';
 
 const at = (date: string) => Date.parse(date + '+08:00');
@@ -33,6 +34,11 @@ test('tariffs use Beijing weekdays and half-open morning/afternoon windows', () 
   assert.equal(rate('2026-09-10T14:00:00'), 2);
   assert.equal(rate('2026-09-10T18:00:00'), 1);
   assert.equal(rate('2026-09-12T10:00:00'), 1);
+  assert.equal(rate('2026-09-24T10:00:00'), 2);
+  assert.equal(rate('2026-09-25T10:00:00'), 1); // Mid-Autumn holiday, Friday.
+  assert.equal(rate('2026-10-01T10:00:00'), 1); // National Day holiday, Thursday.
+  assert.equal(rate('2026-10-08T10:00:00'), 2); // First weekday after the holiday.
+  assert.equal(rate('2026-10-10T10:00:00'), 1); // Makeup Saturday remains off-peak under the weekday rule.
   assert.equal(rate('2026-09-09T10:00:00'), undefined);
   assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-v4.1-flash-expires-on-0910', at('2026-09-10T10:00:00'))?.rates.input, 2);
   assert.equal(priceAt(prices, 'deepseek-official', 'deepseek-v4.1-PRO-preview', at('2026-09-10T10:00:00'))?.rates.input, 9);
@@ -181,6 +187,22 @@ test('coverage reports missing data and failures without distrusting cached char
   assert.equal(ledger.coverage, 'complete');
   ledger.error = 'scan failed';
   assert.equal(ledger.coverage, 'partial');
+});
+
+test('a newly created session shows a provisional zero before its first billing scan', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const ledger = new CostLedger();
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', costs: ledger });
+  t.after(() => controller.stop()); controller.start();
+  await until(() => controller.queries.connectionSettled && ledger.scannedAt !== undefined && !ledger.scanning);
+  controller.state = { ...controller.state, workspaceId: 'w1' };
+  assert.equal(await controller.actions.createSession(), true);
+  assert.equal(controller.state.sessionId, 's-new');
+  assert.equal(statusSource(controller).cost?.sessionText, '~¥0.0000');
+  assert.equal(ledger.coverage, 'partial');
+  await ledger.replace('s-new', 0, costRecords([record(0, at('2026-09-24T10:00:00'))]));
+  assert.equal(ledger.coverage, 'complete');
+  assert.equal(ledger.total('s-new').records, 1);
 });
 
 test('session, day, week and month totals retain unknowns and avoid replacement/retry duplication', async () => {

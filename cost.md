@@ -10,11 +10,11 @@ session/follow + session/page
    ↓ costRecords()  只保留计费事件（request/context、assistant/message、assistant/attempt、llm/retry-started、session/end-seed、compaction/summary）
    ↓ foldSamples()  每个 attempt 折叠成一个样本：{ key: 首个事件 seq, time, provider, model, usage }
    ↓ chargeFor()    用当前价目表得到 { amount } 或 { reason }
-   ↓ CostLedger.replace()  累加成会话总额与「本次扫描当天」分桶，写入 <state>/cost/<sha256(origin)>/<sha256(sessionId)>.json（SavedCost v3）
-   ↓ total(sessionId) / today(now)  内存记忆化 → /cost 面板、状态栏、/status
+   ↓ CostLedger.replace()  累加成会话总额与 60 天内的每日分桶，写入 <state>/cost/<sha256(origin)>/<sha256(sessionId)>.json（SavedCost v4）
+   ↓ total(sessionId) / today(now) / week(now) / month(now)  内存记忆化 → /cost 面板、状态栏、/status
 ```
 
-关键点：**账本是宿主日志与价目表的投影**。落盘的只有每个会话的汇总（会话金额、请求数与未计价数、当天分桶、规则版本与价目表摘要），**不保存逐请求记录**。因此下一次扫描会用当时加载的价格表重新决定整个历史：修正价目表会在下一次扫描生效，此前没有条目覆盖的请求也会在出现覆盖后自动计价。
+关键点：**账本是宿主日志与价目表的投影**。落盘的只有每个会话的汇总（会话金额、请求数与未计价数、60 天日分桶、规则版本与价目表摘要），**不保存逐请求记录**。因此下一次扫描会用当时加载的价格表重新决定整个历史：修正价目表会在下一次扫描生效，此前没有条目覆盖的请求也会在出现覆盖后自动计价。
 
 这样做的代价与收益：金额不再"一次决定、永不改变"，改表会移动历史总额（这正是自动修复）；账本文件从"每笔请求约 174 字节"降到"每会话约 200 字节"，本机 11,932 笔请求的账本从约 2 MB 降到几 KB。
 
@@ -35,14 +35,14 @@ interface PriceVersion {
 type Rates = { input: number; cacheRead: number; cacheWrite: number; output: number };
 ```
 
-随包默认 `DEFAULT_PRICES`（2026-09-12 核对，来源 <https://api-docs.deepseek.com/zh-cn/quick_start/pricing/>）：
+随包默认 `DEFAULT_PRICES`（2026-09-24 核对，来源 <https://api-docs.deepseek.com/zh-cn/quick_start/pricing/>）：
 
 | id | model | 高峰 input / cacheRead / output | 空闲 input / cacheRead / output |
 |---|---|---|---|
 | `deepseek-2026-09-10-flash` | `deepseek-flash` | 2 / 0.04 / 8 | 1 / 0.02 / 4 |
 | `deepseek-2026-09-10-pro` | `deepseek-v4-pro` | 9 / 0.30 / 27 | 4.5 / 0.15 / 13.5 |
 
-两张表的 `weekdays = [1,2,3,4,5]`、`windows = [[540,720],[840,1080]]`，即**北京时间周一至周五 09:00–12:00、14:00–18:00 为高峰，其余（含周六周日、以及工作日的 12:00–14:00 与 18:00–次日 09:00）为空闲**。空闲价恰为高峰价的一半。`cacheWrite` 当前等于同档 `input` 价（见风险 R5）。Pro 的区间是开放的——官方页脚注 (2) 说明 9-14 之后继续按原费率提供，所以原先那条"9-14 后按 Flash 计费"的条目已删除。
+两张表的 `weekdays = [1,2,3,4,5]`、`windows = [[540,720],[840,1080]]`，即**北京时间周一至周五 09:00–12:00、14:00–18:00 为高峰，但中国法定节假日全天为空闲价**。节假日由 `workday-cn` 提供，依赖包需要随国务院新年度安排更新；调休周末仍按价格页的周一至周五规则走空闲价。空闲价为高峰价的一半。Pro 在 9 月 14 日之后仍按自身费率提供。
 
 ## 3. 模型 → 费率的选择规则（已按 R1/R2/R3 改造）
 

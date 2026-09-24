@@ -3,7 +3,7 @@
 /** Per-million-token rates for one peak or off-peak bucket. */
 export interface Rates { input: number; cacheRead: number; cacheWrite: number; output: number }
 
-/** An explicit validity interval and weekday peak windows in the named time zone. */
+/** An explicit validity interval and peak calendar in the named time zone. */
 export interface PriceVersion {
   id: string; provider: string; model: string;
   /** Further model names this version prices; a trailing `*` matches a prefix. Never a guess. */

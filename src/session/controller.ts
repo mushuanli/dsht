@@ -371,7 +371,7 @@ export class SessionController {
   createWorkspace(path: string, signal?: AbortSignal): Promise<void> { return this.navigation.createWorkspace(path, signal); }
 
   /** Create a session only after the user explicitly selects New session. */
-  createSession(signal?: AbortSignal): Promise<void> { return this.navigation.createSession(signal); }
+  createSession(signal?: AbortSignal): Promise<string> { return this.navigation.createSession(signal); }
 
   /** Create a session for another purpose without selecting it, named so a reader can tell it apart.
    *

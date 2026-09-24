@@ -11,6 +11,8 @@ const UNPRICED_LIMIT = 8;
 /** Per-origin cache of folded session totals and day buckets; every scan replaces a session at its cut. */
 export class CostLedger {
   private sessions = new Map<string, SavedCost>();
+  /** New sessions are known to begin at zero, but have not yet had their history scanned. */
+  private provisional = new Set<string>();
   private totals = new Map<string, CostTotal>();
   private readonly catalog: string;
   scannedAt?: number;
@@ -30,7 +32,7 @@ export class CostLedger {
   get coverage(): Coverage {
     if (this.scanning) return 'scanning';
     if (this.error) return 'partial';
-    return this.scannedAt !== undefined || this.sessions.size > 0 ? 'complete' : 'partial';
+    return this.provisional.size === 0 && (this.scannedAt !== undefined || this.sessions.size > 0) ? 'complete' : 'partial';
   }
 
   /** Load the newest cut per session; a stored total is read as it was decided.
@@ -42,10 +44,22 @@ export class CostLedger {
    */
   async load(now = Date.now()): Promise<void> {
     this.totals.clear();
+    this.provisional.clear();
     this.sessions = await loadLedgers(this.directory);
     for (const sessionId of await pruneLedgers(this.directory, costWindowStart(now), this.sessions)) {
       this.sessions.delete(sessionId);
     }
+  }
+
+  /** Show zero immediately for a session this client just created, until a host scan confirms it.
+   * The provisional slice is memory only; a later scan replaces it with the actual history.
+   */
+  seedNewSession(sessionId: string): void {
+    if (this.sessions.has(sessionId)) return;
+    this.sessions.set(sessionId, { version: 4, sessionId, cut: -2, engine: PRICING_ENGINE_VERSION,
+      catalog: this.catalog, total: { amount: 0, unknown: 0, records: 0 }, days: [], unpriced: [] });
+    this.provisional.add(sessionId);
+    this.totals.clear();
   }
 
   /** Replace one session using all billing events through the opening snapshot cut.
@@ -95,6 +109,7 @@ export class CostLedger {
     // Another process may have persisted a newer cut of this session since it was last read.
     if (this.directory && !await saveLedger(this.directory, saved)) return;
     this.sessions.set(sessionId, saved);
+    this.provisional.delete(sessionId);
     this.totals.clear();
   }
 

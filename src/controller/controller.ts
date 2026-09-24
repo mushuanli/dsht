@@ -1110,7 +1110,9 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Create a session in the selected workspace. */
   private async createSession(signal?: AbortSignal): Promise<void> {
     this.traceEvent('action', { action: 'createSession', workspace: this.state.workspaceId ?? 'none' });
-    await this.session.createSession(signal);
+    const sessionId = await this.session.createSession(signal);
+    this.costs?.seedNewSession(sessionId);
+    this.update({});
   }
 
   /** Replace the selected transcript and follow the session.

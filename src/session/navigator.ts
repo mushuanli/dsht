@@ -137,13 +137,15 @@ export class SessionNavigator {
     });
   }
 
-  createSession(signal?: AbortSignal): Promise<void> {
+  createSession(signal?: AbortSignal): Promise<string> {
     return this.run(signal, true, async context => {
       const workspaceId = this.host.read().workspaceId;
       if (!workspaceId) throw new Error('Select a workspace before creating a session');
       const result = object(await context.client.call('session/create', { request: { workspaceId } }, context.signal));
       context.check();
-      this.host.follow(string(result.sessionId));
+      const sessionId = string(result.sessionId);
+      this.host.follow(sessionId);
+      return sessionId;
     });
   }
 
