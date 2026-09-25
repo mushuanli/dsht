@@ -8,6 +8,7 @@ import type { HistorySearch, RemovalTarget } from '../../contracts.ts';
 import type { QueuedInput } from '../../contracts.ts';
 import { COMMAND_HINTS, COMMAND_LABELS, COMMAND_LABEL_WIDTH } from '../../slash/registry.ts';
 import { useTheme } from '../theme/index.ts';
+import type { OfflineGuidance } from '../offline.ts';
 import { Picker, type Choice } from './picker.tsx';
 
 /** Pending host input with explicit removal.
@@ -151,6 +152,24 @@ export function PickerScreen({ title, identity, choices, enabled, canSelect, wid
     <Text bold>{title}</Text>
     {legend !== undefined && <Text dimColor wrap="truncate-end">{legend}</Text>}
     <Picker key={identity} choices={choices} enabled={enabled} canSelect={canSelect} width={width} />
+  </Box>;
+}
+
+/** What the startup picker shows while the host is unreachable.
+ *
+ * An empty list with a raw socket error beside it answers neither "what is wrong" nor "what do I do",
+ * so the picker is replaced by the state and the one command that resolves it. This is a startup
+ * surface only: a conversation keeps its transcript and lets the status bar report the loss.
+ * @param props - Guidance block built from the connection's published state.
+ * @returns The offline guidance panel.
+ */
+export function OfflinePanel({ guidance }: { guidance: OfflineGuidance }) {
+  const theme = useTheme();
+  return <Box flexDirection="column" marginY={1}>
+    <Text bold color={theme.status.offline} wrap="truncate-end">{safeText(guidance.title)}</Text>
+    {guidance.lines.map((line, index) => <Text key={index} wrap="truncate-end"
+      color={line.startsWith('  ') ? theme.colors.tool : undefined}>{safeText(line)}</Text>)}
+    {guidance.detail !== undefined && <Text dimColor wrap="truncate-end">{safeText(guidance.detail)}</Text>}
   </Box>;
 }
 

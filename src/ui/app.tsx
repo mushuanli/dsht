@@ -24,7 +24,8 @@ import { useHistoryView } from './chat/use-history-view.ts';
 import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
 import type { Choice } from './dialogs/picker.tsx';
-import { HelpPanel, HistoryDialog, ModelDialog, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
+import { HelpPanel, HistoryDialog, ModelDialog, OfflinePanel, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
+import { offlineGuidance } from './offline.ts';
 import { LoopDialog, LoopMenu, type LoopRun } from './dialogs/loop.tsx';
 import { usePanels } from './dialogs/use-panels.ts';
 import { PeekPanel } from './dialogs/peek.tsx';
@@ -729,6 +730,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const peekPlainRows = useMemo((): HistoryRow[] => peek?.lines === undefined ? []
     : peek.lines.flatMap(line => plainRows(line, width, 'shell')), [peek?.lines, width]);
   const statusNotice = !['Connected', 'Idle', 'Running…', 'Responding…'].includes(state.status);
+  // A startup picker has nothing to list while the host is out of reach, so it carries the guidance
+  // in place of an empty list; every other screen keeps the status and failure lines instead.
+  const pickerScreen = state.screen === 'workspaces' || state.screen === 'sessions';
+  const offline = pickerScreen && !state.online
+    ? offlineGuidance({ status: state.status, base: controller.base, lastFailure: state.lastFailure })
+    : undefined;
   async function openSearchSession(sessionId: string, query: string): Promise<void> {
     await historyOperation(async signal => {
       if (!await controller.actions.selectSession(sessionId)) return;
@@ -874,8 +881,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflowY="hidden">
     <Box ref={bodyPrefix} flexDirection="column" flexShrink={0}>
     {foreground && <Text dimColor>{foreground.label} · Esc / Ctrl+C cancel</Text>}
-    <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
-    {state.lastFailure && <Text color={theme.colors.error}>{state.lastFailure}</Text>}
+    <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && offline === undefined && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
+    {state.lastFailure && offline === undefined && <Text color={theme.colors.error}>{state.lastFailure}</Text>}
     </Box>
       {state.screen === 'chat' && (peek === undefined ? <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
         historyWindow={!!historyWindow} frozen={displayPaused}
@@ -912,14 +919,15 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       onClose={() => setModelPanel(undefined)} /> : searchResults ? <SearchResultsDialog query={searchResults.query} items={searchResults.items} hasMore={searchResults.hasMore} width={width}
       enabled={!input && foreground === undefined} canSelect={() => !input && controller.queries.foreground === undefined}
       onOpen={sessionId => operate(() => openSearchSession(sessionId, searchResults.query))}
-      onClose={() => setSearchPanel(undefined)} /> : state.screen === 'workspaces' || state.screen === 'sessions' ? <PickerScreen
+      onClose={() => setSearchPanel(undefined)} /> : pickerScreen ? offline === undefined ? <PickerScreen
       title={state.screen === 'workspaces' ? 'Choose workspace' : state.showAllSessions ? 'Choose session · All workspaces' : 'Choose session'}
       identity={`${state.screen}:${state.workspaceId ?? ''}`} choices={choices} width={pickerWidth}
       // A rollup of badges is read through the key beside it; spelled-out states need no key, and a
       // terminal too narrow for the whole key gets the badges alone rather than half a legend.
       legend={state.screen === 'workspaces' && rollupStyle === 'badges' && pickerWidth >= 40 ? ROLLUP_LEGEND : undefined}
       enabled={state.online && foreground === undefined && !input}
-      canSelect={() => !input && controller.state.online && controller.queries.foreground === undefined} /> : <>
+      canSelect={() => !input && controller.state.online && controller.queries.foreground === undefined} />
+      : <OfflinePanel guidance={offline} /> : <>
       {thoughtList && <ThoughtsDialog identity={`thoughts:${state.sessionId}`} options={thoughtOptions} empty={!thoughtEntries?.length && !liveThought}
         rows={stdout.rows ?? 30} enabled={!input && foreground === undefined} canSelect={() => !input && controller.queries.foreground === undefined} />}
       {promptsOpen && state.screen === 'chat' && <PromptsDialog identity="prompts"

@@ -1,6 +1,14 @@
 # DeepSeek Harness Terminal
 
 English | [中文](README.zh.md)
+Run at first time(run `npx @deepseek-ai/dsh web`, then copy the output to DSH_URL):
+```bash
+export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx @itookit/dsht
+```
+Then every time only run (make sure `npx @deepseek-ai/dsh web` has run):
+```bash
+npx @itookit/dsht
+```
 
 ![DeepSeek Harness Terminal (dsht)](dsht-m.png)
 
@@ -167,6 +175,8 @@ npm start
 Both paths read the same `DSH_URL` and `DSH_TOKEN` variables.
 
 Select a workspace with ↑/↓ and Enter, then select a session or **New session**. **All sessions** also exposes sessions outside registered workspaces. **Add workspace (this directory)** registers the directory `dsht` itself runs in, and appears only while the host does not already have it; **Add workspace (host directory)** takes an existing absolute directory on the host, which may differ from your local filesystem, and Esc leaves that prompt for the picker again. Starting inside a registered workspace directory selects that workspace instead of showing the picker, with `←` in the session list switching to another; a session id passed on the command line still opens directly. Creating a session requires a selected workspace.
+
+While the host is unreachable, the startup pickers show what is wrong and how to fix it instead of an empty list. A first attempt still in flight is named as connecting; an unreachable host prints the `npx @deepseek-ai/dsh web` command that starts it together with the first-run `DSH_URL` line; a refused credential asks for that URL or `DSH_TOKEN`. The raw transport failure stays underneath as a dim diagnostic, and the client keeps retrying on its own.
 
 On first login, authentication exchanges the token at `GET /` and saves the cookie per HTTP origin. Later starts, including list commands, reuse that cookie without a token. The store uses `$XDG_STATE_HOME/dsht/auth`, or `~/.local/state/dsht/auth` when unset; `--auth-dir` or `DSHT_AUTH_DIR` overrides it. POSIX directories use 0700 and cookie files use 0600; Windows uses the account directory's inherited access controls. Launch tokens are never saved.
 

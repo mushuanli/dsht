@@ -69,6 +69,19 @@ test('startup status refreshes after connection and reconnect while copy mode re
   }
 });
 
+test('an unreachable host replaces the startup list with the command that starts it', async t => {
+  // Port 1 is never listening, so the client learns the host is unreachable and must say what to do.
+  const controller = new Controller({ base: 'http://127.0.0.1:1', token: 'fixture-token' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => ui.lastFrame()?.includes('Host offline') === true);
+  assert.match(ui.lastFrame()!, /npx @deepseek-ai\/dsh web/);
+  assert.match(ui.lastFrame()!, /DSH_URL=/);
+  // The unusable list is gone rather than sitting empty under the guidance.
+  assert.doesNotMatch(ui.lastFrame()!, /Choose workspace/);
+});
+
 test('Esc leaves a picker opened over a conversation and returns to it', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });

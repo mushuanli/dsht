@@ -1096,6 +1096,8 @@ C4Dynamic
 
 启动目录自动采用与 `initialSession` 只在首次完成初始化时应用。重连通过 `refreshLists()` 更新导航数据，通过 `restoreSelectedSession()` 恢复当前会话订阅，不再借用 `showPicker()` 改变页面；会话选择器的 all 筛选和路径输入界面也保留。输入框在离线期间仍可编辑草稿、操作本地快捷提示词；联网操作明确报告未连接并保留草稿，恢复连接不会自动发送该草稿。
 
+启动选择器是唯一在离线时无内容可列的表面，因此它把"状态 + 下一步"直接画出来，而不是留一个空列表。`ui/offline.ts` 的 `offlineGuidance()` 按已发布的 `status` 生成三态文案：首次尝试仍在进行时标题写 `Connecting…`，只说明在等谁；连接失败写 `Host offline`，给出 `npx @deepseek-ai/dsh web` 与首次运行要导出的 `DSH_URL` 行；`Login required` 则要求 `dsh web` 打印的 URL 或 `DSH_TOKEN`。原始传输错误不再充当主消息，而作为暗色 `detail` 行留在引导下方供诊断。该块只在 `workspaces`／`sessions` 选择器且 `online === false` 时取代列表（`ui/dialogs/index.tsx` 的 `OfflinePanel`），同时抑制那两行状态／失败提示以免重复；对话与其他屏幕不受影响，状态栏继续显示 `! Offline`，连接提示仍随重连实时刷新。
+
 前台操作由 `controller/foreground.ts` 的 `ForegroundSlot` 管理：异步所有权匹配当前操作 ID；取消后不再派发嵌套操作；释放时先保留下一个排队者的名额再发布 UI 更新；关闭时取消占用者并唤醒全部等待者，后续请求均被拒绝。UI 快照仅含 `id/kind/label/startedAt`，不暴露 AbortController。已开始工作的取消是协作式的，其返回值与异常仍交由调用方处理；槽位在工作真正结束前保持占用。
 
 退出路径统一收敛到 `shutdown()`：`interruptTask` 存在、`running` 为真或有 `admission` 时先 `await interrupt(true)`，再 `stop()`；`stop()` 先关闭前台入口、取消 Loop 并等待验证适配器的 `settle()` 收尾，然后 abort 生命周期、清理成本定时器、关闭 socket、等待 `runTask`、`interruptTask`、`catalogTasks` 与 `costTask`，最后释放 transcript 布局。空闲会话不会收到多余取消。
@@ -1874,7 +1876,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/chat/viewport.tsx` | `ChatViewport` |
 | `ui/copy-mode.ts` | `CopyMode`、`useCopyMode` |
 | `ui/dialogs/cost.tsx` | `CostLine`、`CostSource`、`CostPanel` |
-| `ui/dialogs/index.tsx` | `QueueDialog`、`PromptsDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
+| `ui/dialogs/index.tsx` | `QueueDialog`、`PromptsDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`OfflinePanel`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
 | `ui/dialogs/picker.tsx` | `ChoiceCell`、`Choice`、`Picker` |
 | `ui/frozen.tsx` | `Frozen` |
 | `ui/input/input.tsx` | `EditState`、`editInput`、`TextInput` |
@@ -1882,6 +1884,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/input/references.tsx` | `ReferenceMenu` |
 | `ui/input/viewport.ts` | `TAB_WIDTH`、`FoldRegion`、`DraftRow`、`CursorPlace`、`DraftPlan`、`tabStop`、`byteLength`、`formatBytes`、`wrapDraft`、`cursorPlace`、`windowRows`、`planDraft` |
 | `ui/mount.tsx` | `mount` |
+| `ui/offline.ts` | `HOST_COMMAND`、`OfflineGuidance`、`dshUrlLine`、`offlineGuidance` |
 | `ui/status/model.ts` | `costText` |
 | `ui/theme/index.ts` | `Theme`、`mocha`、`ThemeContext`、`useTheme` |
 
@@ -1905,7 +1908,7 @@ C4Component
   Component(cost, "cost/", "controller, ledger, pricing, records, scanner, ledger-files, types, index", "价格、账本与扫描")
   Component(catalog, "catalog/", "controller, index", "模型路由与 preset")
   Component(controller, "controller/", "controller, commands, loop, loop-contract, loop-protocols, loop-prompts, loop-prompts-schema, loop-prompts.generated, verifier, connection, memory-log, trace-log, perf-measures, prompts, index", "门面、命令策略与评分循环")
-  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, chat/, dialogs/, input/, status/, theme/", "Ink 渲染与交互")
+  Component(ui, "ui/", "app, mount, frozen, copy-mode, routing, offline, chat/, dialogs/, input/, status/, theme/", "Ink 渲染与交互")
   Component(cli, "cli/", "index, dsht, startup, verifier", "参数、启动与进程生命周期")
   Component(shell, "shell/", "controller, runner, index", "本地 ! 命令")
   Component(slash, "slash/", "registry, parse, index", "命令目录与解析")

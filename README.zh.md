@@ -2,6 +2,14 @@
 
 [English](README.md) | 中文
 
+第一次运行时，需要使用 DSH_URL 传入 `npx @deepseek-ai/dsh web` 启动时打印的 url:
+```bash
+export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx @itookit/dsht
+```
+以后运行只需要执行(当然必须确认`npx @deepseek-ai/dsh web` 已经启动):
+```bash
+npx @itookit/dsht
+```
 ![DeepSeek Harness Terminal（dsht）](dsht-m.png)
 
 > **dsht — 只要有终端，就能随时控制 DeepSeek Harness。**
@@ -167,6 +175,8 @@ npm start
 两种方式读取相同的 `DSH_URL` 和 `DSH_TOKEN` 变量。
 
 使用 ↑/↓ 和 Enter 选择工作区，然后选择已有会话或 **New session**。**All sessions** 同时显示未归属注册工作区的会话。**Add workspace (this directory)** 直接注册 `dsht` 自身所在的目录，只在服务端尚未注册它时出现；**Add workspace (host directory)** 接收服务端已有目录的绝对路径，该路径可能与本机文件系统不同，按 Esc 可以退回选择器。在已注册的工作区目录里启动时，直接选中该工作区而不再显示选择器（会话列表里的 `←` 仍可切到别的工作区）；命令行给出会话 ID 时依旧直接打开。新建会话前必须选择工作区。
+
+宿主不可达时，启动选择器显示的是原因与解决办法，而不是一个空列表：尚在进行的首次尝试写成"连接中"；连不上宿主时给出启动它的 `npx @deepseek-ai/dsh web` 命令与首次运行所需的 `DSH_URL` 行；凭据被拒时要求该 URL 或 `DSH_TOKEN`。原始传输错误以暗色诊断信息留在下方，客户端自行持续重连。
 
 首次登录通过 `GET /` 兑换 token，并按 HTTP origin 保存 cookie。后续启动和列表命令自动复用 cookie，无需再次提供 token。默认目录为 `$XDG_STATE_HOME/dsht/auth`，未设置时使用 `~/.local/state/dsht/auth`；可通过 `--auth-dir` 或 `DSHT_AUTH_DIR` 覆盖。POSIX 下目录权限为 0700、cookie 文件为 0600；Windows 使用账户目录继承的访问控制。启动 token 永不保存。
 
