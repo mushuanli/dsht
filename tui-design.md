@@ -1263,7 +1263,7 @@ C4Component
 
 工作区汇总随宽度分档：宽屏写 `? 1 needs you · ◐ 2 working · ● 6 ready`，标题占固定左列、状态列紧随其后、路径右对齐（`workspaceDetail()` 在标题已命名最后一段时只留下父目录，路径按显示宽度从**左侧**截断）；窄屏只留 `?1 ◐2 ●6`，并在标题下给出一行 `● ready · ◐ working · ? needs you`（`ROLLUP_LEGEND`）作为图例。所有计数为零的状态都不显示，`Picker` 的表格列宽按可用列数（`PickerScreen` 传入的 composer 内宽）计算，长行不再折行。状态只取 `running`、`blank` 与本客户端的未答计数，仍不从静默推断停滞。
 
-工作区选择器最后两项都是注册入口：`+ Add workspace (this directory)` 直接用 `Controller.localDirectory`（进程启动目录，默认为 `process.cwd()`）注册 `dsht` 自身所在目录，并且只在服务端没有同路径工作区时出现——常见的同机场景因此不必手输路径；`+ Add workspace (host directory)` 进入输入界面，输入的服务端绝对路径可以与本机文件系统不同。输入界面是独立 screen（`state.screen === 'path'`），因此 Esc 通过 `showPicker('workspaces')` 退回选择器并清空草稿：选择器的按键在草稿非空时被禁用，留下草稿会让它再也无法操作。
+工作区选择器的两条注册入口分别居于首尾：`+ Add workspace (this directory)` 直接用 `Controller.localDirectory`（进程启动目录，默认为 `process.cwd()`）注册 `dsht` 自身所在目录，只在服务端没有同路径工作区时出现，并且排在列表最前——它因此也是默认选中行，在未注册目录里启动时按一次 Enter 就能完成最常见的同机注册，不必手输路径；`+ Add workspace (host directory)` 排在列表最后，进入输入界面，输入的服务端绝对路径可以与本机文件系统不同。输入界面是独立 screen（`state.screen === 'path'`），因此 Esc 通过 `showPicker('workspaces')` 退回选择器并清空草稿：选择器的按键在草稿非空时被禁用，留下草稿会让它再也无法操作。
 
 单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`? Needs you`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。本客户端还欠一个回答时（`state.pending` 非空）`? Needs you` 优先于 `⏸ <原因>`：暂停原因只说明时钟为何不动，欠下的回答才是用户必须处理的事，展开面板的 activity 行同样改报 `? Needs you · answer the request above to continue`。
 

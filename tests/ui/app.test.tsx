@@ -111,6 +111,8 @@ test('with nothing selected, Esc on the session list steps back to the workspace
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
   await until(() => controller.state.online && ui.lastFrame()?.includes('Project α') === true);
+  // The local-directory row leads the list here, so the registered workspace is one step down.
+  await pressKey(ui, '\u001b[B');
   // Picking a workspace opens its sessions; there is no conversation to return to yet.
   await pressKey(ui, '\r');
   await until(() => controller.state.screen === 'sessions' && ui.lastFrame()?.includes('Choose session') === true);
@@ -126,8 +128,9 @@ test('the workspace picker offers this client directory, and Esc leaves the type
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
   await until(() => ui.lastFrame()?.includes('Project α') === true);
-  // The row names the directory it would register, so the common case needs no typing at all.
-  await until(() => ui.lastFrame()?.includes(`+ Add workspace (this directory)  ${here}`) === true);
+  // The row names the directory it would register and leads the list, so the common case is both
+  // visible and the default selection; nothing has to be typed or scrolled to.
+  await until(() => ui.lastFrame()?.includes(`❯ + Add workspace (this directory)  ${here}`) === true);
   // A typed host path is a screen of its own: Esc goes back to the picker instead of trapping it.
   await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B');
   await pressKey(ui, '\r');
@@ -138,8 +141,8 @@ test('the workspace picker offers this client directory, and Esc leaves the type
   await pressKey(ui, '\u001b');
   await until(() => controller.state.screen === 'workspaces' && ui.lastFrame()?.includes('Choose workspace') === true);
   assert.equal(ui.lastFrame()?.includes('/srv/partial'), false);
-  // Choosing the local row registers exactly the directory this client runs in.
-  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B');
+  // Choosing the local row registers exactly the directory this client runs in. Coming back to the
+  // picker remounts it, so the leading row is selected again and Enter alone takes it.
   await pressKey(ui, '\r');
   await until(() => fixture.calls.some(call => call.method === 'workspace/create') && controller.queries.foreground === undefined);
   const created = object(object(object(fixture.calls.find(call => call.method === 'workspace/create')!.payload).args).request);
@@ -187,6 +190,8 @@ test('startup requires workspace and session selection before showing the compos
   assert.match(ui.lastFrame()!, /Choose workspace/);
   assert.doesNotMatch(ui.lastFrame()!, /Connecting…|Offline/);
   assertInsideComposer(ui.lastFrame()!, 'Choose workspace');
+  // The local-directory row leads, so the registered workspace is one step down.
+  await press('\u001b[B');
   await press('\r');
   await until(() => ui.lastFrame()?.includes('Choose session') === true);
   await press('\u001b[B');
@@ -961,7 +966,9 @@ test('an idle bar re-reads the clock so the day subtotal rolls over at midnight'
 });
 
 test('the pickers show each session state and a workspace rollup from the list summary', async t => {
-  const controller = new Controller({ base: 'http://x1:4096' });
+  // The registered path is also this client's directory, so the "add this directory" row stays out
+  // of the list and the first row is the workspace the rollup is about.
+  const controller = new Controller({ base: 'http://x1:4096', localDirectory: '/host/project' });
   const now = Date.now();
   controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
     workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2', 's3'] }],
@@ -1002,7 +1009,9 @@ test('the bar names an answer the user still owes ahead of the running clock', (
 });
 
 test('a narrow workspace picker keeps the markers and spells them out once', async t => {
-  const controller = new Controller({ base: 'http://x1:4096' });
+  // Matching the client directory to the registered path keeps the leading local row out, so the
+  // narrow width is spent on the workspace row this test measures.
+  const controller = new Controller({ base: 'http://x1:4096', localDirectory: '/host/project' });
   controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
     workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2'] }],
     sessions: [{ sessionId: 's1', running: true }, { sessionId: 's2', blank: true }] };
@@ -1222,6 +1231,8 @@ test('workspace removal and session archival require confirmation and preserve h
   await command('/ws');
   await pressKey(ui, '\x7f');
   assert.doesNotMatch(ui.lastFrame()!, /Remove workspace registration/);
+  // The local-directory row leads and owns no removal, so step down to the registered workspace.
+  await pressKey(ui, '\u001b[B');
   await pressKey(ui, 'd');
   await until(() => ui.lastFrame()?.includes('Remove workspace registration?') === true);
   assert.doesNotMatch(ui.lastFrame()!, /❯ d/);
@@ -1229,6 +1240,8 @@ test('workspace removal and session archival require confirmation and preserve h
   await pressKey(ui, '/d');
   assert.doesNotMatch(ui.lastFrame()!, /Remove workspace registration/);
   await pressKey(ui, '\x03');
+  // Esc and the cleared draft both bring the picker back at its leading row, so step down again.
+  await pressKey(ui, '\u001b[B');
   await pressKey(ui, '\u001b[3~');
   await until(() => ui.lastFrame()?.includes('Remove workspace registration?') === true);
   assert.match(ui.lastFrame()!, /ID: w1/);

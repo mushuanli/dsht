@@ -676,6 +676,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Needs-you is the one state that asks for action, so it outranks working; ready stays quiet.
   const stateColor: Record<RollupState, string> = { needs: theme.status.critical, running: theme.status.working, idle: theme.colors.muted };
   const choices: Choice[] = state.screen === 'workspaces' ? [
+    // The directory this client runs in is the one case where no path has to be typed, and offering
+    // it only while the host has not registered it keeps the row from repeating itself. It leads the
+    // list so it is also the default selection: starting outside a registered workspace is exactly
+    // the situation the row exists for.
+    ...(state.workspaces.some(workspace => string(workspace.path) === controller.localDirectory) ? []
+      : [{ key: '@here', label: `+ Add workspace (this directory)  ${controller.localDirectory}`,
+        action: () => operate(() => controller.actions.createWorkspace(controller.localDirectory)) }]),
     ...state.workspaces.map(workspace => {
       const counts = workspaceCounts(sessionsOf(workspace), new Set(pendingCounts.keys()));
       const name = string(workspace.title);
@@ -690,11 +697,6 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         action: () => controller.actions.pickWorkspace(string(workspace.workspaceId)) };
     }),
     { key: '@all', label: 'All sessions', action: () => operate(() => controller.actions.switchSession('all')) },
-    // The directory this client runs in is the one case where no path has to be typed, and offering
-    // it only while the host has not registered it keeps the row from repeating itself.
-    ...(state.workspaces.some(workspace => string(workspace.path) === controller.localDirectory) ? []
-      : [{ key: '@here', label: `+ Add workspace (this directory)  ${controller.localDirectory}`,
-        action: () => operate(() => controller.actions.createWorkspace(controller.localDirectory)) }]),
     { key: '@new', label: '+ Add workspace (host directory)', action: () => controller.actions.enterPath() },
   ] : [
     ...(state.workspaceId && !state.showAllSessions ? [{ key: '@new', label: '+ New session', action: () => operate(() => controller.actions.createSession()) }] : []),
