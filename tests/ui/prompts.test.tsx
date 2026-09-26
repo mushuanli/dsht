@@ -239,3 +239,31 @@ test('/prompt reports a file it cannot read instead of failing the client', asyn
   await until(() => app.frame().includes('could not be read') === true);
   assert.equal(app.frame().includes('No saved prompts'), true);
 });
+
+test('a chosen shortcut that ends in a mention sends on the next Enter', async t => {
+  const app = await mount(t);
+  const text = 'Explain this code @missing';
+  await app.controller.promptStore.save(text);
+  await app.press('/prompt'); await app.press('\r');
+  await until(() => app.frame().includes(text));
+  await app.press('\u001b[B'); await app.press('\u001b[B'); await app.press('\r');
+  await until(() => composer(app.frame()) === text);
+  // A shortcut is a finished line, so the mention menu must not open over it and take Enter.
+  assert.equal(app.frame().includes('Host files ·'), false);
+  await app.press('\r');
+  await until(() => app.fixture.calls.some(call => call.method === 'session/prompt'));
+  const sent = app.fixture.calls.filter(call => call.method === 'session/prompt').at(-1)!;
+  assert.deepEqual(array(object(object(object(sent.payload).args).request).content), [{ type: 'text', text }]);
+});
+
+test('an unmatched mention keeps its menu but lets Enter send the draft', async t => {
+  const app = await mount(t);
+  await app.press('hello @missing');
+  await until(() => app.frame().includes('No matching host files'));
+  // A completion list is not a dialog: the clock keeps running instead of reporting a pause.
+  assert.equal(app.frame().includes('⏸ dialog'), false);
+  await app.press('\r');
+  await until(() => app.fixture.calls.some(call => call.method === 'session/prompt'));
+  const sent = app.fixture.calls.filter(call => call.method === 'session/prompt').at(-1)!;
+  assert.deepEqual(array(object(object(object(sent.payload).args).request).content), [{ type: 'text', text: 'hello @missing' }]);
+});

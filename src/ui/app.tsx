@@ -192,10 +192,17 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const loopMenuOpen = loopCandidates.length > 0 && loopForm === undefined && dismissedLoopMenu !== input;
   const loopMenuCursor = Math.min(loopMenuIndex, Math.max(0, loopCandidates.length - 1));
   const { openSurfaces, reservedKeys: surfaceReservedKeys } = panelState;
-  const dialogOpen = !!(openSurfaces.length || pending || referenceOpen || state.screen !== 'chat');
+  // A modal owns the screen: a panel, an interaction the operator still owes an answer to, or a
+  // startup screen. Only a modal pauses the clock — and says so — because only a modal is somewhere
+  // the reader stopped to look rather than somewhere they are still writing.
+  const modalOpen = !!(openSurfaces.length || pending || state.screen !== 'chat');
+  // The composer's `@` menu is a completion list under the draft, not a dialog: it needs the layout
+  // room a panel gets, but calling it a dialog made the status bar report a pause that was not there
+  // and hid the one surface that could explain a key which the menu itself was holding.
+  const dialogOpen = modalOpen || referenceOpen;
   const displayPaused = copyMode || dialogOpen;
   // Startup screens need live connection feedback even while their picker remains open.
-  const statusPaused = copyMode || (state.screen === 'chat' && dialogOpen);
+  const statusPaused = copyMode || (state.screen === 'chat' && modalOpen);
   const matches = referenceOpen && lookup?.draft === input && lookup.sessionId === state.sessionId ? lookup : undefined;
   useEffect(() => {
     if (!referenceOpen) return;
@@ -548,8 +555,14 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         candidates: loopCandidates.length, chosen: highlighted.name });
     }
     const line = highlighted === undefined ? raw : `/loop ${highlighted.name}`;
+    // A mention menu with nothing left to insert owns no key: its Enter can only mean "accept the
+    // highlighted candidate", and with no candidate it meant nothing at all — a dead Enter on a draft
+    // that was perfectly sendable. The menu stays on screen (its "No matching host files" line is the
+    // feedback), but the draft is submitted. While the lookup is still in flight `matches` is
+    // undefined and the menu keeps Enter, so a slow listing cannot be raced by a send.
+    const referenceEmpty = referenceOpen && matches !== undefined && matches.items.length === 0;
     // The pipeline decides what the line means; the root only carries out the three stages' results.
-    const submission = interpret({ line, referenceOpen, copyMode, screen: state.screen });
+    const submission = interpret({ line, referenceOpen: referenceOpen && !referenceEmpty, copyMode, screen: state.screen });
     if (submission.kind === 'mode') {
       if (submission.action.kind === 'ignore') return;
       pickReference(); return;
@@ -820,7 +833,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Reading older history pauses the clock without freezing the connection state on picker screens.
   // A paused clock is named rather than left frozen: a stopped number looks like a stall.
   const pauseReason: 'copy' | 'dialog' | 'history' | undefined = copyMode ? 'copy'
-    : state.screen === 'chat' && dialogOpen ? 'dialog'
+    : state.screen === 'chat' && modalOpen ? 'dialog'
     : state.screen === 'chat' && position > 0 ? 'history'
     : undefined;
   const statusFrozen = pauseReason !== undefined;
@@ -935,7 +948,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {promptsOpen && state.screen === 'chat' && <PromptsDialog identity="prompts"
         prompts={controller.queries.prompts} error={controller.queries.promptsError} width={width}
         enabled={!input && foreground === undefined} canSelect={() => !input && controller.queries.foreground === undefined}
-        onChoose={text => { setInput(text); openPrompts(false); }}
+        onChoose={text => {
+          setInput(text);
+          // A shortcut is a finished line, not a draft being written: if it ends in a mention, the
+          // completion menu must not open and own Enter, or choosing it would dead-key the composer.
+          setDismissedReference(text);
+          openPrompts(false);
+        }}
         onEdit={prompt => {
           setComposerIntent({
             hint: 'Editing saved prompt · Enter saves · Esc cancels',

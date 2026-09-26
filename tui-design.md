@@ -280,7 +280,7 @@ PromptRecord 属于 `session/transcript.ts` 的投影输出，提示词索引消
 
 **扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。`usePanels` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键及保留键，关闭操作由同一 hook 处理，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
-阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话；状态另用 `statusPaused = copyMode || (screen === 'chat' && dialogOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 对话框与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
+阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话，而 `dialogOpen = modalOpen || referenceOpen` 只回答"是否要让出一行布局"；`modalOpen`（面板、待答交互、非 chat 屏）才是"停下来读的一屏"，暂停时钟与 `⏸ dialog` 只由它派生。输入框里的 `@` 补全列表是正在写的一行而不是读的一屏，把它也算作暂停面会让状态栏报出并不存在的暂留，并遮住唯一能解释按键归属的界面。状态另用 `statusPaused = copyMode || (screen === 'chat' && modalOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 模态面与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
 ### 2.6 关键架构决策
 
