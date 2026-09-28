@@ -23,14 +23,16 @@ interface Surface {
   open: boolean;
   arrows?: boolean;
   blocksKeys?: boolean;
+  /** The panel reads no free text, so the composer behind it is parked until the panel closes. */
+  parksComposer?: boolean;
   reserved?: readonly string[];
 }
 
 const EMPTY: PanelState = { thoughts: false, queue: false, prompts: false, help: false, cost: false, status: false };
 const TRAITS: readonly (Omit<Surface, 'open' | 'name'> & { name: PanelName })[] = [
-  { name: 'queue', reserved: ['d'] },
-  { name: 'prompts', arrows: true, blocksKeys: true, reserved: ['d', 'e'] },
-  ...(['removal', 'model', 'loop', 'thoughts', 'history', 'search'] as const).map(name => ({ name, arrows: true, blocksKeys: true })),
+  { name: 'queue', reserved: ['d'], parksComposer: true },
+  { name: 'prompts', arrows: true, blocksKeys: true, reserved: ['d', 'e'], parksComposer: true },
+  ...(['removal', 'model', 'loop', 'thoughts', 'history', 'search'] as const).map(name => ({ name, arrows: true, blocksKeys: true, parksComposer: true })),
   ...(['help', 'cost', 'status'] as const).map(name => ({ name, blocksKeys: true })),
 ];
 

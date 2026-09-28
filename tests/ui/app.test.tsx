@@ -213,6 +213,11 @@ test('startup requires workspace and session selection before showing the compos
   await until(() => ui.lastFrame()?.includes('❯ src/') === true);
   const expected = await readFile(new URL('../expected/file-references.txt', import.meta.url), 'utf8');
   for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
+  // The completion list wraps too: ↑ on the first candidate lands on the last, ↓ comes back.
+  await press('\u001b[A');
+  await until(() => ui.lastFrame()?.includes('❯ README.md') === true);
+  await press('\u001b[B');
+  await until(() => ui.lastFrame()?.includes('❯ src/') === true);
   const before = fixture.calls.filter(call => call.method === 'session/prompt').length;
   await press('\t');
   await until(() => ui.lastFrame()?.includes('❯ src/hello world.ts') === true);
@@ -995,6 +1000,24 @@ test('the pickers show each session state and a workspace rollup from the list s
   assert.match(frame, /○ Blank one  s3/, frame);
 });
 
+test('a picker wraps its arrows, so neither end of the list is a dead key', async t => {
+  // The registered path is not this client's directory, so the leading "add this directory" row is
+  // present and gives the list a first row the test can name.
+  const controller = new Controller({ base: 'http://x1:4096', localDirectory: '/elsewhere' });
+  controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
+    workspaces: [{ workspaceId: 'w1', title: 'Only one', path: '/host/project', sessionIds: [] }], sessions: [] };
+  let ui!: ReturnType<typeof render>;
+  await act(async () => { ui = render(<App controller={controller} />); });
+  t.after(() => { ui.unmount(); ui.cleanup(); });
+  assert.match(ui.lastFrame()!, /❯ \+ Add workspace \(this directory\)/);
+  // ↑ on the first row lands on the last row instead of stopping.
+  await pressKey(ui, '\u001b[A');
+  assert.match(ui.lastFrame()!, /❯ \+ Add workspace \(host directory\)/);
+  // ↓ on the last row comes back around to the first.
+  await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ \+ Add workspace \(this directory\)/);
+});
+
 test('the bar names an answer the user still owes ahead of the running clock', () => {
   const controller = new Controller({ base: 'http://x1:4096' });
   controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
@@ -1344,11 +1367,11 @@ test('question options support numbers, arrows, multi-selection and numeric cust
   assert.match(ui.lastFrame()!, /Question 1\/3 · Destination/);
   assert.match(ui.lastFrame()!, /First description/);
   assertInsideComposer(ui.lastFrame()!, 'First description');
+  // A single-choice question is answered by the number itself: no highlight waits for an Enter, and
+  // the batch still submits only once every question has an answer.
   await pressKey(ui, '2');
-  assert.match(ui.lastFrame()!, /❯ 2\. Second/);
-  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
-  await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Choose features') === true);
+  assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
   await pressKey(ui, '1');
   await pressKey(ui, '\u001b[B'); await pressKey(ui, ' ');
   assert.match(ui.lastFrame()!, /1\. \[x\] A/);
@@ -1373,6 +1396,27 @@ test('question options support numbers, arrows, multi-selection and numeric cust
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt' || call.method === 'session/cancel'), false);
 });
 
+test('question arrows wrap through the typing row, and a number answers outright', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'wrap-options', agentId: 's1', request: { questions: [
+    { id: 'one', question: 'Pick a colour', options: [{ label: 'Red' }, { label: 'Blue' }] },
+  ] } }];
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => ui.lastFrame()?.includes('Pick a colour') === true);
+  // ↑ from the first option wraps past the last to the typing row, and ↓ comes back around.
+  await pressKey(ui, '\u001b[A');
+  assert.match(ui.lastFrame()!, /❯ Other answer/);
+  await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ 1\. Red/);
+  // A number settles the question instead of highlighting a row that still needs an Enter.
+  await pressKey(ui, '2');
+  await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
+  const reply = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
+  assert.deepEqual(object(reply.outcome).value, { answers: [{ id: 'one', selected: ['Blue'] }] });
+});
+
 test('Escape dismisses the whole question set as a rejection, discarding partial answers', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   fixture.replayInteractions = [{ type: 'waterfall', event: 'user-questions/request', eventId: 'dismiss-me', agentId: 's1', request: { questions: [
@@ -1383,9 +1427,8 @@ test('Escape dismisses the whole question set as a rejection, discarding partial
   const ui = render(<App controller={controller} />);
   t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start(); await until(() => ui.lastFrame()?.includes('Choose a target') === true);
-  // The first question is answered locally, so the dismissal has partial state to throw away.
+  // The first question is answered by its number, so the dismissal has partial state to throw away.
   await pressKey(ui, '1');
-  await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('And then?') === true);
   assert.match(ui.lastFrame()!, /Esc dismisses/);
   assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
@@ -1462,9 +1505,12 @@ test('advancing questions preserves every option label beside descriptions in a 
   await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('After committing, how far') === true);
   const frame = ui.lastFrame()!;
-  for (const text of ['Recent decision context', 'Question 2/2 · After commit', '❯ 1. Push only', '2. Publish release', '3. Keep local', '4. Other answer', 'Irreversible.']) {
+  for (const text of ['Recent decision context', 'Question 2/2 · After commit', '❯ 1. Push only', '2. Publish release', '3. Keep local', 'Other answer — type below', 'Irreversible.']) {
     assert.ok(frame.includes(text), `${text}\n${frame}`);
   }
+  // The typing row carries no number: a number there would promise a key that has to land in the
+  // composer instead, so only the fixed choices are numbered.
+  assert.doesNotMatch(frame, /\d+\. Other answer/);
   await pressKey(ui, '\u001b[B');
   assert.match(ui.lastFrame()!, /❯ 2\. Publish release/);
   Object.defineProperty(ui.stdout, 'rows', { value: 20, configurable: true });
@@ -1474,7 +1520,7 @@ test('advancing questions preserves every option label beside descriptions in a 
   assert.match(ui.lastFrame()!, /Recent decision context/);
   assert.match(ui.lastFrame()!, /Enter confirm/);
   await pressKey(ui, '\u001b[B');
-  assert.match(ui.lastFrame()!, /❯ 4\. Other answer/);
+  assert.match(ui.lastFrame()!, /❯ Other answer/);
   assert.equal(fixture.calls.some(call => call.method === '$events/result'), false);
 });
 
@@ -1688,6 +1734,9 @@ test('open panels belong to their session and clear on a switch', async t => {
   // `/queue` opens a real panel; it is component state, so it exists only in this screen.
   await pressKey(ui, '/queue'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Pending input') === true);
+  // The queue panel reads no free text, so it parks the composer: Esc is what hands the keyboard
+  // back before the next command can be typed.
+  await pressKey(ui, '\u001b');
   // `/think` and `/model` open the other panels; each belongs to the screen, not to the session.
   await pressKey(ui, '/think'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Back to conversation') === true);
@@ -1695,6 +1744,25 @@ test('open panels belong to their session and clear on a switch', async t => {
   await until(() => controller.state.sessionId === 's2' && controller.queries.record.ready && controller.queries.foreground === undefined);
   assert.doesNotMatch(ui.lastFrame()!, /Pending input/, 'the panel did not follow the reader');
   assert.doesNotMatch(ui.lastFrame()!, /Back to conversation/, 'the reasoning panel did not follow the reader');
+});
+
+test('a menu that reads no text parks the composer instead of leaving it half-live', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.record.ready);
+  await pressKey(ui, '/queue'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Pending input') === true);
+  // The panel has no field of its own, so a keystroke aimed at it must not become a draft — and it
+  // must not silently turn the list off the way a non-empty draft used to.
+  await pressKey(ui, 'ignored draft');
+  assert.match(ui.lastFrame()!, /Pending input/, 'the panel keeps the keyboard');
+  assert.equal(ui.lastFrame()!.includes('ignored draft'), false);
+  // Esc hands the composer back, so the very same keys are a draft again.
+  await pressKey(ui, '\u001b');
+  await pressKey(ui, 'typed draft');
+  await until(() => ui.lastFrame()?.includes('❯ typed draft') === true);
 });
 
 
@@ -2034,7 +2102,7 @@ test('working input automatically steers, stays inside the composer, and can be 
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 3);
 });
 
-test('approval numbers and arrows require explicit selection and preserve command drafts', async t => {
+test('approval numbers answer at once, arrows still confirm, and command drafts are preserved', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
@@ -2046,28 +2114,34 @@ test('approval numbers and arrows require explicit selection and preserve comman
   await until(() => controller.state.online && controller.queries.foreground === undefined);
   await pressKey(ui, 'half-written message');
   await until(() => ui.lastFrame()?.includes('half-written message') === true);
-  for (const [index, keys] of [['1'], ['\u001b[B', '\u001b[B']].entries()) {
-    fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: `numbered-${index}`, agentId: 's1', request: { toolName: 'bash', reason: 'Confirm operation' } });
-    await until(() => ui.lastFrame()?.includes('Approval required') === true);
-    const expected = await readFile(new URL('../expected/approval-options.txt', import.meta.url), 'utf8');
-    for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
-    assert.equal(ui.lastFrame()!.includes('half-written message'), false, ui.lastFrame());
-    await pressKey(ui, '\r');
-    assert.equal(results().length, index);
-    for (const key of keys) await pressKey(ui, key);
-    assert.equal(results().length, index);
-    await pressKey(ui, '\r');
-    await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
-    // Settling the last request hands the parked draft back.
-    await until(() => ui.lastFrame()?.includes('half-written message') === true);
-    const result = object(object(results().at(-1)!.payload).args);
-    assert.equal(object(result.outcome).value, index === 0 ? 'allowed-once' : 'rejected');
-  }
+  // The number is the decision: it settles the request without a following Enter.
+  fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'numbered-one', agentId: 's1', request: { toolName: 'bash', reason: 'Confirm operation' } });
+  await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  const expected = await readFile(new URL('../expected/approval-options.txt', import.meta.url), 'utf8');
+  for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
+  assert.equal(ui.lastFrame()!.includes('half-written message'), false, ui.lastFrame());
+  assert.equal(results().length, 0);
+  await pressKey(ui, '1');
+  await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
+  // Settling the request hands the parked draft back.
+  await until(() => ui.lastFrame()?.includes('half-written message') === true);
+  const allowed = object(object(results().at(-1)!.payload).args);
+  assert.equal(object(allowed.outcome).value, 'allowed-once');
+  // An arrow only highlights a row; Enter is still what confirms it.
+  fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'arrow-denied', agentId: 's1', request: { toolName: 'bash', reason: 'Confirm operation' } });
+  await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  await pressKey(ui, '\u001b[B'); await pressKey(ui, '\u001b[B');
+  assert.match(ui.lastFrame()!, /❯ 2\. Deny/);
+  assert.equal(results().length, 1);
+  await pressKey(ui, '\r');
+  await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
+  const denied = object(object(results().at(-1)!.payload).args);
+  assert.equal(object(denied.outcome).value, 'rejected');
+  // Stop turn cancels the running turn rather than posting an event result.
   fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'stop-numbered', agentId: 's1', request: { description: 'Confirm stop' } });
   await until(() => ui.lastFrame()?.includes('Confirm stop') === true);
-  await pressKey(ui, '3');
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
-  await pressKey(ui, '\r');
+  await pressKey(ui, '3');
   await until(() => fixture.calls.some(call => call.method === 'session/cancel'));
   assert.equal(results().length, 2);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
@@ -2092,10 +2166,11 @@ test('approval selection starts unselected, clears on Escape and resets when the
   const allowed = object(object(results().at(-1)!.payload).args);
   assert.equal(object(allowed.outcome).value, 'allowed-once');
   assert.equal(cancellations(), 0);
-  // Escape clears the highlight, so a later Enter neither answers nor cancels.
+  // Escape clears the highlight, so a later Enter neither answers nor cancels. Two upward arrows
+  // walk the ring through the first choice and round to Stop turn, which is the wrap under test.
   request('escape-clears');
   await until(() => ui.lastFrame()?.includes('Approval required') === true);
-  await pressKey(ui, '3');
+  await pressKey(ui, '\u001b[A'); await pressKey(ui, '\u001b[A');
   assert.match(ui.lastFrame()!, /❯ 3\. Stop turn/);
   await pressKey(ui, '\u001b');
   assert.doesNotMatch(ui.lastFrame()!, /❯ [123]\./);
@@ -2103,8 +2178,9 @@ test('approval selection starts unselected, clears on Escape and resets when the
   await until(() => controller.queries.foreground === undefined);
   assert.equal(results().length, 1);
   assert.equal(cancellations(), 0);
-  // Answering clears the request; when the same identity returns it is unselected again.
-  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  // Answering clears the request; when the same identity returns it is unselected again. A number
+  // answers outright, so no Enter follows it.
+  await pressKey(ui, '2');
   await until(() => controller.state.pending.length === 0);
   const denied = object(object(results().at(-1)!.payload).args);
   assert.equal(object(denied.outcome).value, 'rejected');
@@ -2115,7 +2191,7 @@ test('approval selection starts unselected, clears on Escape and resets when the
   await until(() => controller.queries.foreground === undefined);
   assert.equal(results().length, 2);
   assert.equal(cancellations(), 0);
-  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await pressKey(ui, '2');
   await until(() => controller.state.pending.length === 0);
 });
 
@@ -2137,14 +2213,14 @@ test('questions and approvals take precedence over the pending-input picker', as
   await until(() => ui.lastFrame()?.includes('Choose an action') === true);
   assert.equal(await controller.actions.prompt('stale composer submission'), false);
   assert.match(controller.state.lastFailure, /pending question or approval/);
-  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await pressKey(ui, '2');
   await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
   const answer = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
   assert.deepEqual(object(answer.outcome).value, { answers: [{ id: 'q', selected: ['Change'] }] });
   fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'approval-with-queue', agentId: 's1', request: { description: 'Confirm operation' } });
   await until(() => ui.lastFrame()?.includes('Approval required') === true);
   // The approval owns the keyboard, so it is answered from its own list rather than by a command.
-  await pressKey(ui, '1'); await pressKey(ui, '\r');
+  await pressKey(ui, '1');
   await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
   const approval = object(object(fixture.calls.filter(call => call.method === '$events/result').at(-1)!.payload).args);
   assert.equal(object(approval.outcome).value, 'allowed-once');
@@ -2236,12 +2312,12 @@ test('questions, approvals and model dialogs retain recent context above the com
   assert.match(ui.lastFrame()!, /❯ 1\. Continue/);
   await pressKey(ui, '\u001b[6~');
   assert.match(ui.lastFrame()!, /Recent decision context/);
-  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await pressKey(ui, '2');
   await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
   fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'context-approval', agentId: 's1', request: { description: 'Confirm operation' } });
   await until(() => ui.lastFrame()?.includes('Approval required') === true);
   assert.match(ui.lastFrame()!, /Recent decision context/);
-  await pressKey(ui, '2'); await pressKey(ui, '\r');
+  await pressKey(ui, '2');
   await until(() => controller.state.pending.length === 0 && controller.queries.foreground === undefined);
   await pressKey(ui, '/model'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Choose model') === true);
@@ -2462,6 +2538,12 @@ test('/loop lists its records, opens the chosen inputs and runs exactly those va
   await pressKey(ui, '/loop');
   await until(() => ui.lastFrame()?.includes('Loop records') === true);
   assert.match(ui.lastFrame()!, /❯ design-review · Design review · 10 rounds · pass 8 · ≤10 tries · DESIGN-REVIEW\.md/);
+  // ↑ on the first record wraps to the last, and ↓ from the last comes back to the first.
+  const records = controller.queries.loopRecords;
+  await pressKey(ui, '\u001b[A');
+  await until(() => ui.lastFrame()!.includes(`❯ ${records[records.length - 1]!.name} · `) === true);
+  await pressKey(ui, '\u001b[B');
+  await until(() => ui.lastFrame()?.includes('❯ design-review · ') === true);
   await pressKey(ui, '\u001b[B');
   await until(() => ui.lastFrame()?.includes('❯ designdoc-review') === true);
   // Enter confirms the highlighted record and opens its defaults instead of running blind.

@@ -23,7 +23,7 @@ import { plainRows } from './chat/shell-view.ts';
 import { useHistoryView } from './chat/use-history-view.ts';
 import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
-import type { Choice } from './dialogs/picker.tsx';
+import { cycle, type Choice } from './dialogs/picker.tsx';
 import { HelpPanel, HistoryDialog, ModelDialog, OfflinePanel, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
 import { offlineGuidance } from './offline.ts';
 import { LoopDialog, LoopMenu, type LoopRun } from './dialogs/loop.tsx';
@@ -241,6 +241,9 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // One open surface owns the arrow and digit keys; the picker screens and the composer are not
   // keyboard owners. The traits live in `surfaces`, so no panel is named here.
   const panelBlocksKeys = openSurfaces.some(surface => surface.blocksKeys);
+  // A menu that reads no free text parks the composer it covers: the draft below is neither a field
+  // of that menu nor something it can submit, so a keystroke aimed at the list must not land in it.
+  const panelParksComposer = openSurfaces.some(surface => surface.parksComposer);
   // Composer recall yields only to a surface that uses the arrows itself: the pickers, and a status
   // panel with more lines than the view holds. The help and cost panels and a fitting status panel
   // leave the arrows with the history, and Ctrl+P/N reach it from every surface.
@@ -415,10 +418,16 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (approvalKeysActive && !input && controller.state.online && controller.queries.foreground === undefined
       && controller.state.pending[0]?.eventId === eventId && !key.ctrl && !key.meta) {
       const digit = /^[1-3]$/.test(_value) ? Number(_value) - 1 : -1;
-      if (digit >= 0 || key.upArrow || key.downArrow) {
+      // A numbered approval is answered by its number: each row *is* the decision, so 1–3 settles it
+      // at once instead of leaving a highlight that still needs an Enter.
+      if (digit >= 0) {
+        controller.actions.setApproval({ eventId, index: digit });
+        operate(() => digit === 2 ? controller.actions.cancelTurn() : controller.actions.approve(digit === 0));
+        return;
+      }
+      if (key.upArrow || key.downArrow) {
         // An unselected list enters at the first, non-destructive choice, so a stray arrow plus Enter cannot cancel.
-        const index = digit >= 0 ? digit : approvalIndex < 0 ? 0
-          : Math.max(0, Math.min(2, approvalIndex + (key.upArrow ? -1 : 1)));
+        const index = approvalIndex < 0 ? 0 : cycle(approvalIndex, key.upArrow ? -1 : 1, 3);
         controller.actions.setApproval({ eventId, index }); return;
       }
       if (key.return) {
@@ -430,15 +439,21 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (questionKeysActive && !input && controller.queries.foreground === undefined && !key.ctrl && !key.meta) {
       const digit = /^[1-9]$/.test(_value) ? Number(_value) - 1 : -1;
       if (key.upArrow || key.downArrow) {
-        controller.actions.setOption({ ...choiceState, cursor: Math.max(0, Math.min(options.length, optionCursor + (key.upArrow ? -1 : 1))) }); return;
+        // The input row is one more stop after the options, so the ring is one longer than the list.
+        controller.actions.setOption({ ...choiceState, cursor: cycle(optionCursor, key.upArrow ? -1 : 1, options.length + 1) }); return;
       }
-      if (digit >= 0 && digit <= options.length || _value === ' ' && question!.multiSelect === true && optionCursor < options.length) {
+      if ((digit >= 0 && digit < options.length) || _value === ' ' && question!.multiSelect === true && optionCursor < options.length) {
         const index = digit >= 0 ? digit : optionCursor;
-        const label = index < options.length ? string(options[index]!.label) : undefined;
-        const selected = question!.multiSelect === true && label
-          ? choiceState.selected.includes(label) ? choiceState.selected.filter(item => item !== label) : [...choiceState.selected, label]
-          : choiceState.selected;
-        controller.actions.setOption({ ...choiceState, cursor: index, selected }); return;
+        const label = string(options[index]!.label);
+        if (question!.multiSelect === true) {
+          const selected = choiceState.selected.includes(label)
+            ? choiceState.selected.filter(item => item !== label) : [...choiceState.selected, label];
+          controller.actions.setOption({ ...choiceState, cursor: index, selected }); return;
+        }
+        // A single choice is answered by its number: the option is the whole answer, so only a second
+        // question — not a second keypress — stands between the number and the submission.
+        controller.actions.setOption({ ...choiceState, cursor: index });
+        operate(() => controller.actions.answerQuestion({ selected: [label] })); return;
       }
       if (key.return) {
         if (optionCursor === options.length) { controller.actions.setOption({ ...choiceState, custom: true }); return; }
@@ -463,13 +478,13 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         if (chosen !== undefined) setInput(`/loop ${chosen.name}`);
         return;
       }
-      if (key.upArrow) { setLoopMenuIndex(Math.max(0, loopMenuCursor - 1)); return; }
-      if (key.downArrow) { setLoopMenuIndex(Math.min(loopCandidates.length - 1, loopMenuCursor + 1)); return; }
+      if (key.upArrow) { setLoopMenuIndex(cycle(loopMenuCursor, -1, loopCandidates.length)); return; }
+      if (key.downArrow) { setLoopMenuIndex(cycle(loopMenuCursor, 1, loopCandidates.length)); return; }
     }
     if (referenceOpen) {
       if (key.tab) pickReference();
-      else if (key.upArrow) setReferenceIndex(Math.max(0, referenceIndex - 1));
-      else if (key.downArrow) setReferenceIndex(Math.max(0, Math.min((matches?.items.length ?? 1) - 1, referenceIndex + 1)));
+      else if (key.upArrow) setReferenceIndex(cycle(referenceIndex, -1, matches?.items.length ?? 1));
+      else if (key.downArrow) setReferenceIndex(cycle(referenceIndex, 1, matches?.items.length ?? 1));
       return;
     }
     const recallPrevious = key.upArrow || key.ctrl && _value === 'p';
@@ -979,16 +994,18 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           {['Allow once', 'Deny', 'Stop turn'].map((label, index) => <Text key={label} color={approvalIndex === index ? theme.accent : undefined}>
             {approvalIndex === index ? '❯ ' : '  '}{index + 1}. {label}
           </Text>)}
-          <Text dimColor>↑ ↓ / 1–3 select · Enter confirm</Text>
+          <Text dimColor>1–3 answer · ↑ ↓ select · Enter confirm</Text>
         </Box>}
         {options.length > 0 && <Box flexDirection="column" flexShrink={0}>
           {[...options, { label: 'Other answer — type below' } as { label: string; description?: string }].map((option, index) => ({ option, index }))
             .slice(optionStart, optionStart + optionPageSize).map(({ option, index }) => <Box key={index} flexDirection="column" flexShrink={0}>
-              <Text color={index === optionCursor ? theme.accent : undefined} wrap="truncate-end">{index === optionCursor ? '❯ ' : '  '}{index + 1}. {question?.multiSelect === true && index < options.length ? choiceState.selected.includes(option.label) ? '[x] ' : '[ ] ' : ''}{safeText(option.label)}</Text>
+              {/* Only the fixed choices are numbered: the typing row is reached with the arrows, because
+                  a number there would promise a key that has to land in the composer instead. */}
+              <Text color={index === optionCursor ? theme.accent : undefined} wrap="truncate-end">{index === optionCursor ? '❯ ' : '  '}{index < options.length ? `${index + 1}. ` : ''}{question?.multiSelect === true && index < options.length ? choiceState.selected.includes(option.label) ? '[x] ' : '[ ] ' : ''}{safeText(option.label)}</Text>
               {option.description && <Text dimColor wrap="truncate-end">{'     '}{safeText(option.description)}</Text>}
             </Box>)}
           <Text dimColor>{choiceState.custom ? 'Type your answer below · Esc returns to options' : question?.multiSelect === true
-            ? '↑ ↓ move · Space / 1–9 toggle · Enter confirm · Esc dismisses' : '↑ ↓ / 1–9 select · Enter confirm · Esc dismisses'}</Text>
+            ? '↑ ↓ move · Space / 1–9 toggle · Enter confirm · Esc dismisses' : '↑ ↓ move · 1–9 answer · Enter confirm · Esc dismisses'}</Text>
         </Box>}
         <Text dimColor>{question ? options.length > 0
           ? 'Choose "Other answer" to type · the draft is kept while this is open'
@@ -1003,8 +1020,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
             sends the draft when the operation finishes. */}
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(input); }}
           reservedKeys={approvalKeysActive ? ['1','2','3'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : surfaceReservedKeys.length ? surfaceReservedKeys : undefined}
-          width={draftWidth} maxRows={composerRows} promptColor={answerPending ? theme.colors.muted : theme.accent}
-          focus={!copyMode && !answerPending && !loopForm} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
+          width={draftWidth} maxRows={composerRows} promptColor={answerPending || panelParksComposer ? theme.colors.muted : theme.accent}
+          focus={!copyMode && !answerPending && !loopForm && !panelParksComposer} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
       {loopMenuOpen && <LoopMenu records={loopCandidates} index={loopMenuCursor} source={controller.queries.loopSource} />}
       </Box>}

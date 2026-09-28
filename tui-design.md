@@ -278,7 +278,7 @@ PromptRecord 属于 `session/transcript.ts` 的投影输出，提示词索引消
 
 **UI 只读朴素数据**：`contracts.ts` 是只含类型的 UI 契约，`StatusSource`/`CostSource` 取代了状态栏与费用面板的 controller 参数，`Queries.render` 返回 `SessionRender`。
 
-**扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。`usePanels` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键及保留键，关闭操作由同一 hook 处理，`dialogOpen`／`panelBlocksKeys`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
+**扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。`usePanels` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、是否寄存输入框（`parksComposer`）及保留键，关闭操作由同一 hook 处理，`dialogOpen`／`panelBlocksKeys`／`parksComposer`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
 阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话，而 `dialogOpen = modalOpen || referenceOpen` 只回答"是否要让出一行布局"；`modalOpen`（面板、待答交互、非 chat 屏）才是"停下来读的一屏"，暂停时钟与 `⏸ dialog` 只由它派生。输入框里的 `@` 补全列表是正在写的一行而不是读的一屏，把它也算作暂停面会让状态栏报出并不存在的暂留，并遮住唯一能解释按键归属的界面。状态另用 `statusPaused = copyMode || (screen === 'chat' && modalOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 模态面与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
@@ -481,7 +481,7 @@ class Client {
 关闭后的实例不能再次 connect；仅对端断线时可以保留 Cookie 重连，失败握手在清理完成后也允许重试。
 ConnectionController 每个重连代际创建新 Client；认证、握手、基线及应用初始化之间检查停止信号。
 `ConnectionStreams` 管 `$events` / `session/control`、基线超时及订阅回收；关键流失效立即结束整个代际，
-不能继续等另一条流的基线超时。控制指标不可用或不可解码时沿用降级显示。
+不能继续等另一条流的基线超时。控制指标不可用或不可解码时沿用降级显示，并在下一帧能解码时清除该降级；一次降级只上报第一条失败，随后由它引起的 "before baseline" 不会覆盖根因。
 ConnectionStore 只提供 online 读取与连接状态发布，不持有会话、导航、模型或 shell 的写入能力。
 
 
@@ -981,9 +981,9 @@ C4Dynamic
 
 投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。已投递消息的排队项全部来自 `session/control`；`/queue` 的删除动作调用 `session/updateQueue`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。客户端另由 `useDeferredLines` 保留用户已提交、策略要求等回合或 Loop 结束的命令；这些命令尚未投递，断线期间继续等待，连接与会话快照恢复后才重新授权并逐条执行。
 
-交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时用 ↑/↓ 或数字键 1–3 移动选择，Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。只有显式确认才提交，未确认的按键不会产生 `$events/result`。
+交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时按数字键 1–3 直接作答，或用 ↑/↓ 移动选择后按 Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。显式作答（数字键或选中后的 Enter）才提交，未作答的按键不会产生 `$events/result`。提问同样如此：单选题的数字键就是答案本身，立刻结算该题，不再要求第二次回车；多选题的数字键仍是勾选／取消勾选，Enter 才确认整组。只有固定选项带编号，`Other answer` 是输入行，因此不编号，用方向键选中后回车进入。所有列表菜单（选择器、记录列表、`@` 补全、提问选项环、参数表单）的方向键首尾相接：首行向上回到末行，末行向下回到首行。
 
-**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如自由输入模式下用 `/cancel` 终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。
+**要求回答的对话框（审批，以及选项模式下的提问）在解决之前接管键盘**：打开时把正在写的草稿寄存起来（输入框清空、提示符转暗、`focus` 关闭），因此数字键与方向键立刻生效——此前一个残留字符会让整组快捷键失效；最后一个待答交互消失后草稿原样还给输入框，且不走 `setInput` 的"回到实时末端"路径，以免打断读者的滚动位置。提问切到 `Other answer` 或本身没有选项时输入框仍归用户，答案照常输入；`/allow`、`/deny` 这类命令只在草稿未被寄存的场景（例如自由输入模式下用 `/cancel` 终结提问）才有意义，审批本身用 `1`/`2`/`3` 作答。同一条规则也覆盖其他**不读自由文本的菜单**：`/model`、`/prompts`、`/queue`、`/history`、`/think` 与删除确认等在打开期间关闭输入框焦点（由 `usePanels` 的 `parksComposer` 标记驱动），因此敲给列表的键不会落进草稿、也不会用非空草稿把列表本身关掉；`/help`、`/cost`、`/status` 与启动列表仍保留输入框，前者照旧让 ↑/↓ 与 Ctrl+P/N 回填历史，后者继续接受 slash 命令。
 
 提问与审批的退出语义不同：Esc 在选项模式下**放弃整组问题**——与 Web 客户端关闭按钮同一语义，以 `{ kind: 'rejected', error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } }` 结算该 waterfall，因此本地已收集的部分答案一并作废，宿主记为取消而不是回答；在 `Other answer` 里 Esc 仍先回到选项，再按一次才放弃。审批没有"取消"这个动作（与 Web 端的拒绝／允许两个按钮一致），Esc 仍只清除高亮；Ctrl+C 在两个对话框上都只清空草稿、保留待答交互。只有显式回答（审批的 1/2/3、提问的选项或自由文本）或提问上的 Esc 才终结它。
 
@@ -1265,7 +1265,7 @@ C4Component
 
 工作区选择器的两条注册入口分别居于首尾：`+ Add workspace (this directory)` 直接用 `Controller.localDirectory`（进程启动目录，默认为 `process.cwd()`）注册 `dsht` 自身所在目录，只在服务端没有同路径工作区时出现，并且排在列表最前——它因此也是默认选中行，在未注册目录里启动时按一次 Enter 就能完成最常见的同机注册，不必手输路径；`+ Add workspace (host directory)` 排在列表最后，进入输入界面，输入的服务端绝对路径可以与本机文件系统不同。输入界面是独立 screen（`state.screen === 'path'`），因此 Esc 通过 `showPicker('workspaces')` 退回选择器并清空草稿：选择器的按键在草稿非空时被禁用，留下草稿会让它再也无法操作。
 
-单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`? Needs you`／`⏸ <原因>`／`! Offline`／`⚠ Error`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。本客户端还欠一个回答时（`state.pending` 非空）`? Needs you` 优先于 `⏸ <原因>`：暂停原因只说明时钟为何不动，欠下的回答才是用户必须处理的事，展开面板的 activity 行同样改报 `? Needs you · answer the request above to continue`。
+单行状态栏按价值装填分组：状态簇（`◐ 6:18`／`● Ready`／`? Needs you`／`⏸ <原因>`／`! Offline`／`⚠ Metrics`／`⚠ Models`／`⚠ Presets`）· 当前阶段（`think 28s`／`<工具名> 1:08`／`write 12s`）。降级按子系统具名，而不是笼统的 `⚠ Error`：控制流不可用或不可解码是 `⚠ Metrics`，模型目录读取失败是 `⚠ Models`，preset 名册读取失败是 `⚠ Presets`（`controlError` 优先于 `modelError` 优先于 `presetError`），完整消息留在展开面板里；控制流只要再解出一帧，`⚠ Metrics` 就自行清除，因为"某一帧坏了"不是永久状态。本客户端还欠一个回答时（`state.pending` 非空）`? Needs you` 优先于 `⏸ <原因>`：暂停原因只说明时钟为何不动，欠下的回答才是用户必须处理的事，展开面板的 activity 行同样改报 `? Needs you · answer the request above to continue`。
 
 阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。阶段是**当前事件**的名字与年龄，只在下一段工作开始或回合关闭时改变：工具回答之后、下一次增量到达之前它仍显示上一个工具，因此命令行之后的静默期仍被算作这个回合的工作时间，而 `● Ready` 不显示阶段——只有宿主知道回合已经结束。
 
@@ -1877,7 +1877,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/copy-mode.ts` | `CopyMode`、`useCopyMode` |
 | `ui/dialogs/cost.tsx` | `CostLine`、`CostSource`、`CostPanel` |
 | `ui/dialogs/index.tsx` | `QueueDialog`、`PromptsDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`OfflinePanel`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
-| `ui/dialogs/picker.tsx` | `ChoiceCell`、`Choice`、`Picker` |
+| `ui/dialogs/picker.tsx` | `ChoiceCell`、`Choice`、`cycle`、`Picker` |
 | `ui/frozen.tsx` | `Frozen` |
 | `ui/input/input.tsx` | `EditState`、`editInput`、`TextInput` |
 | `ui/input/mouse.ts` | `isMouseReport`、`wheelDirection`、`useMouseWheel` |

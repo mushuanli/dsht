@@ -357,10 +357,16 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
     // The state token reports a fact and never guesses: a paused clock is named, offline and errors
     // take the token over, and an unknown phase simply leaves the phase group empty. An answer this
     // client still owes outranks the paused reason, because that reason is only why the clock stopped.
+    // A degraded metadata load names the subsystem it broke, so the bar itself answers "what is
+    // wrong" and the expanded panel only has to add the message. Live metrics lead because the rest
+    // of the bar reads them; presets are the quietest of the three and never hide a louder failure.
+    const degraded = source.controlError !== undefined ? '⚠ Metrics'
+      : source.modelError !== undefined ? '⚠ Models'
+      : source.presetError !== undefined ? '⚠ Presets' : undefined;
     const stateToken: StatusSegment = !source.online
       ? { text: '! Offline', color: theme.status.offline }
-      : source.controlError || source.modelError
-        ? { text: '⚠ Error', color: theme.status.warning }
+      : degraded !== undefined
+        ? { text: degraded, color: theme.status.warning }
         : source.pendingCount > 0
           ? { text: '? Needs you', color: theme.status.critical }
           : pauseReason !== undefined

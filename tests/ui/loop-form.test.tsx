@@ -216,6 +216,17 @@ test('the form offers the way back to the record list', async () => {
   } finally { ui.unmount(); ui.cleanup(); }
 });
 
+test('the form wraps its rows, so ↑ from Start lands on the way back', async () => {
+  const { ui, calls, frame } = mount();
+  try {
+    await press(ui, '\u001b[A'); // ↑ from the first row wraps to the last
+    assert.match(frame(), /❯ ← Choose another record/);
+    await press(ui, '\r');
+    assert.equal(calls.back, 1);
+    assert.deepEqual(calls.start, []);
+  } finally { ui.unmount(); ui.cleanup(); }
+});
+
 test('an erased value stays as it was instead of reading as zero', async () => {
   const { ui, frame } = mount();
   try {

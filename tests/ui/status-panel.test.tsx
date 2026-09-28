@@ -128,3 +128,21 @@ test('arrows and PgUp/PgDn scroll the open panel through the running application
   await until(() => ui.lastFrame()?.includes('Status 1-') === true);
   await press('\u001b');
 });
+
+test('the collapsed token names the degraded subsystem instead of a bare error', () => {
+  const token = (patch: Partial<Controller['state']>): string => {
+    const controller = new Controller({ base: 'http://127.0.0.1:1234', token: 'test-token' });
+    controller.state = { ...controller.state, online: true, status: 'Connected', ...patch };
+    const ui = render(<Box width={80}><StatusBar source={statusSource(controller)} width={80} /></Box>);
+    const frame = ui.lastFrame()!;
+    ui.unmount(); ui.cleanup();
+    return frame;
+  };
+  // The bar says which subsystem broke; the expanded panel carries the sentence that explains it.
+  assert.match(token({ controlError: 'Live metrics unavailable on this host' }), /⚠ Metrics/);
+  assert.match(token({ modelError: 'session/modelCatalog failed' }), /⚠ Models/);
+  assert.match(token({ presetError: 'agentPresets/list failed' }), /⚠ Presets/);
+  // Live metrics are what the rest of the bar reads, so they outrank the quieter degradations.
+  assert.match(token({ controlError: 'a', modelError: 'b', presetError: 'c' }), /⚠ Metrics/);
+  assert.doesNotMatch(token({}), /⚠/);
+});

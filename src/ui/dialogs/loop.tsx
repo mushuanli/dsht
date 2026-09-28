@@ -6,6 +6,7 @@ import { validLoopOption } from '../../slash/parse.ts';
 import { safeText } from '../../text.ts';
 import { useCopyMode } from '../copy-mode.ts';
 import { useTheme } from '../theme/index.ts';
+import { cycle } from './picker.tsx';
 
 /** The numeric fields the form edits, in the order a run reads them. */
 export type LoopField = 'from' | 'to' | 'score' | 'tries';
@@ -167,9 +168,9 @@ export function LoopDialog({ record, enabled, onStart, onBack, onClose }: {
     setValues(next); setEdit(undefined); setError(undefined);
     return true;
   };
-  const move = (next: number): void => {
+  const move = (delta: number): void => {
     if (!applyEdit()) return;
-    setRow(Math.max(0, Math.min(rows.length - 1, next)));
+    setRow(cycle(row, delta, rows.length));
     setEdit(undefined); setError(undefined);
   };
   useInput((input, key) => {
@@ -178,22 +179,22 @@ export function LoopDialog({ record, enabled, onStart, onBack, onClose }: {
       if (edit !== undefined) { setEdit(undefined); setError(undefined); } else onClose();
       return;
     }
-    if (key.upArrow) { move(row - 1); return; }
-    if (key.downArrow) { move(row + 1); return; }
+    if (key.upArrow) { move(-1); return; }
+    if (key.downArrow) { move(1); return; }
     if (current.kind === 'var') {
       const { name } = current;
       if (key.backspace || key.delete) { setEdit((edit ?? vars[name] ?? '').slice(0, -1)); setError(undefined); return; }
       // A variable is a path or a target, so anything printable goes in; control bytes never do.
       const typed = input.replace(/[\u0000-\u001f\u007f]/g, '');
       if (typed !== '' && !key.ctrl && !key.meta) { setEdit(edit === undefined ? typed : edit + typed); setError(undefined); return; }
-      if (key.return) move(row + 1);
+      if (key.return) move(1);
       return;
     }
     if (current.kind === 'field') {
       const { field } = current.spec;
       if (key.backspace || key.delete) { setEdit((edit ?? String(values[field])).slice(0, -1)); setError(undefined); return; }
       if (/^[0-9.]$/.test(input)) { setEdit(edit === undefined ? input : edit + input); setError(undefined); return; }
-      if (key.return) move(row + 1);
+      if (key.return) move(1);
       return;
     }
     if (!key.return) return;

@@ -7,7 +7,8 @@ export interface StreamHost {
   identified(clientId: string): void;
   event(event: HostEvent): boolean;
   changed(): void;
-  degraded(message: string): void;
+  /** Publish a live-metrics degradation, or clear it when a frame decodes again. */
+  degraded(message: string | undefined): void;
   fail(error: Error): void;
 }
 
@@ -15,6 +16,8 @@ export class ConnectionStreams {
   private readonly subscriptions = new Set<Subscription>();
   private readonly abort = new AbortController();
   private readonly signal: AbortSignal;
+  /** Whether a control frame failed to decode in this generation, so recovery can clear it once. */
+  private degradedFrame = false;
   constructor(private readonly client: Client, private readonly host: StreamHost, signal: AbortSignal) {
     this.signal = AbortSignal.any([signal, this.abort.signal]);
   }
@@ -40,9 +43,17 @@ export class ConnectionStreams {
       try {
         this.host.event({ kind: 'control', frame: controlFrame(value) });
         this.host.changed();
+        // One undecodable frame is not a permanent condition: a frame that decodes proves live
+        // metrics work again, so the degradation raised earlier in this generation ends here.
+        if (this.degradedFrame) { this.degradedFrame = false; this.host.degraded(undefined); }
       } catch (error) {
-        // Missing live metrics must not blind a running conversation.
-        this.host.degraded(`Live metrics degraded: ${errorText(error)}`);
+        // Missing live metrics must not blind a running conversation. Only the first failure of an
+        // episode is published: a baseline this client could not apply leaves every later update
+        // reporting "before baseline", and that follow-up must not bury the error that caused it.
+        if (!this.degradedFrame) {
+          this.degradedFrame = true;
+          this.host.degraded(`Live metrics degraded: ${errorText(error)}`);
+        }
       }
       return true;
     }, error => {

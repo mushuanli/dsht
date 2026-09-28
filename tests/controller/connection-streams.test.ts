@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '../../src/transport/client.ts';
 import { ConnectionStreams, type StreamHost } from '../../src/controller/connection-streams.ts';
+import { Telemetry } from '../../src/session/telemetry.ts';
 
 function host(): StreamHost {
   return { identified() {}, event: () => true, changed() {}, degraded() {}, fail() {} };
@@ -70,4 +71,39 @@ test('closing startup directly settles its wait and releases the baseline timer'
   await assert.rejects(starting, { name: 'AbortError' });
   assert.equal(live.size, 0);
   assert.equal(cancelled, 1);
+});
+
+test('a baseline this client cannot apply is reported once, and a later one clears it', async () => {
+  const client = new Client('http://localhost');
+  const listeners = new Map<string, Parameters<Client['subscribe']>[2]>();
+  client.subscribe = (endpoint, _args, listener) => { listeners.set(endpoint, listener); return { cancel() {} }; };
+  const telemetry = new Telemetry();
+  const published: (string | undefined)[] = [];
+  const streamHost: StreamHost = {
+    identified() {}, changed() {}, fail() {},
+    event: event => { if (event.kind === 'control') telemetry.accept(event.frame); return true; },
+    degraded: message => published.push(message),
+  };
+  const streams = new ConnectionStreams(client, streamHost, new AbortController().signal);
+  const starting = streams.start();
+  // `$events` reports ready first, which is what lets `start` open the control stream.
+  await new Promise(resolve => setImmediate(resolve));
+  listeners.get('$events')!.item({ type: 'ready', clientId: 'c' });
+  await new Promise(resolve => setImmediate(resolve));
+  const control = listeners.get('session/control')!;
+  // A baseline with an unreadable queue never becomes the snapshot live metrics need...
+  control.item({ type: 'baseline', value: { queues: { s1: 'not a list' }, jobs: {}, projections: {} } });
+  await starting;
+  await new Promise(resolve => setImmediate(resolve));
+  const cause = published.at(-1);
+  assert.match(cause!, /Live metrics degraded: /);
+  // ...so the updates that follow must not bury that cause under "before baseline".
+  control.item({ type: 'projection', sessionId: 's1', key: 'tokenUsage', seq: 1, value: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(published.at(-1), cause);
+  // A baseline that decodes proves the stream works, so the degradation ends.
+  control.item({ type: 'baseline', value: { queues: { s1: [] }, jobs: { s1: [] }, projections: {} } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(published.at(-1), undefined);
+  streams.close();
 });

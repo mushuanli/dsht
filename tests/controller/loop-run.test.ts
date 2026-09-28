@@ -233,6 +233,10 @@ test('a control frame this client cannot decode never strands a running loop', a
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(controller.state.online, true);
   assert.equal(controller.queries.loop?.phase, 'running');
+  // One undecodable frame is not a permanent condition: as soon as a frame decodes again the
+  // degradation clears, so the status bar stops claiming an error the client has recovered from.
+  fixture.control({ type: 'jobs', sessionId: 's1', jobs: [{ status: 'running' }] });
+  await until(() => controller.state.controlError === undefined);
 
   reply(fixture, 50, 'findings…\n' + block(1, 1, 9));
   idle(fixture);

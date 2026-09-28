@@ -2,5 +2,5 @@ Approval required
 1. Allow once
 2. Deny
 3. Stop turn
-↑ ↓ / 1–3 select · Enter confirm
+1–3 answer · ↑ ↓ select · Enter confirm
 Esc keeps this pending · the draft is kept while this is open

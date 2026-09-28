@@ -34,6 +34,21 @@ function cellsWidth(cells: readonly ChoiceCell[] | undefined): number {
   return (cells ?? []).reduce((sum, cell) => sum + stringWidth(cell.text), 0);
 }
 
+/** One step around a closed ring, so a list has no dead end at either edge.
+ *
+ * Every menu in the client moves this way: holding ↑ on the first row lands on the last, and ↓ on
+ * the last wraps to the first. A menu therefore never needs an extra key to reach a row the arrows
+ * cannot pass, and an empty list stays on index 0 rather than producing a negative one.
+ * @param index - Current row.
+ * @param delta - Rows to move, positive for down.
+ * @param length - Number of rows in the ring.
+ * @returns The wrapped index.
+ */
+export function cycle(index: number, delta: number, length: number): number {
+  if (length <= 0) return 0;
+  return ((index + delta) % length + length) % length;
+}
+
 /** Keyboard-driven list with paging and optional removal.
  * @param props - Choices, availability, page size, hint text and the usable column count.
  * @returns The rendered list rows and its navigation hint.
@@ -57,8 +72,8 @@ export function Picker({ choices, enabled, canSelect, pageSize = 12, hint, width
   }, [internal_eventEmitter]);
   useInput((_input, key) => {
     if (!canSelect() || key.eventType === 'release') return;
-    if (key.upArrow) setSelected(Math.max(0, current - 1));
-    else if (key.downArrow) setSelected(Math.min(choices.length - 1, current + 1));
+    if (key.upArrow) setSelected(cycle(current, -1, choices.length));
+    else if (key.downArrow) setSelected(cycle(current, 1, choices.length));
     else if (_input === 'e' && !key.ctrl && !key.meta) choices[current]?.edit?.();
     else if (_input === 'd' && !key.ctrl && !key.meta || key.delete && /^\x1b\[3(?:;\d+)?~$/.test(rawKey.current)) choices[current]?.remove?.();
     else if (key.return) choices[current]?.action();
