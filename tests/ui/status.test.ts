@@ -53,6 +53,19 @@ test('projection snapshots preserve newer keys, remove absent capabilities and r
   assert.throws(() => controlFrame({ type: 'projection', sessionId: 's', key: 'x', seq: 2 }), /Missing/);
 });
 
+test('a projections-only baseline starts live metrics instead of degrading them', () => {
+  // A host without a queue or job stream sends just the projection snapshot; accepting it is what
+  // makes the following projection frames apply instead of every one reporting "before baseline".
+  const telemetry = new Telemetry();
+  telemetry.accept(controlFrame({ type: 'baseline', value: { projections: { s: { asOfSeq: 1, values: { tokenUsage: 5 } } } } }));
+  assert.equal(telemetry.reader.ready, true);
+  telemetry.accept(controlFrame({ type: 'projection', sessionId: 's', key: 'tokenUsage', seq: 2, value: 6 }));
+  assert.equal(telemetry.view('s').values.tokenUsage, 6);
+  // No queue or job stream means both stay unknown rather than being reported as empty.
+  assert.equal(telemetry.view('s').queued, undefined);
+  assert.equal(telemetry.view('s').jobs, undefined);
+});
+
 test('working duration handles minutes, hours and clock skew', () => {
   assert.equal(elapsedTime(-1000), '0s');
   assert.equal(elapsedTime(65_999), '1m 5s');

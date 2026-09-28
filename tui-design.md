@@ -429,11 +429,13 @@ cookie: dsh-auth-...
 `session/control`：
 
 ```text
-{ type: 'baseline', value: { projections: { <sessionId>: { asOfSeq, values } }, queues: { <sessionId>: [ ... ] }, jobs: { <sessionId>: [ ... ] } } }
+{ type: 'baseline', value: { projections: { <sessionId>: { asOfSeq, values } }, queues?: { <sessionId>: [ ... ] }, jobs?: { <sessionId>: [ ... ] } } }
 { type: 'projection', sessionId, key, seq, value }
 { type: 'queue', sessionId, items }
 { type: 'jobs',  sessionId, items }
 ```
+
+`queues` 与 `jobs` 是**可选能力**：宿主没有队列／活动任务流时不带这两个键，客户端按空处理而不是把整条 baseline 作废——否则连它确实提供的投影快照也会一起丢掉，实时指标会永久停在降级。投影基线仍必须有；某一节存在但不是对象才算协议错误。
 
 投影采用**每键水位**：`seq < (revisions.get(key) ?? baseline)` 的更新被丢弃；`Telemetry` 只保留 `title`、`modelSelection`、`contextPressure`、`tokenUsage`、`sessionStats`、`agentPreset` 六个键。baseline 之前的任何非 baseline 帧都是错误。
 

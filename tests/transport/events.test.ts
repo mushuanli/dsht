@@ -72,3 +72,17 @@ test('session/control frames decode to named fields, not DSH shapes', () => {
   assert.throws(() => projectionSnapshot({ asOfSeq: 'bad', values: {} }), /watermark/);
   assert.equal(projectionSnapshot(undefined), undefined);
 });
+
+test('a baseline without a queue or job section still yields its projections', () => {
+  // The installed host reports projections only: it has no queue or job stream, and a client that
+  // demanded the three-section shape threw the whole baseline away, leaving live metrics degraded.
+  const baseline = controlFrame({ type: 'baseline', value: {
+    projections: { s1: { asOfSeq: 7, values: { title: 'T' } } } } });
+  assert.equal(baseline.kind, 'baseline');
+  if (baseline.kind !== 'baseline') return;
+  assert.deepEqual(baseline.projections.get('s1'), { asOfSeq: 7, values: { title: 'T' } });
+  assert.equal(baseline.queues.size, 0);
+  assert.equal(baseline.jobs.size, 0);
+  // A section that is present but not an object is still malformed, not absent.
+  assert.throws(() => controlFrame({ type: 'baseline', value: { projections: {}, queues: 'nope' } }), /Expected a JSON object/);
+});

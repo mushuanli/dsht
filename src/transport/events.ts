@@ -89,10 +89,13 @@ export function controlFrame(value: unknown): ControlFrame {
   const frame = object(value);
   if (frame.type === 'baseline') {
     const baseline = object(frame.value);
-    const projections = Object.entries(object(baseline.projections))
+    // The baseline's sections are capabilities, not a fixed schema: a host that reports no queue or
+    // job stream simply omits them, and demanding the newer three-section shape would discard the
+    // projection snapshot those hosts do send. An absent section is empty, not an error.
+    const projections = optionalRows(baseline.projections)
       .map(([id, snapshot]) => [id, projectionSnapshot(snapshot)!] as const);
-    const queues = Object.entries(object(baseline.queues)).map(([id, items]) => [id, queuedInputs(items)] as const);
-    const jobs = Object.entries(object(baseline.jobs)).map(([id, items]) => [id, activeJobs(items)] as const);
+    const queues = optionalRows(baseline.queues).map(([id, items]) => [id, queuedInputs(items)] as const);
+    const jobs = optionalRows(baseline.jobs).map(([id, items]) => [id, activeJobs(items)] as const);
     return { kind: 'baseline', projections: new Map(projections), queues: new Map(queues), jobs: new Map(jobs) };
   }
   if (frame.type === 'projection' || frame.type === 'queue' || frame.type === 'jobs') {
@@ -106,6 +109,11 @@ export function controlFrame(value: unknown): ControlFrame {
     return { kind: 'jobs', sessionId, count: activeJobs(frame.jobs ?? frame.items) };
   }
   throw new Error('Unknown session control frame');
+}
+
+/** Read a baseline section that a host may not provide, as an empty list rather than a throw. */
+function optionalRows(value: Json | undefined): [string, Json][] {
+  return value === undefined ? [] : Object.entries(object(value));
 }
 
 /** Read a possibly-absent string field without turning protocol drift into a throw. */
