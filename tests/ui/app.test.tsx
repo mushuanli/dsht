@@ -422,6 +422,65 @@ test('hosts without a control stream show unknown metrics and refresh catalog de
   assert.equal(controller.state.online, true);
 });
 
+test('a finished turn and a waiting question each ring once, when the terminal says the pane is unfocused', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const previous = process.env.DSHT_NOTIFY;
+  process.env.DSHT_NOTIFY = 'bel';
+  t.after(() => { if (previous === undefined) delete process.env.DSHT_NOTIFY; else process.env.DSHT_NOTIFY = previous; });
+  // Questions arrive on the event stream, which the fixture replays when that stream opens.
+  const question = (id: string) => ({ type: 'waterfall', event: 'user-questions/request', eventId: id, agentId: 's1',
+    request: { questions: [{ id: 'one', header: 'Destination', question: 'Choose a target', options: [{ label: 'First' }] }] } });
+  fixture.replayInteractions = [question('first')];
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  // Ink renders into this same stream, so only the hook's own write is the notification: a frame is
+  // never exactly the BEL byte.
+  const written: string[] = [];
+  const write = ui.stdout.write.bind(ui.stdout) as (chunk: string | Uint8Array) => unknown;
+  ui.stdout.write = ((chunk: string | Uint8Array) => { written.push(String(chunk)); return write(chunk); }) as typeof ui.stdout.write;
+  const rings = () => written.filter(chunk => chunk === '\u0007');
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready && controller.state.pending.length > 0);
+  // The terminal reports losing focus, which is the condition the default policy needs.
+  await pressKey(ui, '\u001b[O');
+  // The question reached the client after it was watching, and the client cannot tell "arrived just
+  // now" from "was already waiting when I connected": needing input is needing input.
+  await until(() => rings().length === 1);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(rings().length, 1, 'the same question waiting across renders does not ring again');
+  // Work starts and finishes: another bell, and the idle render that follows does not repeat it.
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.queries.running);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', false] });
+  await until(() => !controller.queries.running);
+  await until(() => rings().length === 2);
+  // A different question arriving after a reconnect is a new moment, and it rings once.
+  fixture.replayInteractions = [question('second')];
+  fixture.disconnect();
+  await until(() => controller.state.pending[0]?.eventId === 'second');
+  await until(() => rings().length === 3);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(rings().length, 3, 'a question that is still waiting does not ring again');
+});
+test('focus reporting is tracked without leaking into the draft', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  // The terminal reports focus as CSI I / CSI O. Ink hands those over as the text `[I` / `[O`, which
+  // must not become characters just because the client asked the terminal to report them.
+  await pressKey(ui, '\u001b[O');
+  await pressKey(ui, '\u001b[I');
+  await pressKey(ui, 'review');
+  await until(() => ui.lastFrame()?.includes('review') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /\[IO]review|review\[IO]/);
+  await pressKey(ui, '\u0015');
+  assert.match(ui.lastFrame()!, /❯ Message, @host-file, or \/help/);
+});
+
 test('terminal control keys edit the submitted prompt and keep reference completion at the draft end', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });

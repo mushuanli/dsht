@@ -1,5 +1,6 @@
 /** Terminal editing with explicit cursor ownership, Unicode movement and a bounded multi-row window. */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { isFocusReport } from './focus.ts';
 import { isMouseReport } from './mouse.ts';
 import { cursorPlace, foldLabel, planDraft, windowRows, type FoldRegion } from './viewport.ts';
 import { Box, Text, useInput, useStdin, type Key } from 'ink';
@@ -102,7 +103,8 @@ export function TextInput({ value, onChange, onCursorChange, onSubmit, focus, pl
   // freshest regions through a ref instead of the closure it was created with.
   const regions = useRef(plan.regions); regions.current = plan.regions;
   useInput((input, key) => {
-    if (key.eventType === 'release' || isMouseReport(rawKey.current)) return;
+    // Focus reporting and mouse reports reach Ink as ordinary input; neither is the operator typing.
+    if (key.eventType === 'release' || isMouseReport(rawKey.current) || isFocusReport(rawKey.current)) return;
     if (!current.current.text && !key.ctrl && !key.meta && reservedKeys?.includes(input)) return;
     if (key.return) { onSubmit(); return; }
     const before = current.current;

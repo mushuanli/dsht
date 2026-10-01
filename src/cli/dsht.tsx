@@ -60,6 +60,11 @@ Cookies are saved per server origin and reused on later starts. Tokens are never
 /prompt lists saved shortcut prompts; /prompt TEXT saves one in the config directory's
 prompt.local.json, which layers over the installed prompt.json.
 !command runs on this machine, not on the host, and prints its output in the transcript.
+An answer that is waiting or a finished turn can ring the terminal bell or send an OSC 9
+desktop notification: DSHT_NOTIFY=auto|bel|osc9|off (default auto) and
+DSHT_NOTIFY_WHEN=unfocused|always (default unfocused, read from focus reporting; tmux
+needs 'set -g focus-events on' for that, and without it the client still notifies). Inside
+tmux an OSC 9 needs 'set -gw allow-passthrough on' or tmux drops it; the bell needs nothing.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
 The config directory's loop.yaml is created from the shipped file when absent, prompt.json
 the same way and kept equal to it afterwards. On startup, unedited shipped loop records are merged into loop.yaml, and

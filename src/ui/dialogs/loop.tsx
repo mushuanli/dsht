@@ -181,6 +181,8 @@ export function LoopDialog({ record, enabled, onStart, onBack, onClose }: {
   };
   useInput((input, key) => {
     if (key.eventType === 'release') return;
+    // Focus reports arrive as the text `[I` / `[O`; a value field must not take them.
+    if (input === '[I' || input === '[O') return;
     if (key.escape) {
       if (edit !== undefined) { setEdit(undefined); setError(undefined); } else onClose();
       return;

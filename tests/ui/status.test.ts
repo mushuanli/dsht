@@ -186,10 +186,15 @@ test('the activity projection names every lifecycle once, and a terminal loop is
   assert.deepEqual(runtimeActivity(sourceOf({ activity: undefined })), {});
 });
 
+/** Frame text without the styling: a regex must not depend on where a color boundary falls. */
+function plain(frame: string): string {
+  return frame.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
 test('the bar and the expanded panel name the same lifecycle', () => {
   const source = sourceOf({ running: true, foreground: { label: 'Exporting session log…' }, shell: { running: true } });
   const compact = render(React.createElement(StatusBar, { source, width: 100 }));
-  const frame = compact.lastFrame()!;
+  const frame = plain(compact.lastFrame()!);
   compact.unmount(); compact.cleanup();
   // The foreground operation outranks the turn for the phase slot; the local shell keeps its own badge.
   // No clock is printed because the operation is not the turn the clock measures — the ◐ token alone
@@ -197,7 +202,7 @@ test('the bar and the expanded panel name the same lifecycle', () => {
   assert.match(frame, /◐ · Exporting session log…/);
   assert.match(frame, /! shell/);
   const detail = render(React.createElement(StatusBar, { source, width: 100, expanded: true }));
-  const panel = detail.lastFrame()!;
+  const panel = plain(detail.lastFrame()!);
   detail.unmount(); detail.cleanup();
   assert.match(panel, /◐ Exporting session log… · Esc cancel/);
 });

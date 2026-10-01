@@ -92,8 +92,13 @@ test('a host subagent child is a source, and the view follows it under its paren
 
   controller.actions.openPeek('child-1');
   await until(() => controller.queries.peek?.transcript !== undefined);
-  await until(() => followedAddresses(fixture).length >= 2);
-  assert.deepEqual(followedAddresses(fixture).slice(-2), [
+  // Only this child's own attempts count: the selected session `s1` is followed too, and a plain
+  // `length >= 2` could be satisfied by the parent plus the first attempt, which made this assertion
+  // depend on how fast the second one followed.
+  const attempts = (): ReturnType<typeof followedAddresses> => followedAddresses(fixture)
+    .filter(address => address.kind === 'subagent' && address.childSessionId === 'child-1');
+  await until(() => attempts().length >= 2);
+  assert.deepEqual(attempts().slice(-2), [
     { kind: 'subagent', parentSessionId: 's1', childSessionId: 'child-1', mode: 'continuable' },
     { kind: 'subagent', parentSessionId: 's1', childSessionId: 'child-1', mode: 'one-shot' },
   ]);

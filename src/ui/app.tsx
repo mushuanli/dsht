@@ -3,6 +3,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import { mocha, ThemeContext, type Theme } from './theme/index.ts';
 import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from 'ink';
 import { useMouseWheel } from './input/mouse.ts';
+import { useTerminalFocus } from './input/focus.ts';
+import { useAttentionNotify } from './use-attention-notify.ts';
 import { TextInput } from './input/input.tsx';
 import { useComposer, type DraftReceipt } from './input/use-composer.ts';
 import { useDeferredLines } from './input/use-deferred-lines.ts';
@@ -805,6 +807,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Rows are laid out from the top of the viewport, so a given row's screen line is simply this plus
   // its index in `visible` — no counting back from the composer's variable height.
   const transcriptTop = (copyMode ? 1 : 0) + chromeRows.header + chromeRows.prefix + (dialogOpen ? 0 : 1);
+  // A completed turn or a waiting answer is worth a terminal notification when the operator is
+  // looking somewhere else; the mode is enabled for this mount and the transition is read from the
+  // facts above. `useTerminalFocus` is the only source of "looking somewhere else".
+  const focused = useTerminalFocus();
+  useAttentionNotify({ ...(pending === undefined ? {} : { pending: pending.eventId }),
+    busy: controller.queries.running || controller.queries.loop?.active === true }, focused);
   useMouseWheel(direction => {
     // The read-only view scrolls itself; the conversation behind it must not move.
     if (peek !== undefined) { setPeekScroll(value => Math.max(0, value + direction * 3)); return; }
