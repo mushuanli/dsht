@@ -48,7 +48,9 @@ export function PromptsDialog({ identity, prompts, error, width, enabled, canSel
     {error !== undefined && <Text color={theme.colors.error} wrap="truncate-end">{safeText(error)}</Text>}
     {!prompts.length && <Text dimColor>No saved prompts · add one with /prompt TEXT</Text>}
     <Picker key={identity} choices={prompts.map(prompt => ({
-      key: prompt.id, label: toolLine(prompt.text, width - 6),
+      // An installed default is marked, because editing or deleting it writes the operator's own file
+      // rather than the installed one; the row itself behaves the same either way.
+      key: prompt.id, label: `${toolLine(prompt.text, width - 6)}${prompt.installed === true ? ' · installed' : ''}`,
       action: () => onChoose(prompt.text),
       edit: () => onEdit(prompt),
       remove: () => onRemove(prompt.id),

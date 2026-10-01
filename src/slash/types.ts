@@ -20,8 +20,6 @@ export type Command =
   | { kind: 'think'; target: string }
   | { kind: 'older' }
   | { kind: 'compact' }
-  /** Clear the client's own HANDOFF.md, then ask the agent to write a fresh session handoff. */
-  | { kind: 'handoff' }
   /** Start the client-driven scored loop for one `loop.yaml` record. */
   | { kind: 'loop'; name: string; options: LoopOptions }
   /** Offer the `loop.yaml` records so one can be chosen instead of typed. */

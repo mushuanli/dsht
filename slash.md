@@ -131,7 +131,6 @@
 | `/cancel` | `cancel` | | | 取消当前 turn（并停止 loop，见 §8.5） |
 | `/queue` | `queue` | ✓ | ✓ | 待发输入列表 |
 | `/plan` `/goal` `/permission` `/feedback` | `hostCommand` | ✓ | ✓ | 原样交给 host 命令注册表 |
-| `/handoff` | `handoff` | ✓ | ✓ | 删本地 HANDOFF.md 后发一轮 |
 | `/loop [name\|stop] [score] [tries]` | `loop` / `loops` / `loopStop` / `loopAnswer` | ✓ | ✓ / — | 无参 → 记录列表；`<name>` → 表单或直接运行；`stop`/`abort` → 结束当前 LoopRun；`answer <text>` → 回答暂停中的 run |
 | `/export [local.zip]` | `export` | ✓ | | 保存会话 ZIP |
 | `/export-html [local.html]` | `exportHtml` | ✓ | | 保存离线 HTML |
@@ -253,7 +252,7 @@ headless 也有这些事实（`runStartup` 先选/建会话，所以 `requiresSe
 host 自己的命令都不需要为"我在运行"单独开一条：
 
 ```ts
-const QUEUES_WHILE_RUNNING   = { duringTurn: 'queue', duringLoop: 'queue' };  // compact / handoff / loop
+const QUEUES_WHILE_RUNNING   = { duringTurn: 'queue', duringLoop: 'queue' };  // compact / loop
 const CONFLICTS_WITH_RUNNING = { duringTurn: 'deny',  duringLoop: 'deny'  };  // loops（裸 /loop 的记录列表）
 const ANSWERS_WHILE_RUNNING  = { duringTurn: 'run',   duringLoop: 'run'   };  // panel / copy / think / cancel / approval / loopStop / loopAnswer
 const LOCAL_OR_READ          = { duringTurn: 'run',   duringLoop: 'run'   };  // 纯本地写/视图：quit、remove、latest、older、savePrompt、coredump…
@@ -265,7 +264,7 @@ const LOCAL_OR_READ          = { duringTurn: 'run',   duringLoop: 'run'   };  //
 `path`（路径屏输入的目录）、`error`（语法错误）。`tests/ui/commands.test.ts` 读 `slash/types.ts` 的 kind 并断言
 每个 catalog kind 都有显式条目——"忘了写"会失败在构建上，而不是运行期。
 
-* **`queue` 的是操作者自己的写入**：`compact`、`handoff`、`loop`（启动一次评审）。它们与正在跑的 turn
+* **`queue` 的是操作者自己的写入**：`compact`、`loop`（启动一次评审）。它们与正在跑的 turn
   写同一个会话，但"下一件事做这个"是操作者明确按下 Enter 表达的意图，直接拒绝等于让这句话无法表达；
   所以它们被**接受并持有**，等 turn（或 loop）结束后运行；
 * **仍然 deny 的是"此刻提供也没有意义"的**：裸 `/loop` 的记录列表是给正在敲的草稿用的面，
@@ -431,7 +430,6 @@ interface CommandResult {
 | `answer` | **应用自己完成提问瀑布**（`actions.answerQuestion`） | `[closePanels]` |
 | `error` | 无 | `retain+rejected`：`[closePanels, error]` |
 | `prompt` | 发送消息 | `[closePanels, live, scroll:0]` |
-| `handoff` | 删本地 HANDOFF.md 后发一轮 | `[closePanels, live, scroll:0, notice]` |
 | `loops` | 无（纯交互命令） | `retain+rejected`：`[closePanels, error]`（列出可用记录） |
 | `loop` | 查记录、校验变量、解析 limits、启动 | `[closePanels, loop:{name}]` / `[closePanels, live, scroll:0, notice]` / `retain+rejected: [closePanels, error]`；`not-started` 只给 `[error]`，表单留在屏上 |
 | `loopStop` | 结束运行中的 run（`stop`/`abort` 同一分支） | `[closePanels, live, scroll:0, notice]`；没有 run 时只给 `notice` |
@@ -1005,7 +1003,7 @@ loop.active === (loop.phase === 'running' || (loop.phase === 'needs-human' && lo
 
 ```
 duringLoop 授权 / 禁止第二个 /loop / steering 是否属于 loop
-/resume、/ws、/new、/handoff 是否 deny / Esc 的 loop 行为
+/resume、/ws、/new 是否 deny / Esc 的 loop 行为
 ```
 
 而"存在"只能表示"有一份当前/最近的 LoopProgress 可展示"。因此目标里状态字段命名为

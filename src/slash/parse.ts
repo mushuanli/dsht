@@ -186,10 +186,6 @@ export function parseCommand(line: string): Command {
     if (value !== '/compact') return { kind: 'error', message: 'Use /compact (no arguments)' };
     return { kind: 'compact' };
   }
-  if (/^\/handoff(?: |$)/.test(value)) {
-    if (value !== '/handoff') return { kind: 'error', message: 'Use /handoff (no arguments)' };
-    return { kind: 'handoff' };
-  }
   if (/^\/loop(?: |$)/.test(value)) return loopCommand(value);
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };

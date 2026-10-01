@@ -30,6 +30,8 @@ export interface LoopSourceLoad {
 export interface LoopSourceOptions {
   /** Alternate runtime file, from `DSHT_LOOP_FILE`. */
   overlayFile?: string;
+  /** Alternate operator file, from `DSHT_LOOP_LOCAL_FILE`. */
+  localFile?: string;
   /** Configuration directory holding the default runtime `loop.yaml`. */
   configDirectory: string;
   /** Shipped file to read; defaults to the `loop.yaml` beside the package entry point. */
@@ -57,6 +59,42 @@ export function shippedLoopFile(): string {
  */
 export function loopOverlayFile(options: LoopSourceOptions): string {
   return options.overlayFile ?? join(options.configDirectory, 'loop.yaml');
+}
+
+/** The operator's own overlay: `loop.local.yaml` beside the runtime file.
+ *
+ * Beside the runtime file rather than always in the configuration directory, so an explicit
+ * `DSHT_LOOP_FILE` stays self-contained — a script that points at another set of records can ship its
+ * own local layer, and the two cannot drift apart.
+ * @param options - Resolved options.
+ * @returns Path of the operator file; it may not exist.
+ */
+export function loopLocalFile(options: LoopSourceOptions): string {
+  return options.localFile ?? join(dirname(loopOverlayFile(options)), 'loop.local.yaml');
+}
+
+/** Apply the operator's file over the installed table: same-name records shadow, new ones are added.
+ *
+ * Shadowing is the point of the layer: a record the operator wrote is what `/loop` runs, and the
+ * installed record of that name is not offered at all. Order puts the operator's records first, so the
+ * picker leads with what this machine defined.
+ * @param installed - Table after the shipped merge.
+ * @param local - Parsed operator file.
+ * @returns The layered table and which installed names it hides.
+ */
+function applyLocalLayer(installed: LoopPromptSource, local: LoopOverlaySource):
+{ source: LoopPromptSource; shadowed: string[]; added: string[] } {
+  const shadowed: string[] = [], added: string[] = [];
+  const protocols: Record<string, LoopProtocolText> = {};
+  for (const [name, record] of Object.entries(local.protocols ?? {})) {
+    if (installed.protocols[name] === undefined) added.push(name); else shadowed.push(name);
+    protocols[name] = record;
+  }
+  for (const [name, record] of Object.entries(installed.protocols)) {
+    if (protocols[name] === undefined) protocols[name] = record;
+  }
+  const defaults = { ...installed.defaults, ...local.defaults };
+  return { source: { version: 1, defaults, protocols }, shadowed, added };
 }
 
 /** Digest of the shipped table last merged into a particular runtime file. */
@@ -151,13 +189,20 @@ export async function loadLoopSource(options: LoopSourceOptions): Promise<LoopSo
   const source = parse(runtime);
   const errors = validateLoopPrompts(source);
   if (errors.length > 0) throw new Error(`${overlayPath}:\n- ${errors.join('\n- ')}`);
+  // The operator's own file layers over the installed table. It is optional: most installs have none.
+  const localPath = loopLocalFile(options);
+  const localRaw = await readText(localPath);
+  const local = localRaw === undefined ? undefined : parseOverlay(localPath, localRaw);
+  const layered = local === undefined ? undefined : applyLocalLayer(source as LoopPromptSource, local);
   return {
-    source: source as LoopPromptSource,
+    source: layered?.source ?? source as LoopPromptSource,
     info: {
       ...(shipped.file === undefined ? {} : { builtin: shipped.file }),
       file: overlayPath,
+      ...(local === undefined ? {} : { local: localPath }),
       overridden: merged.overridden,
-      added: merged.added,
+      added: [...merged.added, ...(layered?.added ?? [])],
+      shadowed: layered?.shadowed ?? [],
       warnings: [...warnings, ...merged.warnings],
     },
   };

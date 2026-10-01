@@ -8,7 +8,7 @@ import { parse, stringify } from 'yaml';
 import { LOOP_PROMPTS } from '../../src/controller/loop-prompts.generated.ts';
 import { installLoopSource, loopPrompts, loopSourceInfo } from '../../src/controller/loop-prompts.ts';
 import { loopRecords } from '../../src/controller/loop-protocols.ts';
-import { loadLoopSource, loopOverlayFile, shippedLoopFile }
+import { loadLoopSource, loopLocalFile, loopOverlayFile, shippedLoopFile }
   from '../../src/controller/loop-source.ts';
 import { validateLoopOverlayPrompts } from '../../src/controller/loop-prompts-schema.ts';
 import type { LoopProtocolText, LoopPromptSource } from '../../src/controller/loop-prompts-schema.ts';
@@ -212,7 +212,7 @@ test('an installed source is what /loop lists and runs, and marks the user recor
       assert.equal(records.find(record => record.name === 'designdoc-review')!.fromFile, undefined);
       assert.deepEqual([...loopSourceInfo().added], ['my-review']);
     } finally {
-      installLoopSource(LOOP_PROMPTS as unknown as LoopPromptSource, { overridden: [], added: [], warnings: [] });
+      installLoopSource(LOOP_PROMPTS as unknown as LoopPromptSource, { overridden: [], added: [], shadowed: [], warnings: [] });
     }
     assert.deepEqual(loopPrompts().names, ['design-review', 'designdoc-review']);
   });
@@ -238,4 +238,42 @@ test('an overlay may be partial; a record it declares is held to every shipped r
   } });
   assert.ok(errors.some(message => message.includes('protocols.stop is a reserved name')));
   assert.ok(errors.some(message => message.includes('protocols.broken.rounds has 1 entries but steps is 2')));
+});
+
+test('a loop.local.yaml shadows the installed record of the same name and adds the rest', async () => {
+  await withTemp(async directory => {
+    const builtInFile = await writeLoopFile(directory, 'shipped.yaml', shipped(['a', 'b']));
+    const config = join(directory, 'config');
+    const options = { configDirectory: config, builtinFile: builtInFile };
+    await loadLoopSource(options);
+    // No local file is the normal install: nothing is shadowed and the table is the installed one.
+    assert.equal(loopLocalFile(options), join(config, 'loop.local.yaml'));
+    // The operator's file replaces `a`, adds `mine`, and moves the global attempt limit.
+    await writeFile(join(config, 'loop.local.yaml'), stringify({ version: 1, defaults: { tries: 3 },
+      protocols: { a: protocol({ title: 'Mine a' }), mine: protocol({ title: 'Mine' }) } }));
+    const load = await loadLoopSource(options);
+    assert.equal(load.info.local, join(config, 'loop.local.yaml'));
+    assert.deepEqual(load.info.shadowed, ['a']);
+    assert.deepEqual(load.info.added, ['mine']);
+    // The operator's records lead, the installed one it did not replace follows, and the shadowed `a`
+    // is simply not there.
+    assert.deepEqual(Object.keys(load.source.protocols), ['a', 'mine', 'b']);
+    assert.equal(load.source.protocols.a!.title, 'Mine a');
+    assert.equal(load.source.protocols.b!.title, 'Shipped b');
+    assert.deepEqual(load.source.defaults, { score: 8, tries: 3 });
+    // The installed runtime file keeps its own copy: shadowing is a read-time decision.
+    const installed = await readFile(join(config, 'loop.yaml'), 'utf8');
+    assert.match(installed, /Shipped a/);
+  });
+});
+
+test('an invalid loop.local.yaml stops startup with the path in the message', async () => {
+  await withTemp(async directory => {
+    const builtInFile = await writeLoopFile(directory, 'shipped.yaml', shipped(['a']));
+    const config = join(directory, 'config');
+    await loadLoopSource({ configDirectory: config, builtinFile: builtInFile });
+    await writeFile(join(config, 'loop.local.yaml'), 'protocols: { a: { title: 3 } }', 'utf8');
+    await assert.rejects(() => loadLoopSource({ configDirectory: config, builtinFile: builtInFile }),
+      new RegExp(`loop\\.local\\.yaml`));
+  });
 });

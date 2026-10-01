@@ -142,7 +142,7 @@ function render(kind: string, protocol: LoopProtocolText, overrides?: Readonly<R
 /** All records, rendered when the source is installed: a file edited mid-run cannot change a brief. */
 let cache: LoopPrompts | undefined;
 /** Where the installed records came from, for the record list to show. */
-let info: LoopSourceInfo = { overridden: [], added: [], warnings: [] };
+let info: LoopSourceInfo = { overridden: [], added: [], shadowed: [], warnings: [] };
 
 /** Put the records this process runs in place, before any run or record list reads them.
  *
@@ -154,7 +154,8 @@ let info: LoopSourceInfo = { overridden: [], added: [], warnings: [] };
  */
 export function installLoopSource(source: LoopPromptSource, sourceInfo: LoopSourceInfo): void {
   SOURCE = source;
-  info = { ...sourceInfo, overridden: [...sourceInfo.overridden], added: [...sourceInfo.added], warnings: [...sourceInfo.warnings] };
+  info = { ...sourceInfo, overridden: [...sourceInfo.overridden], added: [...sourceInfo.added],
+    shadowed: [...sourceInfo.shadowed], warnings: [...sourceInfo.warnings] };
   cache = undefined;
 }
 

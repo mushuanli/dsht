@@ -88,15 +88,21 @@ export function LoopMenu({ records, index, source }: {
 }) {
   const theme = useTheme();
   const start = Math.max(0, index - 5);
-  // The runtime file is in the config directory; mark records the operator edited or added.
+  // The runtime file is in the config directory; mark records the operator edited or added, and say
+  // which installed records their own file hides — a shadowed record is not in the list at all.
   const origin = source?.file === undefined ? undefined : [
     `Records from ${source.file}`,
     ...(source.overridden.length === 0 ? [] : [`replaced: ${source.overridden.join(', ')}`]),
     ...(source.added.length === 0 ? [] : [`added: ${source.added.join(', ')}`]),
   ].join(' · ');
+  const local = source?.local === undefined ? undefined : [
+    `Local ${source.local}`,
+    ...(source.shadowed.length === 0 ? [] : [`hides: ${source.shadowed.join(', ')}`]),
+  ].join(' · ');
   return <Box flexDirection="column">
     <Text dimColor>Loop records · ↑ ↓ select · Enter confirm defaults · Tab finish the name · Esc close</Text>
     {origin !== undefined && <Text dimColor wrap="truncate-end">{safeText(origin)}</Text>}
+    {local !== undefined && <Text dimColor wrap="truncate-end">{safeText(local)}</Text>}
     {(source?.warnings ?? []).map(warning => <Text key={warning} color={theme.colors.error} wrap="truncate-end">{safeText(warning)}</Text>)}
     {records.slice(start, start + 6).map((record, offset) => {
       const current = start + offset === index;

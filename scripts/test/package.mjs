@@ -19,8 +19,9 @@ try {
   assert(pack.files.some(file => file.path === 'dist/index.d.ts'));
   assert(pack.files.some(file => file.path === 'dsht-m.png'));
   assert(pack.files.some(file => file.path === 'loop.yaml'));
+  assert(pack.files.some(file => file.path === 'prompt.json'));
   assert(pack.files.some(file => file.path === 'LICENSE'));
-  assert(pack.files.every(file => file.path.startsWith('dist/') || ['package.json', 'loop.yaml', 'README.md', 'README.zh.md', 'README.i18n.yaml', 'dsht-m.png', 'LICENSE'].includes(file.path)));
+  assert(pack.files.every(file => file.path.startsWith('dist/') || ['package.json', 'loop.yaml', 'prompt.json', 'README.md', 'README.zh.md', 'README.i18n.yaml', 'dsht-m.png', 'LICENSE'].includes(file.path)));
   const result = await run(['exec', '--yes', '--offline', '--', `file:${join(root, pack.filename)}`, '--help'], root);
   assert.match(result.stdout, /Usage: dsht/);
   assert.match(result.stdout, /list workspaces/);
@@ -43,5 +44,21 @@ try {
   ].join('\n');
   const loaded = await exec(process.execPath, ['--input-type=module', '-e', probe], { cwd: packageRoot, timeout: 30_000 });
   assert.equal(loaded.stdout, 'design-review,designdoc-review');
-  console.log(`Packed ${pack.filename}; isolated npx entry passed; config loop.yaml created and read.`);
+  // The same run installs the shipped shortcut prompts once, before anything layers over them.
+  const prompts = [
+    `const { installPromptSource } = await import(${JSON.stringify(join(packageRoot, 'dist', 'controller', 'prompt-source.js'))});`,
+    `const { readFile } = await import('node:fs/promises');`,
+    `const install = await installPromptSource({ configDirectory: ${JSON.stringify(join(root, 'config'))} });`,
+    `const installed = JSON.parse(await readFile(${JSON.stringify(join(root, 'config', 'prompt.json'))}, 'utf8'));`,
+    `const { PromptStore } = await import(${JSON.stringify(join(packageRoot, 'dist', 'controller', 'prompts.js'))});`,
+    `const store = new PromptStore(install.paths); await store.load();`,
+    `if (installed.prompts.length < 1 || store.list.length !== installed.prompts.length)`,
+    `  throw new Error('the packed prompts were not installed: ' + JSON.stringify(install.info));`,
+    `const first = store.list[0];`,
+    `process.stdout.write(first.top === true && first.text.includes('HANDOFF.md') ? 'top' : 'bad');`,
+  ].join('\n');
+  const shortcut = await exec(process.execPath, ['--input-type=module', '-e', prompts], { cwd: packageRoot, timeout: 30_000 });
+  // The first shipped prompt is the handoff request, and it ships pinned.
+  assert.equal(shortcut.stdout, 'top');
+  console.log(`Packed ${pack.filename}; isolated npx entry passed; config loop.yaml and prompt.json created and read.`);
 } finally { await rm(root, { recursive: true, force: true }); }

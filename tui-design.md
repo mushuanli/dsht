@@ -840,7 +840,6 @@ dsht [options] [list workspaces|list sessions]
 | `/goal` | `[action\|objective]` | 查看或管理宿主目标 |
 | `/permission` | `[preset]` | 查看或切换宿主权限预设 |
 | `/feedback` | `text` | 记录会话反馈 |
-| `/handoff` | — | 先删除客户端运行目录下的 `HANDOFF.md`，再向 agent 发送一个请求，让它在工作区根目录写出新的会话交接（起因、目标、各任务状态：已完成／仍未完成／无法完成及原因、决策与改动文件、验证方式、下一步） |
 | `/loop` | `<name> [score] [tries]`（可加 `[--from N] [--to N] [--score X] [--tries N] [--deadline MIN]`） | 运行 `loop.yaml` 里名为 `<name>` 的记录：记录自带轮次、每轮 rubric、附加标准、固定输入（如被评审文档路径）与默认分/次数。优先级为 命令行 > 记录 `defaults` > 全局 `defaults`；`--deadline` 也可以用 `DSHT_LOOP_DEADLINE` 给出（正整数分钟）；未知名字会报错并列出可用记录（`design-review`、`designdoc-review`） |
 | `/export` | `[local.zip]` | 把会话日志 ZIP 保存为新文件 |
 | `/export-html` | `[local.html]` | 把已加载的对话（含表格、Mermaid 图与数学式）导出为离线 HTML |
@@ -1000,7 +999,7 @@ C4Dynamic
 
 投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。已投递消息的排队项来自宿主发布的 `inbox` 投影（0.1.7 之前是 `session/control` 的 `queue` 节）；`/queue` 的删除动作调用 `session/updateQueue`，条目身份就是 `inbox` 行的 `message.id`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。客户端另由 `useDeferredLines` 保留用户已提交、策略要求等回合或 Loop 结束的命令；这些命令尚未投递，断线期间继续等待，连接与会话快照恢复后才重新授权并逐条执行。
 
-**已提交但宿主尚未记录的行由客户端自己记住**：宿主把转向消息写入会话是在**下一个 step 开始时**（当前 step 的工具可能跑很久），所以只靠宿主上报的待发列表显示内容，在还没上报（或根本不上报队列）的宿主上会让刚敲的回车彻底不可见。`SessionController` 因此为每次算子提交生成 `requestId`，在发请求前就把它连同文本放进 `outbox`；`Transcript` 从 `user/message` 记录的 `source.rpcId` 记住已落地的身份，`inbox` 投影的行与（旧宿主的）`queue` 帧项同样带 `rpcId`。`retireOutbox()` 在每帧 follow（持久回显）与每帧 control（宿主待发列表）之后按这个身份退休条目，因此本地行与宿主记录在同一帧内交接——不重复、不留空。失败即移除；`promptInternal`（循环 Brief、handoff 等客户端自己组装的提示词）不进入 `outbox`；切换会话与重连代际都清空它。UI 只读 `queries.pendingPrompts`，在输入框上方渲染 `SubmittedPreview`。
+**已提交但宿主尚未记录的行由客户端自己记住**：宿主把转向消息写入会话是在**下一个 step 开始时**（当前 step 的工具可能跑很久），所以只靠宿主上报的待发列表显示内容，在还没上报（或根本不上报队列）的宿主上会让刚敲的回车彻底不可见。`SessionController` 因此为每次算子提交生成 `requestId`，在发请求前就把它连同文本放进 `outbox`；`Transcript` 从 `user/message` 记录的 `source.rpcId` 记住已落地的身份，`inbox` 投影的行与（旧宿主的）`queue` 帧项同样带 `rpcId`。`retireOutbox()` 在每帧 follow（持久回显）与每帧 control（宿主待发列表）之后按这个身份退休条目，因此本地行与宿主记录在同一帧内交接——不重复、不留空。失败即移除；`promptInternal`（循环 Brief 等客户端自己组装的提示词）不进入 `outbox`；切换会话与重连代际都清空它。UI 只读 `queries.pendingPrompts`，在输入框上方渲染 `SubmittedPreview`。
 
 交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时按数字键 1–3 直接作答，或用 ↑/↓ 移动选择后按 Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。显式作答（数字键或选中后的 Enter）才提交，未作答的按键不会产生 `$events/result`。提问同样如此：单选题的数字键就是答案本身，立刻结算该题，不再要求第二次回车；多选题的数字键仍是勾选／取消勾选，Enter 才确认整组。只有固定选项带编号，`Other answer` 是输入行，因此不编号，用方向键选中后回车进入。所有列表菜单（选择器、记录列表、`@` 补全、提问选项环、参数表单）的方向键首尾相接：首行向上回到末行，末行向下回到首行。
 

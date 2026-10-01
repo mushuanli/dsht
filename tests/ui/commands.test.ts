@@ -73,13 +73,11 @@ test('the pipeline owns the front-end modes while the parser owns the syntax', (
 });
 
 test('a running turn or loop queues the operator\'s own writes and refuses the rest', () => {
-  // A compaction, a handoff and a review start are the operator saying "do this next": they are
+  // A compaction and a review start are the operator saying "do this next": they are
   // accepted and held until the turn (or the loop) ends, not refused.
   for (const during of ['turn', 'loop'] as const) {
     assert.deepEqual(route('/compact', { during }), { kind: 'compact' });
     assert.equal(defer('/compact', { during }), during);
-    assert.deepEqual(route('/handoff', { during }), { kind: 'handoff' });
-    assert.equal(defer('/handoff', { during }), during);
     assert.deepEqual(route('/loop design-review 9', { during }), { kind: 'loop', name: 'design-review', options: { score: 9 } });
     assert.equal(defer('/loop design-review 9', { during }), during);
     // A record list is a surface for the draft being typed, so offering it later would be noise.
@@ -97,7 +95,7 @@ test('a running turn or loop queues the operator\'s own writes and refuses the r
     assert.deepEqual(route('/model', { during }), { kind: 'models', args: [] });
   }
   // A pending interaction is the more actionable reason, so it wins over the running turn.
-  assert.deepEqual(route('/handoff', { pending: true, during: 'turn' }),
+  assert.deepEqual(route('/queue', { pending: true, during: 'turn' }),
     { kind: 'error', message: 'Answer the pending question or approval first' });
 });
 
@@ -192,20 +190,6 @@ test('routing constraints live on the command, so the router enumerates no kinds
   // because an absent entry is now fail-closed.
   assert.deepEqual(COMMAND_POLICY.savePrompt, { duringTurn: 'run', duringLoop: 'run' });
   assert.deepEqual(COMMAND_POLICY.coredump, { duringTurn: 'run', duringLoop: 'run' });
-});
-
-test('/handoff takes no arguments and waits for a pending answer', () => {
-  assert.deepEqual(parseCommand('/handoff'), { kind: 'handoff' });
-  assert.deepEqual(parseCommand('/handoff now'), { kind: 'error', message: 'Use /handoff (no arguments)' });
-  assert.deepEqual(parseCommand('/handoffx'), { kind: 'error', message: 'Unknown command. Use /help.' });
-  assert.deepEqual(COMMAND_POLICY.handoff, { requiresSession: true, requiresNoInteraction: true,
-    duringTurn: 'queue', duringLoop: 'queue' });
-  // It sends a turn, so it needs a conversation and a settled approval or question.
-  assert.deepEqual(route('/handoff', { sessionSelected: false }), { kind: 'error', message: 'Select a session first' });
-  assert.deepEqual(route('/handoff', { pending: true }), { kind: 'error', message: 'Answer the pending question or approval first' });
-  const hint = COMMAND_HINTS.find(item => item.command === '/handoff');
-  assert.ok(hint && hint.description.length > 0);
-  assert.deepEqual(suggestedCommands('/han'), ['/handoff']);
 });
 
 test('a unique command prefix runs without being typed in full', () => {

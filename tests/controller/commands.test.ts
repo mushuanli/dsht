@@ -64,18 +64,6 @@ test('a rejection keeps the draft and says why, while a thrown fault is not a re
   assert.deepEqual(await run(app, '/nope'), kept('Unknown command. Use /help.'));
 });
 
-test('handoff clears the client file and asks for a live view with a notice', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'dsht-handoff-cmd-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const path = join(directory, 'HANDOFF.md');
-  await writeFile(path, 'stale');
-  const { app, fixture } = await controller(t, { localDirectory: directory });
-  assert.deepEqual(await run(app, '/handoff'), done([{ kind: 'closePanels' }, { kind: 'live' },
-    { kind: 'scroll', position: 0 }, { kind: 'notice', text: 'Handoff requested · local HANDOFF.md cleared' }]));
-  await assert.rejects(() => stat(path), /ENOENT/);
-  assert.ok(fixture.calls.some(call => call.method === 'session/prompt'));
-});
-
 test('/loop runs the named record, with its own defaults and vars', async t => {
   const { app, fixture } = await controller(t);
   // The record's own title, path and default budget come from loop.yaml, not from the command line.

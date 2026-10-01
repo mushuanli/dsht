@@ -34,7 +34,6 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/goal', usage: '[action|objective]', description: 'View or manage the host task goal' },
   { command: '/permission', usage: '[preset]', description: 'View or switch the host permission preset' },
   { command: '/feedback', usage: 'text', description: 'Record feedback about the session' },
-  { command: '/handoff', description: 'Delete local HANDOFF.md, then have the agent write a handoff' },
   { command: '/loop', usage: '[name|stop] [score] [tries]', description: 'Run a loop.yaml record; confirm defaults; stop/answer/abort', exactOnly: true },
   { command: '/export', usage: '[local.zip]', description: 'Save the session log ZIP to a new local file' },
   { command: '/export-html', usage: '[local.html]', description: 'Save loaded conversation with diagrams and math as offline HTML' },
@@ -118,14 +117,14 @@ export interface CommandPolicy {
  */
 /** A command that would write to the conversation another turn is already writing.
  *
- * `compact`, `handoff` and a `/loop` run each submit work of their own to the same session, so starting
+ * `compact` and a `/loop` run each submit work of their own to the same session, so starting
  * one mid-turn would interleave two writers on one conversation. The list is deliberately short: the
  * host owns the busy rules of its own commands (`/plan`, `/goal`, `/model`, …), and a client-side deny
  * there would contradict what the host would have accepted.
  */
 /** A command that writes to the conversation another turn is writing: it runs when that turn ends.
  *
- * These are the operator's own commands — a compaction, a handoff, a review to start — and refusing
+ * These are the operator's own commands — a compaction, a review to start — and refusing
  * them outright would make "I want this next" impossible to express while an agent works.
  */
 const QUEUES_WHILE_RUNNING: CommandPolicy = { duringTurn: 'queue', duringLoop: 'queue' };
@@ -173,7 +172,6 @@ export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPol
   cancel: { ...ANSWERS_WHILE_RUNNING },
   approval: { ...ANSWERS_WHILE_RUNNING },
   compact: { requiresSession: true, ...QUEUES_WHILE_RUNNING },
-  handoff: { requiresSession: true, requiresNoInteraction: true, ...QUEUES_WHILE_RUNNING },
   loop: { requiresSession: true, requiresNoInteraction: true, ...QUEUES_WHILE_RUNNING },
   // A record list is a surface for the draft being typed; by the time a turn ends, the operator has
   // moved on, so offering it later would be noise rather than help.

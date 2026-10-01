@@ -52,7 +52,8 @@ test('the record list names the user file behind a record, and marks the rows it
   const mine = { ...RECORD, fromFile: true as const };
   const source = {
     file: '/home/me/.config/dsht/loop.yaml',
-    overridden: ['design-review'], added: ['my-review'],
+    local: '/home/me/.config/dsht/loop.local.yaml',
+    overridden: ['design-review'], added: ['my-review'], shadowed: ['designdoc-review'],
     warnings: ['Your design-review in /home/me/.config/dsht/loop.yaml replaces a shipped record that changed in this version.'],
   };
   const ui = render(<LoopMenu records={[mine, SECOND]} index={0} source={source} />);
@@ -60,6 +61,9 @@ test('the record list names the user file behind a record, and marks the rows it
     const frame = ui.lastFrame()!;
     // An operator who overrode a shipped record has to be able to see it before starting a run.
     assert.match(frame, /Records from \/home\/me\/\.config\/dsht\/loop\.yaml · replaced: design-review · added: my-review/);
+    // The operator's own file is named too, with the installed records it hides: a record that is not
+    // in the list cannot be found any other way.
+    assert.match(frame, /Local \/home\/me\/\.config\/dsht\/loop\.local\.yaml · hides: designdoc-review/);
     assert.match(frame, /design-review · Design review · 10 rounds · pass 8 · ≤10 tries · DESIGN-REVIEW\.md · yours/);
     assert.match(frame, /Your design-review in \/home\/me/);
     // A record this install did not supply is not marked as the operator's.

@@ -1,7 +1,7 @@
 /** Application facade: composes the connection, session, catalog and cost domains. */
 import { join } from 'node:path';
 import { Client } from '../transport/client.ts';
-import { removeFile, writeHeapSnapshot } from '../storage/index.ts';
+import { writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { ModelCatalog, SearchItem, SessionRow } from '../transport/dsh.ts';
 import type { HostEvent } from '../transport/events.ts';
@@ -19,6 +19,7 @@ import { MemoryLog } from './memory-log.ts';
 import { ForegroundSlot } from './foreground.ts';
 import { TraceLog } from './trace-log.ts';
 import { PromptStore } from './prompts.ts';
+import type { PromptSourcePaths } from './prompt-source.ts';
 import { latestAssistantText, type LoopLimits, type LoopProtocol } from './loop.ts';
 import { LoopCoordinator } from './loop-coordinator.ts';
 import { loopRecords as listLoopRecords } from './loop-protocols.ts';
@@ -62,26 +63,6 @@ function verifierLabel(title: string): string {
   return stripped.trim() === '' ? title : stripped.trim();
 }
 
-/** File `/handoff` clears on this machine before it asks the agent to write a handoff. */
-const HANDOFF_FILE = 'HANDOFF.md';
-
-/** Instruction `/handoff` sends once this client's own copy of the file is gone.
- *
- * The sections are explicit because a handoff is read by whoever continues the work: why the
- * session exists, the goal, and the state of every task, including the ones that cannot be done.
- */
-const HANDOFF_PROMPT = [
-  'Write a session handoff to HANDOFF.md in the workspace root, overwriting whatever is there,',
-  'in the language of this conversation. Cover, in this order:',
-  '(1) why this session exists and what triggered it;',
-  '(2) the goal it is working toward;',
-  '(3) every task and its state — completed, still open, or impossible, each with its reason;',
-  '(4) the decisions made and the files changed;',
-  '(5) how to verify the current state;',
-  '(6) the exact next steps for whoever continues this work.',
-  'Base it only on this session; never invent work that did not happen.',
-].join(' ');
-
 /** Mutating operations: foreground work, local edits, and control cancellation with its own admission. */
 export interface Actions {
   /** Claim the single foreground slot for work the front end orchestrates itself (paging, loading).
@@ -113,8 +94,6 @@ export interface Actions {
   searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: SearchItem[]; hasMore: boolean } | undefined>;
   searchHistory(query: string, signal: AbortSignal): Promise<HistorySearch | undefined>;
   prompt(text: string): Promise<boolean>;
-  /** Clear this client's HANDOFF.md, then ask the agent to write a fresh handoff there. */
-  handoff(): Promise<boolean>;
   /** Start any client-driven scored loop and send its first step. */
   startLoop(protocol: LoopProtocol, limits: LoopLimits): Promise<boolean>;
   /** Stop a running loop; the terminal progress stays visible for the reader. */
@@ -243,8 +222,8 @@ export interface ControllerOptions {
   localDirectory?: string;
   /** Whether `!` may run local commands; the CLI disables it with `--no-shell`. */
   shellEnabled?: boolean;
-  /** File holding the operator's shortcut prompts; absent keeps them in memory for this run. */
-  promptsPath?: string;
+  /** The installed defaults and the operator's own prompt file; absent keeps them in memory. */
+  promptSources?: PromptSourcePaths;
   /** Independent verifier for scored rounds; absent keeps verification inside the reviewed session. */
   verifier?: VerifierPort;
   /** Allow a reply block to decide when the verifier is unavailable; the progress line says so. */
@@ -380,7 +359,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     });
     if (this.memoryLogPath !== undefined) this.memoryLog = new MemoryLog(this.memoryLogPath, () => this.memorySample());
     if (options.tracePath !== undefined) this.trace = new TraceLog(options.tracePath);
-    this.promptStore = new PromptStore(options.promptsPath);
+    this.promptStore = new PromptStore(options.promptSources);
     this.actions = this.buildActions();
     this.queries = this.buildQueries();
   }
@@ -514,7 +493,6 @@ export class Controller implements ControllerStore, ConnectionListener {
       openHistory: (target, signal) => this.runAction('history', 'Opening history…', operation => this.session.openHistory(target, AbortSignal.any([signal, operation]))),
       searchHistory: (query, signal) => this.runActionValue('search', 'Searching history…', operation => this.searchHistory(query, AbortSignal.any([signal, operation]))),
       prompt: text => this.runAction('prompt', 'Sending…', () => this.prompt(text)),
-      handoff: () => this.runAction('handoff', 'Requesting handoff…', () => this.handoff()),
       startLoop: (protocol, limits) => this.runAction('loop', 'Starting loop…', () => this.loops.start(protocol, limits)),
       stopLoop: () => this.loops.stop(),
       clearLoopResult: () => this.loops.clearResult(),
@@ -1203,16 +1181,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     await this.session.prompt(text);
   }
 
-  /** Clear this client's stale handoff file, then ask the agent to write a new one.
-   *
-   * The deletion happens first and on this machine, so a handoff that never gets written cannot be
-   * mistaken for the previous one. The request itself is an ordinary turn: it steers a running
-   * agent and starts an idle one, exactly like submitted text.
-   */
-  private async handoff(): Promise<void> {
-    await removeFile(join(this.localDirectory, HANDOFF_FILE));
-    await this.session.promptInternal(HANDOFF_PROMPT);
-  }
+
 
   /** Cancel the active turn; pending queue items remain host-owned. */
   private async cancelTurn(): Promise<void> {

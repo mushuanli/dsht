@@ -27,7 +27,8 @@ function composer(frame: string): string {
 async function mount(t: { after(fn: () => void | Promise<void>): void }, promptsPath?: string) {
   const fixture = await host();
   t.after(() => fixture.close());
-  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', promptsPath });
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1',
+    promptSources: promptsPath === undefined ? undefined : { local: promptsPath } });
   if (promptsPath === undefined) {
     await controller.promptStore.save('Explain this code');
     await controller.promptStore.save('Review for bugs');

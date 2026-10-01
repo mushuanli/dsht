@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CostLedger, loadPrices } from '../cost/index.ts';
+import { installPromptSource, migrateLegacyPromptFile } from '../controller/prompt-source.ts';
 import { parseArgs } from 'node:util';
 import { mount } from '../ui/mount.tsx';
 import { ensureDirectory, readText } from '../storage/index.ts';
@@ -56,11 +57,15 @@ The default host is http://127.0.0.1:3080.
 First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 /cost shows the session, day, week and month CNY estimates.
-/prompt lists saved shortcut prompts; /prompt TEXT saves one in <state>/prompts.json.
+/prompt lists saved shortcut prompts; /prompt TEXT saves one in the config directory's
+prompt.local.json, which layers over the installed prompt.json.
 !command runs on this machine, not on the host, and prints its output in the transcript.
 DSHT_CONFIG_DIR overrides the prices.json directory; DSHT_STATE_DIR overrides usage storage.
-The config directory's loop.yaml is created from the shipped file when absent. On startup,
-unedited shipped records are merged into it. DSHT_LOOP_FILE names another runtime file instead.
+The config directory's loop.yaml is created from the shipped file when absent, prompt.json
+the same way and kept equal to it afterwards. On startup, unedited shipped loop records are merged into loop.yaml, and
+loop.local.yaml / prompt.local.json layer over both: what they define is what is shown.
+DSHT_LOOP_FILE / DSHT_LOOP_LOCAL_FILE and DSHT_PROMPT_FILE / DSHT_PROMPT_LOCAL_FILE name
+other files.
 The memory log defaults to <state>/memory.log; DSHT_MEMORY_LOG sets another path or 'off'.
 The transition trace defaults to <state>/trace.log; DSHT_TRACE sets another path or 'off'.
 prices.json overrides the shipped rates and is seeded on first use; every scan re-decides the
@@ -145,9 +150,19 @@ async function main(): Promise<void> {
   // stops startup; a missing or invalid shipped file uses the compiled-in fallback with a warning.
   const loopSource = await loadLoopSource({
     ...(process.env.DSHT_LOOP_FILE === undefined ? {} : { overlayFile: process.env.DSHT_LOOP_FILE }),
+    ...(process.env.DSHT_LOOP_LOCAL_FILE === undefined ? {} : { localFile: process.env.DSHT_LOOP_LOCAL_FILE }),
     configDirectory: config,
   });
   installLoopSource(loopSource.source, loopSource.info);
+  // The prompt files follow the loop files: the shipped defaults are installed once, the operator's own
+  // file layers over them, and a pre-layering saved-prompt file is moved into that layer.
+  const prompts = await installPromptSource({
+    configDirectory: config,
+    ...(process.env.DSHT_PROMPT_FILE === undefined ? {} : { installedFile: process.env.DSHT_PROMPT_FILE }),
+    ...(process.env.DSHT_PROMPT_LOCAL_FILE === undefined ? {} : { localFile: process.env.DSHT_PROMPT_LOCAL_FILE }),
+  });
+  const migratedPrompts = await migrateLegacyPromptFile(join(stateRoot, 'prompts.json'), prompts.paths.local,
+    prompts.paths.installed);
   const costDirectory = join(stateRoot, 'cost', createHash('sha256').update(new URL(url).origin).digest('hex'));
   const costs = new CostLedger(prices, costDirectory, custom);
   await costs.load();
@@ -185,7 +200,7 @@ async function main(): Promise<void> {
     deadlineMs: loopDeadlineMs(values.deadline ?? process.env.DSHT_LOOP_DEADLINE),
     memoryLogPath: memoryLogPath(stateRoot, values['memory-log'], values['no-memory-log']),
     tracePath: tracePath(stateRoot, values.trace, values['no-trace']),
-    promptsPath: join(stateRoot, 'prompts.json'),
+    promptSources: prompts.paths,
   });
   const plan = {
     ...(values.ws === undefined ? {} : { workspace: values.ws }),
@@ -199,6 +214,15 @@ async function main(): Promise<void> {
   const log = (line: string) => process.stderr.write(`${line}\n`);
   // Headless runs have no record list, so the loop source's notes would otherwise never be read.
   if (values.headless) for (const warning of loopSource.info.warnings) log(warning);
+  // Prompt installation has no panel of its own, and these notes describe where the operator's saved
+  // prompts now live, so they are written before the renderer takes the terminal in either mode.
+  const promptNotes = [
+    ...(prompts.info.created === undefined ? [] : [`Installed the shipped shortcut prompts at ${prompts.info.created}`]),
+    ...(prompts.info.updated === undefined ? [] : [`Updated the installed shortcut prompts at ${prompts.info.updated}`]),
+    ...(migratedPrompts === undefined ? [] : [`Moved your saved prompts from ${migratedPrompts} to ${prompts.paths.local}`]),
+    ...prompts.info.warnings,
+  ];
+  for (const note of promptNotes) process.stderr.write(`${note}\n`);
   controller.start();
   if (values.headless) {
     // No renderer: run the plan, follow a started loop to its verdict, and report it as the exit code.

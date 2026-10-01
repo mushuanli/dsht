@@ -259,11 +259,6 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
       const accepted = await controller.actions.prompt(command.text);
       return accepted ? ok([{ kind: 'closePanels' }, { kind: 'live' }, { kind: 'scroll', position: 0 }]) : undefined;
     }
-    case 'handoff': {
-      if (!await controller.actions.handoff()) return undefined;
-      return ok([{ kind: 'closePanels' }, { kind: 'live' }, { kind: 'scroll', position: 0 },
-        { kind: 'notice', text: 'Handoff requested · local HANDOFF.md cleared' }]);
-    }
     case 'loops':
       // The record list is a composer surface the UI offers while the name is typed; a line that
       // still reaches here has nobody to choose for it, so it is told to name one.

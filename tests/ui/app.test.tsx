@@ -2430,7 +2430,7 @@ test('/loop runs the highlighted record with its defaults after two Enters', asy
   assert.deepEqual(loopEvents, ['command', 'form', 'command', 'begin', 'sent']);
 });
 
-test('lines the policy holds run in arrival order once the turn ends', async t => {
+test('every line the policy holds runs once the turn ends, in submission order', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
@@ -2439,21 +2439,22 @@ test('lines the policy holds run in arrival order once the turn ends', async t =
   await until(() => controller.queries.record.ready);
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
   await until(() => controller.queries.running);
-  // Two commands that write to the conversation are accepted and held, not refused.
-  await pressKey(ui, '/compact'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Queued /compact') === true);
-  await pressKey(ui, '/handoff'); await pressKey(ui, '\r');
-  await until(() => ui.lastFrame()?.includes('Queued /handoff') === true);
+  // Two writes are accepted and held rather than refused. `/compact` is the only submission left that
+  // queues behind a turn — the handoff request is now a saved prompt the operator sends themselves — so
+  // this pins the holding itself; each accepted line is proven by its draft being used up, which is what
+  // the front end does only after the line reached the queue.
+  for (let index = 0; index < 2; index++) {
+    await pressKey(ui, '/compact'); await pressKey(ui, '\r');
+    await until(() => ui.lastFrame()?.includes('Queued /compact') === true);
+    await until(() => !ui.lastFrame()?.includes('❯ /compact'));
+  }
   assert.equal(fixture.calls.some(call => call.method === 'commands/execute'), false);
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
-  // The turn ends: the held lines run in the order they were submitted.
+  // The turn ends, and the queue drains: both lines reach the host, one after the other.
   fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', false] });
-  await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
-  const methods = fixture.calls.map(call => call.method);
-  assert.ok(methods.indexOf('commands/execute') >= 0 && methods.indexOf('commands/execute') < methods.indexOf('session/prompt'),
-    methods.join(','));
+  await until(() => fixture.calls.filter(call => call.method === 'commands/execute').length === 2);
+  assert.deepEqual(fixture.calls.map(call => call.method).filter(method => method === 'session/prompt'), []);
 });
-
 test('a held line survives reconnect when the foreground operation finishes offline', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });

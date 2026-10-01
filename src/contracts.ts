@@ -28,7 +28,14 @@ export interface HistoryPanel { query: string; contentSearch: boolean; matches?:
 export interface SearchPanel { query: string; items: SearchItem[]; hasMore: boolean }
 
 /** One user-saved shortcut prompt; the client owns the list, no session or host does. */
-export interface SavedPrompt { id: string; text: string }
+export interface SavedPrompt {
+  id: string;
+  text: string;
+  /** True when this entry comes from the installed defaults rather than the operator's own file. */
+  installed?: boolean;
+  /** Marked in the file as belonging before the rest: `top: true` pins, `top: false` demotes a default. */
+  top?: boolean;
+}
 
 /** One panel-like surface the reader can see; the application names it, the UI renders it. */
 export type PanelName = 'help' | 'cost' | 'status' | 'queue' | 'prompts'
@@ -42,8 +49,12 @@ export type PanelName = 'help' | 'cost' | 'status' | 'queue' | 'prompts'
 export interface LoopSourceInfo {
   /** Shipped `loop.yaml` that was read; absent when the compiled-in records were used instead. */
   builtin?: string;
-  /** Runtime file read after creation and merging. */
+  /** Runtime file read after creation and merging: the installed copy of the shipped records. */
   file?: string;
+  /** Operator's `loop.local.yaml`, when one was read; its records shadow the installed ones. */
+  local?: string;
+  /** Installed records a local record replaced, in the local file's order. */
+  shadowed: readonly string[];
   /** Shipped records the user's file replaced, in that file's order. */
   overridden: readonly string[];
   /** Records the user's file added. */
@@ -152,7 +163,6 @@ export type ForegroundKind =
   | 'cost'
   | 'loop'
   | 'verifier'
-  | 'handoff'
   | 'local';
 
 /** The one operation that owns the client right now, as a view renders it.
