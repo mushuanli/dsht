@@ -104,8 +104,6 @@ export interface CommandPolicy {
   requiresNoInteraction?: boolean;
   /** Belongs to the control lane of the session write gate: it preempts waiting writes (§6.3.2). */
   control?: boolean;
-  /** While another operation owns the foreground slot, which is what the operator is watching. */
-  whileBusy?: DuringExecution;
   /** While a turn of the selected conversation runs. */
   duringTurn?: DuringExecution;
   /** While a client-driven loop runs, which is what the operator must deal with first. */
@@ -137,14 +135,30 @@ const CONFLICTS_WITH_RUNNING: CommandPolicy = { duringTurn: 'deny', duringLoop: 
 
 /** Commands that answer the operator or the host and must reach the session while it is busy.
  *
- * `whileBusy: 'run'` is the foreground-slot equivalent: cancelling an agent turn or settling the
- * interaction holding it is independent of whatever long operation the client is showing, and the
- * operator must never be told to wait for an export before they can stop the agent.
+ * The foreground slot is deliberately absent here: whether a line can be shown is decided when the
+ * slot is *acquired* (§6.4), never by a static policy — a policy that claimed to know would have to
+ * predict the execution path, and the check would race the acquisition it duplicates.
  */
 const ANSWERS_WHILE_RUNNING: CommandPolicy = { duringTurn: 'run', duringLoop: 'run' };
-const ANSWERS_WHILE_BUSY: CommandPolicy = { whileBusy: 'run' };
+
+/** Lines that only read, only reshape the reader's view, or only touch local state.
+ *
+ * They carry no session write, so a running turn or loop is no reason to refuse them. Declared
+ * explicitly rather than left absent: {@link policyFor} is fail-closed, so "no entry" now means
+ * "refused while busy", and a read command must say otherwise on purpose.
+ */
+const LOCAL_OR_READ: CommandPolicy = { duringTurn: 'run', duringLoop: 'run' };
 
 export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPolicy>>> = {
+  quit: LOCAL_OR_READ,
+  navigate: LOCAL_OR_READ,
+  remove: LOCAL_OR_READ,
+  newSession: LOCAL_OR_READ,
+  savePrompt: LOCAL_OR_READ,
+  coredump: LOCAL_OR_READ,
+  latest: LOCAL_OR_READ,
+  older: { requiresSession: true, ...LOCAL_OR_READ },
+  sessionSearch: { requiresSession: true, ...LOCAL_OR_READ },
   shell: { requiresSession: true },
   models: { requiresSession: true },
   queue: { requiresSession: true, requiresNoInteraction: true },
@@ -156,8 +170,8 @@ export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPol
   panel: { ...ANSWERS_WHILE_RUNNING },
   copy: { ...ANSWERS_WHILE_RUNNING },
   // Cancelling the turn, or settling the interaction that is holding it, must never be refused.
-  cancel: { ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
-  approval: { ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
+  cancel: { ...ANSWERS_WHILE_RUNNING },
+  approval: { ...ANSWERS_WHILE_RUNNING },
   compact: { requiresSession: true, ...QUEUES_WHILE_RUNNING },
   handoff: { requiresSession: true, requiresNoInteraction: true, ...QUEUES_WHILE_RUNNING },
   loop: { requiresSession: true, requiresNoInteraction: true, ...QUEUES_WHILE_RUNNING },
@@ -168,12 +182,39 @@ export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPol
   hostCommand: { requiresSession: true, requiresNoInteraction: true },
   // Stopping is a control-lane action: it stays allowed while an approval waits, and while the very
   // line it is meant to interrupt still owns the controller, because that is exactly when it is needed.
-  loopStop: { requiresSession: true, control: true, ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
+  loopStop: { requiresSession: true, control: true, ...ANSWERS_WHILE_RUNNING },
   // Answering a paused run and ending it must both work while the loop is what is running.
-  loopAnswer: { requiresSession: true, ...ANSWERS_WHILE_RUNNING, ...ANSWERS_WHILE_BUSY },
+  loopAnswer: { requiresSession: true, ...ANSWERS_WHILE_RUNNING },
   export: { requiresSession: true },
   exportHtml: { requiresSession: true },
 };
+
+/** Line kinds the pipeline classifies itself: free text, an interaction answer, a typed directory,
+ * and the syntax error a bad line produces. They are the operator's own channel, so no catalog policy
+ * constrains them; every *catalog* kind must declare one instead. */
+const UNCATALOGUED_LINES = new Set(['prompt', 'answer', 'path', 'error']);
+
+/** What an undeclared catalog kind gets: no running turn and no loop may hide it.
+ *
+ * Fail-closed on purpose. A new command that forgot to declare its policy is refused while the
+ * conversation is busy and reports why, rather than silently running inside another writer's turn.
+ */
+const FAIL_CLOSED: CommandPolicy = { duringTurn: 'deny', duringLoop: 'deny' };
+
+/** Read one line kind's declared policy.
+ *
+ * The table is the single source of truth for what a command may do while the session is busy, so an
+ * absent entry is a mistake rather than a licence: the uncatalogued channel is listed explicitly and
+ * everything else falls back to {@link FAIL_CLOSED}. `tests/ui/commands.test.ts` fails the build when
+ * a catalog kind is added without an entry.
+ * @param kind - Line kind about to be authorized.
+ * @returns The declared policy, never undefined.
+ */
+export function policyFor(kind: string): CommandPolicy {
+  const declared = (COMMAND_POLICY as Readonly<Record<string, CommandPolicy | undefined>>)[kind];
+  if (declared !== undefined) return declared;
+  return UNCATALOGUED_LINES.has(kind) ? {} : FAIL_CLOSED;
+}
 
 
 

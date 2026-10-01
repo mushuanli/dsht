@@ -1,4 +1,5 @@
 /** History navigation operates on visible record sequences and SGR input packets. */
+import { followFrame } from '../../src/transport/dsh-contract.ts';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -9,7 +10,7 @@ import { Controller } from '../../src/controller/controller.ts';
 import { host, snapshot, until } from '../support/host.ts';
 
 test('history offsets refer to visible messages', () => {
-  const transcript = new Transcript(); transcript.accept(snapshot);
+  const transcript = new Transcript(); transcript.accept(followFrame(snapshot));
   const layout = historyLayout(transcript, 30);
   assert.equal(layout.offsets.get(0), 0);
   assert.deepEqual(layout.lines, ['❯ User', '你好', '']);
@@ -84,9 +85,9 @@ test('closing a detached history window cancels paging and prevents a late page 
   t.after(async () => { release(); await controller.stop(); }); controller.start();
   await until(() => controller.queries.record.ready);
   const window = new Transcript();
-  window.accept({ ...snapshot, cursor: 5, hasMore: true, records: [{ type: 'event', event: {
+  window.accept(followFrame({ ...snapshot, cursor: 5, hasMore: true, records: [{ type: 'event', event: {
     seq: 5, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Detached message' }] },
-  } }] });
+  } }] }));
   controller.session.setViewWindow(window);
   let requested = false;
   fixture.onPage = async () => { requested = true; await gate; return { records: snapshot.records, hasMore: false }; };
@@ -127,9 +128,9 @@ test('selecting another session aborts the previous history search request', asy
 
 test('stream frames reuse the history index, bound row caching, and retrieve evicted rows on demand', () => {
   const transcript = new Transcript();
-  transcript.accept({ ...snapshot, records: Array.from({ length: 1500 }, (_, seq) => ({ type: 'event', event: {
+  transcript.accept(followFrame({ ...snapshot, records: Array.from({ length: 1500 }, (_, seq) => ({ type: 'event', event: {
     seq, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: `Message ${seq}` }] } },
-  } })) });
+  } })) }));
   const first = historyLayout(transcript, 80);
   assert.equal(first.length, 3001);
   assert.ok(first.cachedRowCount <= 2048);
@@ -137,9 +138,9 @@ test('stream frames reuse the history index, bound row caching, and retrieve evi
   const parts = oldest.parts;
   let oldReads = 0;
   Object.defineProperty(oldest, 'parts', { get() { oldReads++; return parts; } });
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', index: 0, revision: 2,
-    chunk: { type: 'text-delta', index: 0, text: 'Live answer' } } });
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } }));
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', index: 0, revision: 2,
+    chunk: { type: 'text-delta', index: 0, text: 'Live answer' } } }));
   const next = historyLayout(transcript, 80);
   assert.equal(next.offsets, first.offsets);
   assert.equal(next.viewport(next.length - 2, next.length).at(-1)?.text, 'Live answer');
@@ -151,11 +152,11 @@ test('stream frames reuse the history index, bound row caching, and retrieve evi
 
 test('individual reasoning folds preserve complete searchable text and other messages', () => {
   const transcript = new Transcript();
-  transcript.accept({ ...snapshot, records: [1, 2].map(seq => ({ type: 'event', event: {
+  transcript.accept(followFrame({ ...snapshot, records: [1, 2].map(seq => ({ type: 'event', event: {
     seq, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [
       { type: 'reasoning', text: 'Long thought '.repeat(30) + `needle-${seq}` }, { type: 'text', text: `Answer ${seq}` },
     ] } },
-  } })) });
+  } })) }));
   const folded = historyLayout(transcript, 40);
   assert.ok(folded.lines.some(line => line.includes('/think 1')));
   assert.ok(!folded.lines.some(line => line.includes('needle-1')));
@@ -172,20 +173,20 @@ test('assistant headings group by user across tools, context, streaming and olde
   const user = (seq: number) => ({ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append',
     data: { content: [{ type: 'text', text: `Prompt ${seq}` }] } } });
   const transcript = new Transcript();
-  transcript.accept({ ...snapshot, records: [assistant(3), assistant(4)], hasMore: true });
+  transcript.accept(followFrame({ ...snapshot, records: [assistant(3), assistant(4)], hasMore: true }));
   const labels = () => historyLayout(transcript, 80).lines.filter(line => line.startsWith('✦ Assistant'));
   assert.deepEqual(labels(), ['✦ Assistant']);
   assert.deepEqual(historyLayout(transcript, 80).lines, ['✦ Assistant', 'Answer 3', '', 'Answer 4', '']);
-  transcript.accept({ type: 'event', event: { seq: 5, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [] } } } });
-  transcript.accept({ type: 'event', event: { ...user(6).event, data: { ...user(6).event.data, source: { kind: 'system' } } } });
-  transcript.accept(assistant(7));
+  transcript.accept(followFrame({ type: 'event', event: { seq: 5, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [] } } } }));
+  transcript.accept(followFrame({ type: 'event', event: { ...user(6).event, data: { ...user(6).event.data, source: { kind: 'system' } } } }));
+  transcript.accept(followFrame(assistant(7)));
   assert.equal(labels().length, 1);
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
-    chunk: { type: 'text-delta', index: 0, text: 'Live answer' } } });
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } }));
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'text-delta', index: 0, text: 'Live answer' } } }));
   assert.equal(labels().length, 1);
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'end', attemptId: 'a', revision: 3, index: 1 } });
-  transcript.accept(user(8)); transcript.accept(assistant(9));
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'end', attemptId: 'a', revision: 3, index: 1 } }));
+  transcript.accept(followFrame(user(8))); transcript.accept(followFrame(assistant(9)));
   assert.equal(labels().length, 2);
   // Prepending and then evicting the group start must invalidate cached heading heights.
   const messages = [user(1), assistant(2), assistant(3), assistant(4), user(8), assistant(9)];
@@ -193,17 +194,17 @@ test('assistant headings group by user across tools, context, streaming and olde
   let layout = historyLayout(transcript, 80);
   assert.equal(labels().length, 2);
   assert.equal(layout.viewport(layout.offsets.get(3)!, layout.offsets.get(3)! + 1)[0]?.text, 'Answer 3');
-  transcript.accept({ ...snapshot, records: messages.slice(2) });
+  transcript.accept(followFrame({ ...snapshot, records: messages.slice(2) }));
   layout = historyLayout(transcript, 80);
   assert.equal(layout.viewport(0, 1)[0]?.text, '✦ Assistant');
   assert.equal(labels().length, 2);
 });
 
 test('live reasoning folds below 60 content columns and expands on explicit request', () => {
-  const transcript = new Transcript(); transcript.accept(snapshot);
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
-    chunk: { type: 'reasoning-delta', index: 0, text: 'Thinking\nDetailed reasoning' } } });
+  const transcript = new Transcript(); transcript.accept(followFrame(snapshot));
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } }));
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'Thinking\nDetailed reasoning' } } }));
   assert.ok(historyLayout(transcript, 60).lines.includes('Detailed reasoning'));
   const narrow = historyLayout(transcript, 59).lines;
   assert.ok(narrow.some(line => line.includes('/think live')));

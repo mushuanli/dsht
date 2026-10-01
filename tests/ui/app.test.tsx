@@ -17,7 +17,7 @@ import { array, object, type ObjectValue } from '../../src/transport/wire.ts';
 import { controlFrame } from '../../src/transport/events.ts';
 import { host, snapshot, until } from '../support/host.ts';
 import { renderAt } from '../support/tty.ts';
-import { StatusBar } from '../../src/ui/chat/status.tsx';
+import { StatusBar, type StatusPause } from '../../src/ui/chat/status.tsx';
 import { statusSource } from '../support/status-source.ts';
 import { readTrace } from '../../src/controller/trace-log.ts';
 
@@ -416,9 +416,8 @@ test('hosts without a control stream show unknown metrics and refresh catalog de
   fixture.defaultModel = { provider: 'fixture', model: 'new-default' };
   fixture.emit({ type: 'emit', event: 'settings/document-updated', args: [] });
   await until(() => controller.state.defaultModel?.model === 'new-default');
-  assert.match(ui.lastFrame()!, /Model: fixture\/chat/);
-  await pressKey(ui, '/status'); await pressKey(ui, '\r');
-  await pressKey(ui, '/status'); await pressKey(ui, '\r');
+  // An open panel reads the same live facts as the bar, so the new default reaches it without a reopen:
+  // the panel used to be frozen with the dialog, which is the behaviour this decoupling removed.
   await until(() => ui.lastFrame()?.includes('Model: fixture/new-default') === true);
   assert.equal(controller.state.online, true);
 });
@@ -697,8 +696,10 @@ test('/cost displays cached session and daily estimates without submitting a pro
   await until(() => ui.lastFrame()?.includes('Cost · CNY estimate') === true);
   const expected = await readFile(new URL('../expected/cost.txt', import.meta.url), 'utf8');
   for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()?.includes(line), ui.lastFrame());
-  // The open panel pauses the clock, and the bar names that reason instead of freezing silently.
-  assert.match(ui.lastFrame()!, /⏸ dialog │ chat · ¥: 0\.00\(0\.00\)\*/);
+  // An open panel is another view of live state: the bar keeps projecting the runtime instead of
+  // stopping the clock behind it.
+  assert.doesNotMatch(ui.lastFrame()!, /⏸ dialog/);
+  assert.match(ui.lastFrame()!, /│ chat · ¥: 0\.00\(0\.00\)\*/);
   assert.equal(fixture.calls.some(c => c.method === 'session/prompt'), false);
 });
 
@@ -907,17 +908,17 @@ test('cost coverage marks the subtotals it cannot confirm instead of rewriting t
   assert.match(bar(true), /Cost coverage incomplete: scan failed/);
 });
 
-test('the bar names the tool that is running, including while the clock is paused', async t => {
+test('the bar names the tool that is running, and only copy mode stops its clock', async t => {
   const controller = new Controller({ base: 'http://x1:4096' });
   const now = Date.now();
   controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
-    sessions: [{ sessionId: 's1', running: true }] };
+    sessions: [{ sessionId: 's1', running: true, blank: false }] };
   controller.queries.record.addPage({ hasMore: false, records: [
     { type: 'event', event: { seq: 0, type: 'turn/start', time: now - 8_000, data: { turn: 1 } } },
     { type: 'event', event: { seq: 1, time: now - 5_000, surfaceOp: 'append', type: 'assistant/message',
       data: { message: { content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] } } } },
   ] });
-  const bar = (pauseReason?: 'copy' | 'dialog' | 'history') => {
+  const bar = (pauseReason?: StatusPause) => {
     const ui = render(<StatusBar source={statusSource(controller)} pauseReason={pauseReason} />);
     const frame = ui.lastFrame() ?? '';
     ui.unmount(); ui.cleanup();
@@ -925,12 +926,10 @@ test('the bar names the tool that is running, including while the clock is pause
   };
   // The tool runs after the assistant stream that asked for it ended, so the bar reads the open turn.
   assert.match(bar(), /◐ 0:0\d · bash \d+s · \^C/, bar());
-  // A paused bar keeps the phase: the reason explains the frozen clock, and the running tool is the
-  // answer the bar exists to give.
-  for (const reason of ['copy', 'dialog', 'history'] as const) {
-    const frame = bar(reason);
-    assert.match(frame, new RegExp(`⏸ ${reason} 0:0\\d · bash \\d+s`), frame);
-  }
+  // A frozen bar keeps the phase: the reason explains the stopped clock, and the running tool is the
+  // answer the bar exists to give. Copy mode is the only freeze; a panel does not stop time.
+  const frozen = bar('copy');
+  assert.match(frozen, /⏸ copy 0:0\d · bash \d+s/, frozen);
   // The result arriving does not clear the phase: the bar times the current event until a newer one
   // starts, so the quiet stretch after a command is still time the turn spent working.
   controller.queries.record.addPage({ hasMore: false, records: [
@@ -940,7 +939,7 @@ test('the bar names the tool that is running, including while the clock is pause
   assert.match(bar(), /◐ 0:0\d · bash \d+s · \^C/, bar());
   // A ready bar has no phase at all: the transcript keeps the last event it saw, and only the host
   // knows that the turn ended.
-  controller.state = { ...controller.state, sessions: [{ sessionId: 's1', running: false }] };
+  controller.state = { ...controller.state, sessions: [{ sessionId: 's1', running: false, blank: false }] };
   const ready = bar();
   assert.match(ready, /● Ready/);
   assert.equal(ready.includes('bash'), false);
@@ -978,9 +977,9 @@ test('the pickers show each session state and a workspace rollup from the list s
   controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
     workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2', 's3'] }],
     sessions: [
-      { sessionId: 's1', updatedAt: now - 5 * 60_000, projections: { values: { title: 'Idle one' } } },
-      { sessionId: 's2', running: true, updatedAt: now - 2 * 60_000, projections: { values: { title: 'Running one' } } },
-      { sessionId: 's3', blank: true, projections: { values: { title: 'Blank one' } } },
+      { sessionId: 's1', running: false, blank: false, updatedAt: now - 5 * 60_000, title: 'Idle one' },
+      { sessionId: 's2', running: true, blank: false, updatedAt: now - 2 * 60_000, title: 'Running one' },
+      { sessionId: 's3', running: false, blank: true, title: 'Blank one' },
     ] };
   let ui!: ReturnType<typeof render>;
   await act(async () => { ui = render(<App controller={controller} />); });
@@ -1021,14 +1020,14 @@ test('a picker wraps its arrows, so neither end of the list is a dead key', asyn
 test('the bar names an answer the user still owes ahead of the running clock', () => {
   const controller = new Controller({ base: 'http://x1:4096' });
   controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
-    sessions: [{ sessionId: 's1', running: true }],
+    sessions: [{ sessionId: 's1', running: true, blank: false }],
     pending: [{ kind: 'approval', eventId: 'a1', sessionId: 's1', description: 'Confirm' }] };
-  const ui = render(<StatusBar source={statusSource(controller)} pauseReason="dialog" />);
+  const ui = render(<StatusBar source={statusSource(controller)} pauseReason="copy" />);
   const frame = ui.lastFrame()!;
   ui.unmount(); ui.cleanup();
-  // The paused reason only explains the frozen clock; the owed answer is what the user has to act on.
+  // The freeze reason only explains the stopped clock; the owed answer is what the user has to act on.
   assert.match(frame, /\? Needs you/, frame);
-  assert.equal(frame.includes('⏸ dialog'), false, frame);
+  assert.equal(frame.includes('⏸ copy'), false, frame);
 });
 
 test('a narrow workspace picker keeps the markers and spells them out once', async t => {
@@ -1037,7 +1036,7 @@ test('a narrow workspace picker keeps the markers and spells them out once', asy
   const controller = new Controller({ base: 'http://x1:4096', localDirectory: '/host/project' });
   controller.state = { ...controller.state, online: true, status: 'Connected', screen: 'workspaces',
     workspaces: [{ workspaceId: 'w1', title: 'Project α', path: '/host/project', sessionIds: ['s1', 's2'] }],
-    sessions: [{ sessionId: 's1', running: true }, { sessionId: 's2', blank: true }] };
+    sessions: [{ sessionId: 's1', running: true, blank: false }, { sessionId: 's2', running: false, blank: true }] };
   // 46 columns leave the list inside the composer frame too narrow for words but roomy enough for a key.
   const ui = renderAt(<App controller={controller} />, 46, 24);
   t.after(() => ui.close());
@@ -1073,8 +1072,8 @@ test('title and status fit terminal widths and keep model alignment when working
   });
   const controller = new Controller({ base: 'http://x1:4096' });
   controller.state = { ...controller.state, online: true, status: 'Connected', sessionId: 's1', screen: 'chat',
-    sessions: [{ sessionId: 's1', running: true }], workspaceId: 'w1',
-    workspaces: [{ workspaceId: 'w1', title: 'Workspace 示例', path: '/workspace' }] };
+    sessions: [{ sessionId: 's1', running: true, blank: false }], workspaceId: 'w1',
+    workspaces: [{ workspaceId: 'w1', title: 'Workspace 示例', path: '/workspace', sessionIds: [] }] };
   controller.queries.record.addPage({ records: [{ type: 'event', event: { seq: 0, type: 'turn/start', time: Date.now() - 8000, data: { turn: 42 } } }], hasMore: false });
   controller.session.acceptControl(controlFrame({ type: 'baseline', value: { projections: { s1: { asOfSeq: 0, values: {
     title: { title: '中文会话标题'.repeat(20) },
@@ -1092,7 +1091,7 @@ test('title and status fit terminal widths and keep model alignment when working
   assert.match(ui.lastFrame()!.split('\n')[0]!, /^\s*中文会话标题/);
   const working = ui.lastFrame()!.split('\n').find(line => line.includes('◐ '))!;
   assert.match(working, /◐ 0:0\d · \^C │ v4\.1-flash · high · ctx: ███░░░░░░░ ~25% · 42 turns · 166\.2M tok/);
-  controller.state = { ...controller.state, version: 1, sessions: [{ sessionId: 's1', running: false }] };
+  controller.state = { ...controller.state, version: 1, sessions: [{ sessionId: 's1', running: false, blank: false }] };
   await refresh();
   const ready = ui.lastFrame()!.split('\n').find(line => line.includes('● Ready'))!;
   assert.match(ready, /● Ready │ v4\.1-flash · high · ctx: ███░░░░░░░ ~25% · 42 turns · 166\.2M tok/);
@@ -1214,8 +1213,9 @@ test('/model uses the host catalog and exact model/effort selection API', async 
   await until(() => controller.queries.foreground === undefined);
   fixture.control({ type: 'projection', sessionId: 's1', key: 'modelSelection', seq: 2, value: { lastUsed: null, next: { provider: 'route', model: 'model-x', reasoningEffort: 'high' } } });
   await until(() => ui.lastFrame()?.includes('model-x · high') === true);
-  fixture.presets = [...['standard', 'ptc', 'minimal', 'cordis'].map(id => ({ id, trust: 'system' })),
-    { id: 'custom', trust: 'user', name: 'My review mode' }];
+  // The 0.2 roster carries no `trust`: a known built-in id labels itself and a named row keeps its name.
+  fixture.presets = [...['standard', 'ptc', 'minimal', 'cordis'].map(id => ({ id, isDefault: id === 'standard' })),
+    { id: 'custom', name: 'My review mode' }];
   let seq = 3;
   for (const [id, name] of [['standard', 'Standard mode'], ['ptc', 'PTC mode'], ['minimal', 'Minimal mode'], ['cordis', 'Creator mode'], ['custom', 'My review mode'], ['missing', 'missing']]) {
     fixture.control({ type: 'projection', sessionId: 's1', key: 'agentPreset', seq: seq++, value: id! });
@@ -1324,7 +1324,7 @@ test('empty sessions archive without confirmation after a fresh blank-state chec
 });
 
 
-test('copy mode freezes streaming and clocks; dialogs freeze their background until closed', async t => {
+test('copy mode freezes streaming and clocks; a dialog freezes only its background', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
@@ -1345,10 +1345,14 @@ test('copy mode freezes streaming and clocks; dialogs freeze their background un
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
   await pressKey(ui, '/model'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Choose model') === true);
-  const dialog = ui.lastFrame();
+  const clock = /◐ (0:0\d)/.exec(ui.lastFrame() ?? '')?.[1];
   fixture.control({ type: 'projection', sessionId: 's1', key: 'title', seq: 3, value: 'Background title changed' });
   await new Promise(resolve => setTimeout(resolve, 1150));
-  assert.equal(ui.lastFrame(), dialog);
+  // A dialog freezes the material behind it — the header and the transcript keep the frame they had —
+  // but not time: the runtime projection is still live, so the clock advances while it is open.
+  assert.equal(ui.lastFrame()?.includes('Background title changed'), false);
+  const advanced = /◐ (0:0\d)/.exec(ui.lastFrame() ?? '')?.[1];
+  assert.notEqual(advanced, clock);
   await pressKey(ui, '\x1b');
   await until(() => ui.lastFrame()?.includes('Background title changed') === true);
 });
@@ -1929,7 +1933,7 @@ test('left click freezes the display for native selection until explicit resume'
   assert.equal(fixture.calls.some(call => call.method === 'session/cancel'), false);
 });
 
-test('a line in flight refuses a second line, slash command or prompt alike', async t => {
+test('a line in flight refuses a prompt at the claim, while a view change still runs', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
@@ -1940,14 +1944,21 @@ test('a line in flight refuses a second line, slash command or prompt alike', as
   fixture.onCommand = () => new Promise(resolve => { complete = resolve; });
   await pressKey(ui, '/compact'); await pressKey(ui, '\r');
   await until(() => controller.queries.foreground !== undefined && !!complete);
-  // D1 keeps the composer editable, so each attempt is written and then refused on Enter; the draft
-  // survives the refusal, which is why the operator clears it before writing the next one.
+  // D1 keeps the composer editable. A view change needs no execution slot, so `/help` opens while the
+  // operation runs; a prompt does need one, and its claim is refused atomically with a reason the
+  // operator can read — the draft survives, which is why they clear it before writing the next one.
+  // The compact's own draft is still in the composer until its result lands, so clear it first.
   await pressKey(ui, '\u0015');
   await pressKey(ui, '/help'); await pressKey(ui, '\r');
-  assert.equal(ui.lastFrame()?.includes('/ws [name or ID]'), false);
-  assert.match(ui.lastFrame()!, /❯ \/help/);
-  await pressKey(ui, '\u0015');
+  await until(() => ui.lastFrame()?.includes('/ws [name or ID]') === true);
+  // The panel command ran and used up its draft, exactly as it does while nothing else is in flight.
+  assert.match(ui.lastFrame()!, /❯ Message, @host-file, or \/help/);
+  // The failure line lives in the conversation view, so the panel has to be closed to read it. Esc would
+  // cancel the running operation first (rule 3 of the Esc table), so the panel is toggled off instead.
+  await pressKey(ui, '/help'); await pressKey(ui, '\r');
+  await until(() => !ui.lastFrame()?.includes('/ws [name or ID]'));
   await pressKey(ui, 'hello there'); await pressKey(ui, '\r');
+  await until(() => /Another operation is running/.test(ui.lastFrame() ?? ''));
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
   assert.match(ui.lastFrame()!, /❯ hello there/);
   await pressKey(ui, '\u0015');
@@ -2014,9 +2025,9 @@ test('the composer stays editable during a long operation and never sends on its
   await pressKey(ui, 'next question while busy');
   await until(() => ui.lastFrame()?.includes('next question while busy') === true);
   await pressKey(ui, '\r');
-  // The refusal is authorize's, so it comes with a reason instead of the line vanishing: the operator
-  // learns that an operation owns the client, and the draft is theirs to keep.
-  await until(() => ui.lastFrame()?.includes('Wait for the running operation to finish') === true);
+  // The refusal comes from the execution slot's own claim, with a reason instead of the line vanishing:
+  // the operator learns which operation owns the client, and the draft is theirs to keep.
+  await until(() => /Another operation is running: /.test(ui.lastFrame() ?? ''));
   assert.equal(fixture.calls.some(call => call.method === 'session/prompt'), false);
   assert.match(ui.lastFrame()!, /❯ next question while busy/);
   // Finishing the operation does not submit the draft either: only the operator can.
@@ -2100,6 +2111,31 @@ test('working input automatically steers, stays inside the composer, and can be 
   fixture.control({ type: 'queue', sessionId: 's1', items: [] });
   await until(() => !ui.lastFrame()?.includes('Waiting:'));
   assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 3);
+});
+
+test('a prompt typed while the agent works stays visible until the host records it', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.record.ready);
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => controller.queries.running);
+  await pressKey(ui, 'steer the next step'); await pressKey(ui, '\r');
+  // The host writes a steering message into the session only at the next step boundary, so the row
+  // above the composer is the only place the operator can see what they just sent.
+  await until(() => controller.queries.pendingPrompts.length === 1);
+  assert.match(ui.lastFrame()!, /Sent · waiting for the host to record it/);
+  assert.match(ui.lastFrame()!, /↳ steer the next step/);
+  // The row is recorded before the request is admitted, so the submission may still be in flight here.
+  await until(() => fixture.calls.some(candidate => candidate.method === 'session/prompt'));
+  const call = fixture.calls.filter(candidate => candidate.method === 'session/prompt').at(-1)!;
+  const rpcId = String(object(object(object(call.payload).args).request).requestId);
+  fixture.follow({ type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: 'steer the next step' }], source: { kind: 'user', rpcId } } } });
+  // The durable row replaces the local one in the same frame: no duplicate and no gap.
+  await until(() => ui.lastFrame()?.includes('Sent · waiting for the host') === false);
+  assert.match(ui.lastFrame()!, /steer the next step/);
 });
 
 test('approval numbers answer at once, arrows still confirm, and command drafts are preserved', async t => {
@@ -2343,9 +2379,10 @@ test('the status bar reports a verifying loop instead of claiming Ready', async 
   await pressKey(ui, '\r');
   // The sub-state comes from the controller, so the assertion follows the field rather than the frame.
   await until(() => controller.queries.loop?.activity === 'verify');
-  // The selected session has no host turn, so the bar must take its state from the loop itself.
+  // The selected session has no host turn, so the bar must take its state from the loop itself: the
+  // step, and which of the loop's own activities is running (`verify`, not the agent's turn).
   assert.match(ui.lastFrame()!, /◐/);
-  assert.match(ui.lastFrame()!, /verify 1\/10/);
+  assert.match(ui.lastFrame()!, /Loop 1\/10 · Verifying/);
   assert.doesNotMatch(ui.lastFrame()!, /● Ready/);
 });
 

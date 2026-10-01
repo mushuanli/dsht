@@ -169,6 +169,49 @@ test('the dependency check rejects each forbidden direction', () => {
   assert.deepEqual(violations([{ path: 'shell/runner.ts', source: "import { spawn } from 'node:child_process';" }]), []);
 });
 
+test('every dsh call goes through the transport facade', () => {
+  const files = sourceFiles(SRC);
+  // P1/P2: one mechanism file owns method names, payloads and stream opening. A domain that reached
+  // for `Client.call`/`subscribe` directly would put the wire contract back in a feature, which is
+  // exactly what makes a host upgrade expensive.
+  const patterns = [/\.call\(/, /\.subscribe\(/];
+  for (const file of files) {
+    if (file.path.startsWith('transport/')) continue;
+    for (const pattern of patterns) {
+      assert.ok(!pattern.test(file.source),
+        `${file.path}: dsh calls belong to transport/dsh.ts (${String(pattern)})`);
+    }
+  }
+});
+
+test('only the transport decodes host values', () => {
+  const files = sourceFiles(SRC);
+  // P3/§6.6: `transport/dsh-contract.ts` owns the wire vocabulary, and `dsh.ts` re-exports the decoders
+  // the rest of the application applies. A feature that imported the contract directly could rename a
+  // host field in one place and read it in another; the rule keeps one door into the host's shapes.
+  for (const file of files) {
+    if (file.path.startsWith('transport/')) continue;
+    const match = /from '[^']*transport\/dsh-contract\.ts'/.exec(file.source);
+    assert.equal(match, null,
+      `${file.path}: read decoded host values through transport/dsh.ts instead of the wire contract`);
+  }
+});
+
+test('the ui contract and the ui never read raw host JSON', () => {
+  const files = sourceFiles(SRC);
+  // P3: rows, catalog and projection values cross this boundary decoded, so a view cannot name a host
+  // field even by accident. Raw JSON stays in the transport, the transcript's record fold, and the
+  // billing fold that owns its own record vocabulary.
+  const RAW_OWNERS = new Set(['transport/events.ts', 'transport/dsh-contract.ts', 'transport/client.ts', 'transport/wire.ts']);
+  for (const file of files) {
+    const unit = unitOf(file.path);
+    if (unit !== 'ui' && file.path !== 'state.ts' && file.path !== 'contracts.ts') continue;
+    assert.ok(!/from '[^']*(json|transport\/wire)\.ts'/.test(file.source),
+      `${file.path}: the ui reads decoded values, not raw JSON`);
+    assert.ok(!RAW_OWNERS.has(file.path));
+  }
+});
+
 test('the composition root runs the pipeline stages instead of dispatching commands', () => {
   const source = readFileSync(join(SRC, 'ui/app.tsx'), 'utf8');
   // The pipeline settles what a line means; the root decides only its own front-end modes and hands

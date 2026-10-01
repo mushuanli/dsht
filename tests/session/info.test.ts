@@ -1,4 +1,5 @@
 /** Session prompt index: durable folds, reloadable budgets, and the refill that closes the recall gap. */
+import { followFrame } from '../../src/transport/dsh-contract.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PromptCache, PromptIndex } from '../../src/session/info.ts';
@@ -119,26 +120,26 @@ test('only the prompts newer than the last fold are scanned again', () => {
   const transcript = new Transcript();
   const prompt = (seq: number) => ({ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append',
     data: { content: [{ type: 'text', text: `p${seq}` }] } } });
-  transcript.accept({ type: 'snapshot', cursor: 2, hasMore: false, records: [prompt(1), prompt(2)] });
+  transcript.accept(followFrame({ type: 'snapshot', cursor: 2, hasMore: false, records: [prompt(1), prompt(2)] }));
   const index = new PromptIndex();
   index.fold(transcript.promptsSince(index.through));
   assert.deepEqual(index.items.map(entry => entry.text), ['p1', 'p2']);
   // A later frame folds only what arrived after the last fold.
-  transcript.accept({ type: 'event', event: { seq: 3, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'p3' }] } } });
+  transcript.accept(followFrame({ type: 'event', event: { seq: 3, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'p3' }] } } }));
   index.fold(transcript.promptsSince(index.through));
   assert.deepEqual(index.items.map(entry => entry.text), ['p1', 'p2', 'p3']);
 });
 
 test('an assistant-only frame advances the fold watermark instead of being rescanned', () => {
   const transcript = new Transcript();
-  transcript.accept({ type: 'snapshot', cursor: 1, hasMore: false, records: [
-    { type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'p1' }] } } } ] });
+  transcript.accept(followFrame({ type: 'snapshot', cursor: 1, hasMore: false, records: [
+    { type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'p1' }] } } } ] }));
   const index = new PromptIndex();
   index.fold(transcript.promptsSince(index.through));
   assert.equal(index.through, 1);
   // A turn of assistant records contributes no prompt but must still move the watermark forward.
-  transcript.accept({ type: 'event', event: { seq: 2, type: 'assistant/message', surfaceOp: 'append',
-    data: { message: { content: [{ type: 'text', text: 'answer' }] } } } });
+  transcript.accept(followFrame({ type: 'event', event: { seq: 2, type: 'assistant/message', surfaceOp: 'append',
+    data: { message: { content: [{ type: 'text', text: 'answer' }] } } } }));
   const fold = transcript.promptsSince(index.through);
   assert.deepEqual(fold.prompts, []);
   assert.equal(fold.through, 2);
@@ -151,7 +152,7 @@ test('the loaded window refills prompts the budgets evicted, so recall stays com
   const transcript = new Transcript();
   const prompt = (seq: number) => ({ type: 'event', event: { seq, type: 'user/message', surfaceOp: 'append',
     data: { content: [{ type: 'text', text: `p${seq}` }] } } });
-  transcript.accept({ type: 'snapshot', cursor: 3, hasMore: false, records: [prompt(1), prompt(2), prompt(3)] });
+  transcript.accept(followFrame({ type: 'snapshot', cursor: 3, hasMore: false, records: [prompt(1), prompt(2), prompt(3)] }));
   const index = new PromptIndex(small);
   index.fold(transcript.promptsSince(index.through));
   assert.deepEqual(index.items.map(entry => entry.text), ['p2', 'p3']);
@@ -162,11 +163,11 @@ test('the loaded window refills prompts the budgets evicted, so recall stays com
 
 test('injected context is not a prompt, in either direction of the window scan', () => {
   const transcript = new Transcript();
-  transcript.accept({ type: 'snapshot', cursor: 3, hasMore: false, records: [
+  transcript.accept(followFrame({ type: 'snapshot', cursor: 3, hasMore: false, records: [
     { type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'system' },
       content: [{ type: 'text', text: 'injected context' }] } } },
     { type: 'event', event: { seq: 2, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'real prompt' }] } } },
-  ] });
+  ] }));
   assert.deepEqual(transcript.promptsSince(-1).prompts.map(entry => entry.text), ['real prompt']);
   assert.deepEqual(transcript.promptsBefore(9).map(entry => entry.text), ['real prompt']);
 });

@@ -1,4 +1,5 @@
 /** Synthetic terminal benchmark for keystroke latency and per-frame transcript cost, excluding model latency and remote service time. */
+import { followFrame } from '../../src/transport/dsh-contract.ts';
 import { performance } from 'node:perf_hooks';
 import React, { act } from 'react';
 import { render } from 'ink-testing-library';
@@ -26,7 +27,7 @@ for (const count of [20, 500, 2000]) {
       seq, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: `Synthetic message ${seq}: ` + 'Text 中文 example. '.repeat(20) }] },
     } }));
     const transcript = new MeasuredTranscript();
-    transcript.accept({ ...snapshot, records });
+    transcript.accept(followFrame({ ...snapshot, records }));
     controller.state.session.record = transcript;
     const press = async () => { await act(async () => {}); await act(async () => { ui.stdin.write('x'); }); };
     Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
@@ -38,10 +39,10 @@ for (const count of [20, 500, 2000]) {
 
     // One packed chunk row per frame reproduces the streaming path an older host publishes.
     const streaming = new Transcript();
-    streaming.accept({ ...snapshot, assistantStream: undefined, records });
+    streaming.accept(followFrame({ ...snapshot, records }));
     const chunk = (seq: number) => ({ type: 'event', event: { seq, surfaceOp: 'append', type: 'chunkrow/text-chunks',
       data: { turn: 1, step: 1, index: 0, texts: ['Text 中文 example. '], dt: [] } } });
-    const stream = (seq: number) => { streaming.accept(chunk(seq)); historyLayout(streaming, 80); };
+    const stream = (seq: number) => { streaming.accept(followFrame(chunk(seq))); historyLayout(streaming, 80); };
     for (let i = 0; i < 5; i++) stream(count + i);
     const frames: number[] = [];
     for (let i = 0; i < 30; i++) { const start = performance.now(); stream(count + 5 + i); frames.push(performance.now() - start); }

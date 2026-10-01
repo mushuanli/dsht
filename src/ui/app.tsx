@@ -8,14 +8,14 @@ import { useComposer, type DraftReceipt } from './input/use-composer.ts';
 import { useDeferredLines } from './input/use-deferred-lines.ts';
 import { useHistoryRecall } from './input/use-history-recall.ts';
 import { ReferenceMenu } from './input/references.tsx';
-import type { CommandResult, HistoryRow, PanelName, Reasoning, ViewEffect } from '../contracts.ts';
+import type { CommandResult, HistoryRow, PanelName, Reasoning, SessionRow, ViewEffect, WorkspaceRow } from '../contracts.ts';
 import type { CostTotal } from '../contracts.ts';
 import { costText } from './status/model.ts';
 import { toolLine } from '../text.ts';
 import { activeReference, fileMention } from '../references.ts';
 import type { FileReference } from '../contracts.ts';
 import { CostPanel, type CostSource } from './dialogs/cost.tsx';
-import { StatusBar, type StatusSource } from './chat/status.tsx';
+import { StatusBar, type StatusPause, type StatusSource } from './chat/status.tsx';
 import { ChatHeader } from './chat/header.tsx';
 import { LoopStatus } from './chat/loop-status.tsx';
 import { ChatViewport } from './chat/viewport.tsx';
@@ -24,7 +24,7 @@ import { useHistoryView } from './chat/use-history-view.ts';
 import { Frozen } from './frozen.tsx';
 import { CopyMode } from './copy-mode.ts';
 import { cycle, type Choice } from './dialogs/picker.tsx';
-import { HelpPanel, HistoryDialog, ModelDialog, OfflinePanel, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, ThoughtsDialog } from './dialogs/index.tsx';
+import { HelpPanel, HistoryDialog, ModelDialog, OfflinePanel, PickerScreen, PromptsDialog, QueueDialog, QueuedPreview, RemovalDialog, SearchResultsDialog, SubmittedPreview, ThoughtsDialog } from './dialogs/index.tsx';
 import { offlineGuidance } from './offline.ts';
 import { LoopDialog, LoopMenu, type LoopRun } from './dialogs/loop.tsx';
 import { usePanels } from './dialogs/use-panels.ts';
@@ -36,7 +36,6 @@ import { Controller, type HistorySearch } from '../controller/controller.ts';
 import { removalIntent, runCommand, type CommandPort } from '../controller/commands.ts';
 import { sessionLabel } from '../session-title.ts';
 import { ROLLUP_LEGEND, sessionStatus, workspaceCounts, workspaceDetail, workspaceSegments, workspaceStatus, type RollupState, type RollupStyle } from './chat/navigation-model.ts';
-import { array, object, string, type ObjectValue } from '../json.ts';
 import { errorText } from '../text.ts';
 import { safeText } from '../text.ts';
 
@@ -58,8 +57,8 @@ const FORCE_EXIT_MS = 5000;
  */
 export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = mocha }: { controller: Controller; panelLifetimeMs?: number; theme?: Theme }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
-  const presetId = controller.queries.telemetry.view(state.sessionId).values.agentPreset;
-  useEffect(() => { if (typeof presetId === 'string') controller.actions.loadPresetNames(); }, [controller, state.online, presetId]);
+  const presetId = controller.queries.telemetry.metrics(state.sessionId).agentPresetId;
+  useEffect(() => { if (presetId !== undefined) controller.actions.loadPresetNames(); }, [controller, state.online, presetId]);
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [copyMode, setCopyMode] = useState(false);
@@ -147,6 +146,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const loopRecord = loopForm === undefined ? undefined
     : controller.queries.loopRecords.find(record => record.name === loopForm.name);
   const queued = controller.queries.telemetry.pending(state.sessionId).filter(item => item.placement !== 'context');
+  // Prompts this client sent that the host has not written into the session yet. A steering line is
+  // recorded only at the next step boundary, so without this the operator's own text would be
+  // invisible from Enter until then; each row retires on the durable echo or the host's queue report.
+  const submitted = controller.queries.pendingPrompts;
   // The read-only view: the application owns which source is followed and what it holds, the front end
   // owns only the reader's position in it.
   const peek = controller.queries.peek;
@@ -444,7 +447,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       }
       if ((digit >= 0 && digit < options.length) || _value === ' ' && question!.multiSelect === true && optionCursor < options.length) {
         const index = digit >= 0 ? digit : optionCursor;
-        const label = string(options[index]!.label);
+        const label = options[index]!.label;
         if (question!.multiSelect === true) {
           const selected = choiceState.selected.includes(label)
             ? choiceState.selected.filter(item => item !== label) : [...choiceState.selected, label];
@@ -457,7 +460,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       }
       if (key.return) {
         if (optionCursor === options.length) { controller.actions.setOption({ ...choiceState, custom: true }); return; }
-        const selected = question!.multiSelect === true ? choiceState.selected : [string(options[optionCursor]!.label)];
+        const selected = question!.multiSelect === true ? choiceState.selected : [options[optionCursor]!.label];
         if (!selected.length) { setNotice('Select at least one option with Space or a number'); return; }
         operate(() => controller.actions.answerQuestion({ selected })); return;
       }
@@ -516,10 +519,12 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       ready: current.online && controller.queries.connectionSettled && (current.sessionId === undefined || controller.queries.record.ready),
       sessionSelected: current.sessionId !== undefined,
       pending: current.pending.length > 0,
-      foreground: controller.queries.foreground !== undefined,
       // A loop is reported as such because stopping it is what the refusal has to name.
       during: controller.queries.loop?.active === true ? 'loop' as const
         : controller.queries.running ? 'turn' as const : 'idle' as const,
+      // Read by the deferred queue only, which must not dispatch into an occupied slot: the line would
+      // be refused by the claim and lost. Authorization never sees it (§6.4).
+      foreground: controller.queries.foreground !== undefined,
     };
   }
 
@@ -527,7 +532,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
 
   /** What a held line is waiting for, in the words the notice uses. */
   function describeDefer(defer: DeferReason): string {
-    return defer === 'busy' ? 'the running operation finishes' : defer === 'loop' ? 'the loop ends' : 'the turn finishes';
+    return defer === 'loop' ? 'the loop ends' : 'the turn finishes';
   }
 
   /** Hold one accepted-but-deferred line, and say whether it was deferred.
@@ -551,7 +556,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   function verdictFor(command: LineCommand) {
     const facts = applicationFacts();
     return authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending,
-      during: facts.during, foreground: facts.foreground });
+      during: facts.during });
   }
 
   const submit = async (raw: string) => {
@@ -691,10 +696,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const listAge = Date.now();
   // Unanswered interactions are held per session already; a list only has to read the counts.
   const pendingCounts = controller.queries.pendingCounts();
-  const isPending = (session: ObjectValue): boolean => (pendingCounts.get(string(session.sessionId)) ?? 0) > 0;
-  const sessionsOf = (workspace: ObjectValue): ObjectValue[] => {
-    const ids = new Set(array(workspace.sessionIds).map(string));
-    return state.sessions.filter(session => ids.has(string(session.sessionId)));
+  const isPending = (session: SessionRow): boolean => (pendingCounts.get(session.sessionId) ?? 0) > 0;
+  const sessionsOf = (workspace: WorkspaceRow): SessionRow[] => {
+    const ids = new Set(workspace.sessionIds);
+    return state.sessions.filter(session => ids.has(session.sessionId));
   };
   // `width` counts only the frame's outer padding, so the list subtracts the composer border and
   // padding it renders inside; measured against the wider value a long row would still wrap.
@@ -708,30 +713,30 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     // it only while the host has not registered it keeps the row from repeating itself. It leads the
     // list so it is also the default selection: starting outside a registered workspace is exactly
     // the situation the row exists for.
-    ...(state.workspaces.some(workspace => string(workspace.path) === controller.localDirectory) ? []
+    ...(state.workspaces.some(workspace => workspace.path === controller.localDirectory) ? []
       : [{ key: '@here', label: `+ Add workspace (this directory)  ${controller.localDirectory}`,
         action: () => operate(() => controller.actions.createWorkspace(controller.localDirectory)) }]),
     ...state.workspaces.map(workspace => {
       const counts = workspaceCounts(sessionsOf(workspace), new Set(pendingCounts.keys()));
-      const name = string(workspace.title);
-      const title = name || string(workspace.path);
+      const name = workspace.title;
+      const title = name || workspace.path;
       // A path only earns a column when words are affordable and the title does not already say it.
-      const detail = rollupStyle === 'words' && name ? workspaceDetail(string(workspace.path), name) : '';
-      return { key: string(workspace.workspaceId),
+      const detail = rollupStyle === 'words' && name ? workspaceDetail(workspace.path, name) : '';
+      return { key: workspace.workspaceId,
         label: [workspaceStatus(counts, rollupStyle), title].filter(Boolean).join('  '), title,
         cells: workspaceSegments(counts, rollupStyle).map(segment => ({ text: segment.text, color: stateColor[segment.state] })),
         ...(detail ? { detail } : {}),
-        remove: () => setRemoval({ kind: 'workspace', id: string(workspace.workspaceId), name: string(workspace.title), path: string(workspace.path) }),
-        action: () => controller.actions.pickWorkspace(string(workspace.workspaceId)) };
+        remove: () => setRemoval({ kind: 'workspace', id: workspace.workspaceId, name: workspace.title, path: workspace.path }),
+        action: () => controller.actions.pickWorkspace(workspace.workspaceId) };
     }),
     { key: '@all', label: 'All sessions', action: () => operate(() => controller.actions.switchSession('all')) },
     { key: '@new', label: '+ Add workspace (host directory)', action: () => controller.actions.enterPath() },
   ] : [
     ...(state.workspaceId && !state.showAllSessions ? [{ key: '@new', label: '+ New session', action: () => operate(() => controller.actions.createSession()) }] : []),
-    ...controller.queries.visibleSessions.map(session => ({ key: string(session.sessionId),
+    ...controller.queries.visibleSessions.map(session => ({ key: session.sessionId,
       label: `${sessionStatus(session, listAge, isPending(session))} ${sessionLabel(session)}  ${session.sessionId}`,
-      remove: () => operate(() => requestRemoval('session', string(session.sessionId))),
-      action: () => { setScroll(0); operate(() => controller.actions.selectSession(string(session.sessionId))); } })),
+      remove: () => operate(() => requestRemoval('session', session.sessionId)),
+      action: () => { setScroll(0); operate(() => controller.actions.selectSession(session.sessionId)); } })),
     { key: '@back', label: '← Workspaces', action: () => operate(() => controller.actions.showPicker('workspaces')) },
   ];
   const showHistoryHint = dialogOpen || displayTranscript.hasMore || !!historyWindow;
@@ -837,7 +842,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
           { key: 'close', label: '← Back to conversation', action: () => openThoughts(false) },
         ], [liveThought, thoughtChoices, displayTranscript, displayTranscript.hasMore, width, pageSize, reasoningOverrides]);
   const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
-  const workspaceName = workspace ? string(workspace.title) || string(workspace.path) : state.workspaceId;
+  const workspaceName = workspace ? workspace.title || workspace.path : state.workspaceId;
   const headerTitle = controller.queries.sessionName
     ? [controller.queries.sessionName, width >= 60 ? workspaceName : undefined].filter(Boolean).join(' · ')
     : workspaceName || 'All workspaces';
@@ -845,13 +850,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   // Once the name is settled and arguments begin, the composer says what this command takes. The
   // `/loop` record list is more specific, so it replaces the generic line rather than stacking on it.
   const commandHint = loopMenuOpen ? undefined : argumentHint(input);
-  // Reading older history pauses the clock without freezing the connection state on picker screens.
-  // A paused clock is named rather than left frozen: a stopped number looks like a stall.
-  const pauseReason: 'copy' | 'dialog' | 'history' | undefined = copyMode ? 'copy'
-    : state.screen === 'chat' && modalOpen ? 'dialog'
-    : state.screen === 'chat' && position > 0 ? 'history'
-    : undefined;
-  const statusFrozen = pauseReason !== undefined;
+  // Only copy mode stops the runtime projection: the screen is frozen for native selection, so the bar
+  // reports the reading it froze at. A panel or a scrolled transcript is a different view of *live*
+  // state, and freezing the clock behind it would print a number that stopped being true.
+  const statusPause: StatusPause | undefined = copyMode ? 'copy' : undefined;
+  const statusFrozen = statusPause !== undefined;
   // The bar renders plain data: the composition root is the one place that reads the controller.
   const statusSource: StatusSource = (() => {
     const view = controller.queries.telemetry.view(state.sessionId);
@@ -867,7 +870,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       // What is busy, and since when, is the controller's answer; the bar only draws it.
       ...(controller.queries.activity === undefined ? {} : { activity: controller.queries.activity }),
       sessionId: state.sessionId, sessionMode: controller.queries.sessionMode,
-      workspaceLabel: workspace ? `${string(workspace.title)} · ${string(workspace.path)}` : 'none selected',
+      metrics: controller.queries.telemetry.metrics(state.sessionId),
+      // The runtime facts beside the host's: what owns the client, and whether a local run is in flight.
+      ...(controller.queries.foreground === undefined ? {} : { foreground: { label: controller.queries.foreground.label } }),
+      shell: { running: state.shell.running },
+      workspaceLabel: workspace ? `${workspace.title} · ${workspace.path}` : 'none selected',
       activeTurnStartedAt: state.session.record.activeTurnStartedAt,
       pendingCount: state.pending.length,
       ...(state.session.record.livePhase === undefined ? {} : { livePhase: state.session.record.livePhase }),
@@ -1015,6 +1022,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     </>}
         </Box>
         {!queueOpen && !pending && state.screen === 'chat' && queued.length > 0 && <QueuedPreview queued={queued} width={width} />}
+        {!pending && state.screen === 'chat' && submitted.length > 0 && <SubmittedPreview items={submitted} width={width} />}
         {/* D1: a long operation must not take the keyboard away. The draft stays editable, Enter is
             refused by the admission guard in `submit` instead of being sent or dropped, and nothing
             sends the draft when the operation finishes. */}
@@ -1029,7 +1037,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       {commandHint && <Text dimColor><Text color={theme.accent}>{commandHint.command}{commandHint.usage === undefined ? '' : ` ${commandHint.usage}`}</Text> · {commandHint.description}</Text>}
       {help && <HelpPanel page={currentHelpPage} pages={helpPages} pageSize={helpPageSize} />}
       {costExpanded && <CostPanel source={costSource} />}
-      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}:${pauseReason ?? ''}`}><StatusBar source={statusSource} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} onRows={setStatusBarRows} pauseReason={pauseReason} revision={state.version} /></Frozen>
+      <Frozen frozen={statusFrozen} identity={`${width}:${state.sessionId}:${statusExpanded}:${statusScroll}:${statusPause ?? ''}`}><StatusBar source={statusSource} width={width} expanded={statusExpanded} scroll={statusScroll} pageSize={statusViewRows} onScroll={setStatusScroll} onOverflow={setStatusOverflow} onRows={setStatusBarRows} pauseReason={statusPause} revision={state.version} /></Frozen>
     </Box>
   </Box></Frozen></CopyMode.Provider></ThemeContext.Provider>;
 }

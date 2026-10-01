@@ -1,4 +1,5 @@
 /** Incremental live-tail wrapping must reproduce a one-shot wrap for every streaming delta. */
+import { followFrame } from '../../src/transport/dsh-contract.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import wrapAnsi from 'wrap-ansi';
@@ -38,13 +39,13 @@ function compareEveryDelta(seed: number, width: number, reasoning: 'row' | 'full
   const transcript = new Transcript();
   const overrides = new Set<number>();
   releaseHistoryLayout(transcript);
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } }));
   let revision = 1;
   for (let step = 0; step < deltas; step++) {
     let delta = '';
     for (let index = 0; index < chunkSize; index++) delta += ALPHABET[Math.floor(next() * ALPHABET.length)]!;
     revision++;
-    transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision, index: step, chunk: { type: 'text-delta', index: 0, text: delta } } });
+    transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision, index: step, chunk: { type: 'text-delta', index: 0, text: delta } } }));
     // Without an identity the layout falls back to a one-shot wrap and this comparison proves nothing.
     assert.ok(transcript.liveParts(width).every(part => part.key !== undefined), `seed ${seed} delta ${step} has no live part identity`);
     assert.deepEqual(layoutRows(transcript, width, reasoning, overrides), oneShot(transcript, width, reasoning),
@@ -67,12 +68,12 @@ test('incremental live wrapping matches for long runs and whitespace-only deltas
   const next = dice(13);
   const transcript = new Transcript();
   const overrides = new Set<number>();
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } }));
   let revision = 1;
   for (let step = 0; step < 60; step++) {
     const delta = step % 3 === 0 ? `${' '.repeat(3)}x${' '.repeat(2)}` : ' '.repeat(1 + Math.floor(next() * 4));
     revision++;
-    transcript.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision, index: step, chunk: { type: 'text-delta', index: 0, text: delta } } });
+    transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision, index: step, chunk: { type: 'text-delta', index: 0, text: delta } } }));
     assert.deepEqual(layoutRows(transcript, 24, 'full', overrides), oneShot(transcript, 24, 'full'), `step ${step}`);
   }
 });
@@ -80,11 +81,11 @@ test('incremental live wrapping matches for long runs and whitespace-only deltas
 test('a folded live reasoning row is unchanged by bounding its source', () => {
   const transcript = new Transcript();
   const overrides = new Set<number>();
-  transcript.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
+  transcript.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } }));
   for (const text of ['x '.repeat(20_000), `${' '.repeat(4_000)}tail words here`, 'ab'.repeat(9_000)]) {
     const fresh = new Transcript();
-    fresh.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } });
-    fresh.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0, chunk: { type: 'reasoning-delta', index: 0, text } } });
+    fresh.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a', revision: 1 } }));
+    fresh.accept(followFrame({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a', revision: 2, index: 0, chunk: { type: 'reasoning-delta', index: 0, text } } }));
     releaseHistoryLayout(fresh);
     assert.deepEqual(layoutRows(fresh, 40, 'row', overrides), oneShot(fresh, 40, 'row'));
   }

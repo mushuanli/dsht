@@ -232,12 +232,13 @@ headless 也有这些事实（`runStartup` 先选/建会话，所以 `requiresSe
 |---|---|---|---|
 | `requiresSession` | `chatOnly` | 命令作用于"当前选中的会话" | `Select a session first` |
 | `requiresNoInteraction` | `blockedByPending` | 选中会话没有未处理 interaction | `Answer the pending question or approval first` |
-| `whileBusy: 'run'\|'queue'\|'deny'` | —— | 前台槽位被别的 operation 占用时可否执行 | `Wait for the running operation to finish` |
 | `duringTurn: 'run'\|'deny'` | —— | turn 运行期间可否执行 | 拒绝 |
 | `duringLoop: 'run'\|'deny'` | —— | loop 运行期间可否执行 | 拒绝 |
 
-**"是否占用前台槽位"不是策略字段**：它由执行原语本身决定（走 `runAction` 就是 foreground，返回 effects 就是 ui），
-见 §3.5；把它写成 policy 字段会造出第二个事实源。
+**前台槽位不是策略字段，连"能否执行"都不在这里判**：`authorize` 看不到一条命令最终会不会走 `runAction`
+（`/model`/`/loop`/`/ws` 的多形态决定了类别是涌现的，§3.5），所以任何 `whileBusy` 字段都只能靠猜——
+猜错就是 TOCTOU：授权时槽位空着，执行时已经被别人拿走。冲突由**领取执行位的那一步**判定并拒绝（§6.6），
+理由里带上占用者的 label。`authorize` 只回答语义政策：要不要会话、要不要先答完、turn/loop 期间能不能跑。
 
 **为什么改名**：`chatOnly` 带着"chat 屏幕"的 UI 气味，但它保护的是业务前置条件；headless 下
 `requiresSession` 依然成立（启动时已选/建会话）。`blockedByPending` 曾经**在 headless 完全没有检查**，
@@ -255,8 +256,14 @@ host 自己的命令都不需要为"我在运行"单独开一条：
 const QUEUES_WHILE_RUNNING   = { duringTurn: 'queue', duringLoop: 'queue' };  // compact / handoff / loop
 const CONFLICTS_WITH_RUNNING = { duringTurn: 'deny',  duringLoop: 'deny'  };  // loops（裸 /loop 的记录列表）
 const ANSWERS_WHILE_RUNNING  = { duringTurn: 'run',   duringLoop: 'run'   };  // panel / copy / think / cancel / approval / loopStop / loopAnswer
-const ANSWERS_WHILE_BUSY     = { whileBusy: 'run' };                          // cancel / approval / loopStop
+const LOCAL_OR_READ          = { duringTurn: 'run',   duringLoop: 'run'   };  // 纯本地写/视图：quit、remove、latest、older、savePrompt、coredump…
 ```
+
+**缺省是 fail-closed**：表里没有的 **catalog kind** 落到 `FAIL_CLOSED = { duringTurn: 'deny', duringLoop: 'deny' }`，
+所以一条忘了声明策略的新命令不会"正好能在 loop 里跑"，而是在忙碌时被拒绝并说明原因。
+只有管线自己分类的四类行不受表约束，由 `UNCATALOGUED_LINES` 显式列出：`prompt`（自由文本）、`answer`（回答提问）、
+`path`（路径屏输入的目录）、`error`（语法错误）。`tests/ui/commands.test.ts` 读 `slash/types.ts` 的 kind 并断言
+每个 catalog kind 都有显式条目——"忘了写"会失败在构建上，而不是运行期。
 
 * **`queue` 的是操作者自己的写入**：`compact`、`handoff`、`loop`（启动一次评审）。它们与正在跑的 turn
   写同一个会话，但"下一件事做这个"是操作者明确按下 Enter 表达的意图，直接拒绝等于让这句话无法表达；
@@ -267,20 +274,18 @@ const ANSWERS_WHILE_BUSY     = { whileBusy: 'run' };                          //
   busy 规则，客户端替它拒绝只会与 host 的实际行为矛盾（这条是被现有测试逼出来的）；
 * **`models`（`/model`）也不 deny**：它改的是后续请求的默认值，面板在 turn 期间照样能开；
 * **`cancel`/`approval` 明确 `run`**：取消与解决 interaction 恰恰是 turn 期间最需要能用的两条；
-* 判定顺序是 `requiresSession` → `requiresNoInteraction` → `during` → `whileBusy`：等待中的互动是更可操作的理由，
-  而且它通常就意味着 turn 也在跑；turn/loop 的红线比"前台槽位被占"更长期、也更能说明要停什么；
-* **前台槽位的默认是 deny**（D1：长操作期间 Enter 拒绝提交并保留 draft），只有声明 `whileBusy: 'run'` 的
-  命令放行：`cancel`、`approval`、`loopStop`——它们的存在意义就是打断或了结占用槽位的那件事。
-  `control: true`（只有 `loopStop`）说的是**另一件事**：它在 §6.3 的会话写 gate 里属于控制泳道、可抢等待队列；
-  `/loop answer` 也一样放行——一个暂停中的 run 正在等这条命令，把它排到 turn 后面等于永远答不上；
-  两个字段都在，因为"前台槽位"和"会话写次序"本来就是两个事实；
+* 判定顺序是 `requiresSession` → `requiresNoInteraction` → `during`：等待中的互动是更可操作的理由，
+  而且它通常就意味着 turn 也在跑；**前台槽位不在这条链上**，它由认领点判定（§6.6）；
+* **`control: true`（只有 `loopStop`）说的是另一件事**：它在 §6.3 的会话写 gate 里属于控制泳道、可抢等待队列；
+  `/loop answer` 不标 control，但它 `during*: 'run'`——一个暂停中的 run 正在等这条命令，
+  排到 turn 后面等于永远答不上；
 * 拒绝文案按事实区分：turn → `Wait for the running turn to finish`；loop → `Stop the running loop first`
   （停 loop 才是操作者要先做的事）。
 
 **前端怎么给出这个事实**：`loop.active ? 'loop' : queries.running ? 'turn' : 'idle'`——只有 **`active`** 参与判断，
 所以一个已经终止、只是残留进度行的 loop 不会 deny 任何东西（§13.3-Q3）。
 
-**`queue` 由谁履行**【现状】：`authorize` 返回 `{allow:true, command, defer:'turn'|'loop'|'busy'}`，
+**`queue` 由谁履行**【现状】：`authorize` 返回 `{allow:true, command, defer:'turn'|'loop'}`，
 `defer` 就是"要等哪个事实"。TUI 把这一行放进一个**前端持有的 FIFO**（`ui/app.tsx` 的 `queuedLines`），
 条件满足时按到达顺序重新授权并运行——端口与效果都属于前端，所以队列也只能由前端履行；
 运行前会再授权一次，若事实又变了就放回队首继续等，会话已经切换的行会被丢弃并说明原因。
@@ -289,9 +294,8 @@ const ANSWERS_WHILE_BUSY     = { whileBusy: 'run' };                          //
 `command` 事件在入队时写一条 `phase:'queued'`（带 `reason`），真正执行时照旧写 `begin`/`end`，
 所以"这一行被接受但还没跑"在 trace 里是可见的；`dsht trace` 不把 `queued` 计入执行次数。
 
-**优先级**：`during` 的 `deny` > `during` 的 `queue` > `whileBusy` 的 `deny` > `whileBusy` 的 `queue`。
-即：会被拒的事实先拒；只要有一个事实是"排队"就排队（反正要等，此刻槽位忙不忙不改变结论）；
-只有都不排队时才轮到前台槽位说话。
+**优先级**：`during` 的 `deny` 先于 `during` 的 `queue`——会被拒的事实先拒，需要排队的按最长寿的那个事实排队。
+执行位不参与这个排序：排队中的行等的是 turn/loop，等到了再去认领执行位；认领失败（别人正占着）时如实报出占用者。
 
 `/loop stop`（`loopStop`）是例外中的例外：它是**控制泳道**（§6.3.2），并且显式 `during*: 'run'`——
 "停止正在跑的东西"没有可以被判 deny 的理由，判 deny 只会在最需要它的时候让它不可用。
@@ -301,6 +305,10 @@ const ANSWERS_WHILE_BUSY     = { whileBusy: 'run' };                          //
 `DuringExecution` 扩展成 `'run' | 'queue' | 'deny'`；在那之前，authorize **永远不得返回 queue**。
 
 ### 3.5 执行类别：**执行原语本身就是事实源**，不要第二张表【现状】
+
+> 推论：执行类别既然只能由原语决定，**前台冲突也就只能在原语里判**。`controller.actions.*` 内部走
+> `ForegroundSlot.run`，它在同一步里完成"检查 + 认领 + 不可得即拒绝"；被拒绝的认领会写入 `lastFailure`
+> 并带上占用者的 label，操作者读到的是"哪个操作在占用"，而不是一条匿名的"忙"。见 §6.6。
 
 现状里"执行类别"是**涌现**的：`execute` 里调不调 `controller.actions.*`（busy 信封）就决定它是
 foreground 还是 ui。它既不能按 kind 静态决定，也不该由第二个函数回答：
@@ -434,7 +442,7 @@ interface CommandResult {
 | 返回值 | 含义 | 前端行为 |
 |---|---|---|
 | 有结果 | 接受或明确失败 | `applyResult`：按数组顺序应用 effects，`disposition` 决定清不清草稿 |
-| `undefined` | 未被接受（离线/busy/动作拒绝启动） | 保留草稿；失败原因只在 action 信封里（`state.operation.error`） |
+| `undefined` | 未被接受（离线、动作拒绝启动、执行位认领失败） | 保留草稿；原因由 `state.lastFailure` 显示（认领失败时带占用者 label，§6.6） |
 | `outcome: 'rejected'` + `{kind:'error'}` | 可读失败 | 显示错误，**不动屏幕**：拒绝不关任何面板，草稿、参数表单、正在读的面板都留在原处可重试 |
 
 **`ViewEffect` 是判别联合**（`payload?: unknown` 会丢掉现有类型安全：`history`/`search`/`model`/
@@ -465,9 +473,9 @@ closePanels → close → open/toggle → live/pinLive/resetFolds/toggle* → sc
 出现 `refreshCosts` 或直接调用 `answer(`。
 
 **命令失败只有一个通道（13.2-D2）**：`CommandResult.outcome` + 同名文本的 `error` effect + `command end`
-事件；`runCommand` 会在这一行自己报告失败之后清掉 action 信封里的同一次失败，避免状态栏再显示一遍。
-`state.operation.error` 从此是**内部 lastFailure**（连接、会话流、动作信封自己的失败），
-只在"这一行根本没被接受"时才是用户可见的唯一解释。
+事件；`runCommand` 会在这一行自己报告失败之后清掉同一次失败记录，避免状态栏再显示一遍。
+失败只剩 `state.lastFailure` 一条内部记录（连接、会话流、动作信封与执行位认领写它），
+只在"这一行根本没被接受"时才是用户可见的唯一解释；"是否有操作在跑"的唯一事实是 `queries.foreground`。
 
 ---
 
@@ -537,12 +545,14 @@ headless 没有；而 authorize 处理的是业务前置条件，两个前端**�
 
 ### 5.6 并发与门控（现状）与两层并发（目标）
 
-**现状规则**：产生效果的行占用"执行位"；被占用期间 composer 不聚焦，任何新行（slash 或 prompt）都提交不进来。
+**现状规则**：需要执行位的行（走 `controller.actions.*` 的命令与普通 prompt）在**认领执行位时**判定；
+被占用则认领失败，该行被拒绝并报出占用者，draft 原样保留（D1）。composer 始终可编辑，
+只读/视图类命令（`/help`、`/status`…）不取执行位，因此照常可开。
 
 | 事实 | 何时置位 | 效果 |
 |---|---|---|
-| `state.operation.busy` | `controller.actions.*` 的 busy 信封（全局） | 挡住命令与 prompt |
-| `historyLoading` | UI 借出的可取消请求 | 同上；封住纯 UI 侧请求 |
+| `queries.foreground` | `ForegroundSlot.run` 认领成功（全局唯一，含嵌套认领） | 需要执行位的行在认领处被拒并报出占用者 |
+| `shell.running` | 本地 `!` 运行（不取执行位） | 只影响状态投影与本地块渲染 |
 | `composerIntent` | 命令借用输入框编辑 | 关闭（Enter=提交编辑） |
 | `loopForm` | `/loop` 参数表单 | 关闭（表单接管按键） |
 | `answerPending` | 待答审批/提问 | 关闭（草稿被寄存） |
@@ -554,6 +564,32 @@ headless 没有；而 authorize 处理的是业务前置条件，两个前端**�
 **为什么保留这个重叠**：产品需求（边看边纠正），不是疏漏；命令↔命令仍串行。
 
 **"执行位"已显式化为 `ForegroundOperation`（§6.2）**：UI 不再持有 `historyAbort`/`historyLoading` 这类影子状态，渲染与取消都走 controller。
+
+---
+
+### 5.7 状态投影：状态栏与 `/status` 是同一份事实的两种宽度【目标，已实现】
+
+五种生命周期（§8）不是一个 `busy`，所以状态栏也不能是"Turn 状态显示器"。它是**多份运行态事实的纯投影**：
+
+```text
+Telemetry（host 投影） ── SessionMetrics ──┐
+                                          ├─→ StatusView ─┬─→ 单行状态栏（compact）
+Controller（本地运行态） ─ RuntimeActivity ┘                └─→ /status 详情面板
+UI 本地 ─────────────── LocalShellRun ────┘
+```
+
+* **owner 不同，不能合并**：`SessionMetrics`（title/model/context/usage/turns/inbox）来自 host 投影，
+  由 `transport/dsh-contract.ts#sessionMetrics` 解码；`foreground`/`turn`/`loop`/`pending` 来自 controller；
+  `shell` 是 UI 本地事实。把后三者塞进 `SessionMetrics` 会让"宿主说了什么"和"我们在做什么"重新混在一起。
+* **单一投影函数**：`ui/chat/status.tsx#activityText(source)` 是"现在在做什么"的唯一答案，
+  状态栏与 `/status` 面板都读它，因此不会出现"状态栏 Loop verify / 面板 Ready"这种自相矛盾。
+  优先级只是**展示优先级**：`连接/错误 → pending → foreground → loop → turn → shell → idle`；
+  并存的生命周期不会因此被丢掉（面板按行列出，栏按宽度取用）。
+* **终态 loop 不是活动**：唯一谓词是 `loop.active`（§8.3.1）；终态进度行属于"上一次结果"，
+  由 `LoopStatus` 呈现，不参与状态栏的"正在做什么"，也不参与授权（§13.3-Q3）。
+* **面板不冻结运行态**：`copy` 模式为原生选择冻结**画面**（连带读数停在冻结那一刻），
+  而 `/help`、`/status`、`/cost`、`/history` 只冻结其背后的对话内容，不冻结计时与运行态投影——
+  打开着的 `/status` 会随新投影即时更新。把"冻结画面"和"冻结运行态"混为一谈会印出一个已经不再成立的读数。
 
 ---
 
@@ -740,6 +776,26 @@ Gate 要消除的是"两个并发决定基于同一份陈旧状态"，而不是"
 * **跨会话一致性**：两个会话各自的数据互不冲突，gate 按会话建键即可；
 * **进程级持久化**：loop/shell 都是进程内状态，进程退出即结束（§7.3）。
 
+### 6.6 资源的获取位置：`authorize` 不取资源【目标，已实现】
+
+```text
+authorize()           只答语义政策：requiresSession / requiresNoInteraction / duringTurn / duringLoop
+execute()
+  ├─ foreground.run() 原子认领前台槽位；不可得 → 立即拒绝（不排队，除非调用方要 wait）
+  └─ mutationGate.admit(sessionId, lane, dispatch)   按会话串行"检查+决定+发出"
+```
+
+* **授权与获取分开**：`authorize` 读的是静态政策与语义事实，永远不读"槽位/锁现在是否空闲"。否则它必须预测
+  一条命令最终会不会取那个资源（§3.5 已证明这不可能），并且它的检查与获取之间存在 TOCTOU 窗口。
+* **`foreground.run` 是唯一认领点**：检查、认领、失败上报在同一步完成；被拒的认领发 `foreground { phase: 'refused' }`
+  事件并写 `lastFailure`（"Another operation is running: <label>"）。trace 里因此能回答"谁先拿到、谁被拒"。
+* **`mutationGate` 只串行 admission/dispatch**（§6.3.1）：section 只做"检查 → 决定 → 发出请求"并 `return` 那个
+  promise，调用方在 gate 之外 `await`；长 mutation 不持锁，`cancel` 走控制泳道抢先。
+* **本地 admission 影子填补投影延迟**：host 的 running 投影（`api-session/status`、`session/list` 行）在请求被
+  接受**之后**才到。`SessionController.admittedTurn` 记住"这个会话已经有一条我们刚提交的 prompt"，因此紧接着的
+  第二条决定 `steer` 而不是 `queue`；host 报 `running` 即清除。门面/闸门只能串行化本地 admission，
+  看不见远端状态延迟，这一层是逻辑竞态的唯一补丁（§6.3 的补充不变量）。
+
 ---
 
 ## 7. 事件流（默认写 `<state>/trace.log`）
@@ -896,7 +952,7 @@ composer 换了收件人），所以"看一眼"和"接管"分不开。
 
 ```
 App / runtime
-├── ForegroundOperation      短事务，全局 max 1          controller.foreground（投影 state.operation.busy）
+├── ForegroundOperation      短事务，全局 max 1          controller.foreground（= `queries.foreground`）
 ├── Turn                     agent 工作，会话级           session.running + workingSince
 ├── LoopRun                  长期 orchestration，绑定 parentSessionId   controller.loop，带 runId
 ├── LocalShellRun            本地 `!`，UI/local-runtime owned          state.shell，单实例已强制
@@ -910,7 +966,7 @@ App / runtime
 
 | 生命周期 | scope | 现状 |
 |---|---|---|
-| ForegroundOperation | **全局唯一** | `controller.foreground`（`queries.foreground`）+ 它投影的 `state.operation.busy` ✔ |
+| ForegroundOperation | **全局唯一** | `controller.foreground`（`queries.foreground`，唯一事实）✔ |
 | Turn | 当前选中会话 | `session.running` + `workingSince` ✔ |
 | LoopRun | **immutable `parentSessionId`**（不是"当前选中会话"） | `ScoredLoop.sessionId` 启动时捕获后不变 ✔ |
 | LocalShellRun | UI/local-runtime（与 host 无关） | `state.shell` ✔ |
@@ -1036,7 +1092,7 @@ type LoopTerminalReason =
 | # | 不变量 | 现状 |
 |---|---|---|
 | I1 | 用户命令的业务副作用只能经 `authorize → execute` | ✔ 两个实例（`answer`、`/cost` 的 `refreshCosts`）已消除；"输入回答"与"打开 cost 面板"的业务请求都发生在 `execute` 内，并由架构守卫钉住 |
-| I2 | 全局最多一个 `ForegroundOperation` | ✔ `state.operation.busy` |
+| I2 | 全局最多一个 `ForegroundOperation` | ✔ `queries.foreground`（认领点唯一） |
 | I3 | **同一 session 的 mutation 的 admission/dispatch 串行有序；长期生命周期不持有 mutation gate** | ✔ `SessionMutationGate`：按目标 sessionId 建键、正常/控制两泳道、section 返回即释放；`session-writes.test.ts` 用卡住的 `/compact` 证明 gate 不跨回包 |
 | I4 | `Turn running ≠ Foreground busy` | ✔ |
 | I5 | `LoopRun running ≠ Foreground busy` | ✔ |
@@ -1057,19 +1113,32 @@ type LoopTerminalReason =
 
 ## 10. 新增一条命令的清单
 
-1. **语法**：`slash/parse.ts` 加 `Command` 变体与分支；
-2. **广告**：`registry.ts` 的 `COMMAND_HINTS` 加一行；
-3. **授权**：需要会话 → `requiresSession`；需要无待答 → `requiresNoInteraction`；需要在 turn/loop 或前台槽位被占时
-   特殊处理 → `duringTurn`/`duringLoop`/`whileBusy`（缺省即 `run`／前台缺省是 `deny`）；**不需要**声明执行位——走
-   `controller.actions.*` 自动占 foreground，
-   纯 UI 命令自动成为可被 `closePanels` 替换的面；
-4. **效果**：`commands.ts` 的 `execute` 加 `case` 返回结果；需要等人操作时用 `port.interactive`；
-5. **展示**：只有需要**新表现动词**时才动 `ViewEffect` 与 `surfaces`；
-6. **测试**：语法 + 归一化 + 授权（`tests/ui/commands.test.ts`）、效果与结果（`tests/controller/commands.test.ts`）、
-   端到端与键（必要时 `tests/ui/app.test.tsx`）。
+一条新命令的"爆炸半径"不止 parser/registry/executor/test。逐项回答下面的问题；答不出来的那几项就是这次改动还没
+想清楚的地方：
+
+| 维度 | 必须回答 |
+|---|---|
+| **语法** | 怎么 parse？是否 `exactOnly`？是否有保留子命令（如 `/loop stop`）？参数校验失败给什么错误？ |
+| **广告** | `COMMAND_HINTS` 的 usage/description；补全前缀是否与其他命令冲突？ |
+| **归一化** | 纯文本行足够，还是像 `/loop` 表单那样产生结构化 command？ |
+| **授权** | `requiresSession`？`requiresNoInteraction`？turn/loop 期间 `run`/`queue`/`deny`？（**必须显式声明**，§3.4） |
+| **执行位** | 是否走 `controller.actions.*`（前台槽位）？若走，被占用时的拒绝理由由槽位给出——**不要**在 authorize 里判 |
+| **会话写** | 是否改会话？目标是哪个 `sessionId`？是否经 `mutationGate`？泳道是 `normal` 还是 `control`？ |
+| **生命周期** | 是短事务，还是启动一条长期 lifecycle（Turn / LoopRun / foreground / shell）？终止条件是什么？ |
+| **取消** | Esc、Ctrl+C、`/cancel` 对它分别意味着什么？取消后 draft 与已产生的效果如何处置？ |
+| **UI** | 需要新面、新 `ViewEffect`、按键所有权、composer 寄存（`parksComposer`）吗？ |
+| **状态** | 执行期间是否出现在状态栏/`/status`？——若引入新的运行态事实，加进 `activityText()` 的投影（§5.7），不要另写一条判断 |
+| **trace** | `commandId` 之外是否需要 `loopRunId`/`operationId`？begin/end 之外还有哪些事件？ |
+| **headless** | 无交互前端时如何执行？`port.interactive` 为假时哪一步拒绝？ |
+| **transport** | 是否引入新的 host 能力？若引入：`dsh-contract.ts` 加契约段 + `dsh.ts` 加一个门面函数 + **`transport/endpoints.ts` 加一行**（能力清单唯一出处）+ fixture/契约测试，**不得直接 `client.call`**（架构测试会拦；`tests/transport/endpoints.test.ts` 要求源码与清单完全一致、且行内读者真被导出） |
+| **文档与测试** | README/help/slash.md 是否要改？语法/授权/效果/端到端/并发矩阵各补了哪条用例？ |
 
 **为什么"不需要改根组件"**：授权是查表、效果在 controller、结果由 `applyResult`/`applyEffect` 解释、面由 `surfaces` 描述；
 只有引入**全新表现动词**才需要动 UI。
+
+**其中两维由测试强制，不靠自觉**（`tests/architecture/command-checklist.test.ts`）：
+"授权"维断言每条 `COMMAND_HINTS` 命令都能解析到一个有显式策略条目的 kind（§3.4 的 fail-closed 使"忘了写"等于"忙时被拒"）；
+"transport"维断言 `src/` 里每个可到达的宿主 endpoint 都在 `transport/endpoints.ts` 里、行内读者确实被声明模块导出，且没有"没人再调用"的残留行（新增能力必须同时加门面函数、契约段与清单行）。
 
 ---
 
@@ -1082,7 +1151,9 @@ type LoopTerminalReason =
 | 归一化九条顺序、授权谓词、前缀/exactOnly | `tests/ui/commands.test.ts` | "一行含义唯一"是下游全部推理的前提 |
 | 每条命令的 kind → effects（数组顺序即契约） | `tests/controller/commands.test.ts` | 应用策略 |
 | `duringTurn`/`duringLoop` 只拒会写同一会话的命令；pending 的理由优先 | `tests/ui/commands.test.ts` | §3.4 |
-| 前台槽位被占时由 `authorize` 拒绝并给理由，只有 `whileBusy: 'run'` 的命令放行 | `tests/ui/commands.test.ts`、`tests/ui/app.test.tsx` | §3.4/D1 |
+| 状态投影唯一：`activityText()` 同时驱动状态栏与 `/status`；终态 loop 不算活动；只有 copy 冻结计时 | `tests/ui/status.test.ts`、`tests/ui/app.test.tsx` | §5.7 |
+| **`authorize` 不读前台槽位**：它只答语义政策；槽位冲突由认领点拒绝并给理由（含占用者 label） | `tests/ui/commands.test.ts`、`tests/ui/app.test.tsx` | §3.4/§6.6 |
+| catalog kind 缺省 fail-closed：表里没有的策略落到 `deny`；每个 kind 必须有显式条目 | `tests/ui/commands.test.ts` | §3.4 |
 | turn/loop 期间 `queue` 的命令被接受并持有；`defer` 的事实与优先级 | `tests/ui/commands.test.ts` | §3.4/A2 |
 | 前端队列按到达顺序在事实清零后运行；脚本前端等待同一事实 | `tests/ui/app.test.tsx`、`tests/cli/startup.test.ts` | §3.4/A2 |
 | 前台槽位 FIFO：`wait` 的认领按到达顺序被服务，新来的不插队 | `tests/controller/foreground.test.ts` | §6.2/A1 |
@@ -1102,7 +1173,8 @@ type LoopTerminalReason =
 | `CommandResult` 的两个维度：拒绝保留草稿、成功清空草稿 | `tests/ui/app.test.tsx`（`retain`/`consume` 用例） | §4.2 |
 | 输入回答与 `/cost` 刷新都发生在 `runCommand` 内，前端不自己发业务请求 | `tests/controller/commands.test.ts`（无 UI 的两个用例）、`tests/architecture/dependencies.test.ts` | I1/I6 |
 | 每条执行行恰好一对 `command begin/end`、同一个 `commandId`、end 带 `outcome`/`disposition`（失败时带同源的 `error`），且不含参数正文 | 同上 | 事件总账 + 隐私 + I9 + D2 |
-| 执行位被占用时第二条命令与 prompt 都提交不进来 | `tests/ui/app.test.tsx`（`/compact` 挂起） | §5.6 |
+| 执行位被占用时 prompt 在认领处被拒且保留草稿；视图类命令（`/help`）不取执行位，仍可打开 | `tests/ui/app.test.tsx`（`/compact` 挂起） | §5.6/§6.6/D1 |
+| 本地 admission 影子：host 尚未报 running 时，第二条提交仍然是 `steer`；报 running 后一致 | `tests/controller/session-writes.test.ts` | §6.6 |
 | 同会话写串行：`promptInternal` 不与 foreground mutation 重叠 | `tests/controller/session-writes.test.ts`（同一 gate、同一键）、`tests/session/mutation-gate.test.ts`（顺序/控制抢泳/跨会话独立/抛错释放） | I3 |
 | 长 mutation 不持有 gate：卡住的 `/compact` 期间 cancel 立即 dispatch | `tests/controller/session-writes.test.ts` | §6.3.1、§13.3-Q2 |
 | `/loop` 全流程（菜单→表单→启动→验证→trace） | `tests/ui/app.test.tsx`、`tests/controller/loop-*.test.ts` | 复合命令端到端 |
@@ -1167,7 +1239,7 @@ type LoopTerminalReason =
 
 | # | 决策 | 结论 | 理由 |
 |---|---|---|---|
-| D1 | foreground 期间 composer | **保持可编辑；Enter 拒绝提交并保留 draft；完成时绝不自动发送** | 核心场景是远程 SSH/手机控制：长 operation 期间用户完全可以把下一句先写好；失焦会明显变差。自动发送则等于替用户提交，违背其只编辑的意图。**已实现**：composer 的 `focus` 不再看 `busy`；被拒的行保留草稿（`whileBusy: 'run'` 的命令除外，见 §3.4）；一条命令结束时**只清掉它提交的那一行**——如果操作期间用户已经改了草稿，那是他的内容，不是这条结果的。
+| D1 | foreground 期间 composer | **保持可编辑；Enter 拒绝提交并保留 draft；完成时绝不自动发送** | 核心场景是远程 SSH/手机控制：长 operation 期间用户完全可以把下一句先写好；失焦会明显变差。自动发送则等于替用户提交，违背其只编辑的意图。**已实现**：composer 的 `focus` 不再看 `busy`；被拒的行保留草稿（拒绝发生在执行位认领处，理由带占用者 label，见 §6.6）；一条命令结束时**只清掉它提交的那一行**——如果操作期间用户已经改了草稿，那是他的内容，不是这条结果的。
 **【补充·不是例外】**：D1 禁止的是"把**被拒的草稿**在操作结束后自动发出去"。操作者按下 Enter、策略因 turn/loop 而 `queue` 的那一行不是草稿：它已经提交，前端在入队时就用掉了草稿，等到事实清零再执行——这是执行操作者的 Enter，而不是替他提交一段文本。 |
 | D2 | 错误/提示 owner | **业务失败事实归 `CommandResult.outcome` + trace；UI 只拥有展示生命周期**；`state.operation.error` 最终删除或降级为内部 `lastFailure` | 否则会出现三套"用户可见错误事实"，必然互相矛盾。**已完成**：结果 + trace 同源；命令自行报告失败后不再留第二份（`clearFailure()`）；`state.operation` 这个信封整体删除——失败只剩 `state.lastFailure` 一条内部记录（连接、会话流、动作信封写它），"是否有操作在跑"不再有第二个布尔，唯一事实是 `queries.foreground`（`ControllerStore.busy()` 供领域层读取） |
 | D3 | `/loop stop` 后显示 | **保留 terminal progress，直到下一次 loop 或显式清除**；**【修订】实际规则是"直到操作者运行下一行"** | 终态是最需要被看到的结果；配合 §8.3.1，只有 `active` 参与并发判断，终态残留不会污染授权。**修订理由**：只留到"下一次 loop"会让一条已经结束的进度行在后续所有操作里继续挂着（实测：loop 在第 2 轮被取消后，之后每做一件事它都还在屏上）。现在 `runCommand` 在**执行任何一行之前**清掉**非 active** 的 loop：结束该运行的那一行仍然把终态留在屏上（清理发生在这行自己的效果之前），而下一行按下的那一刻就表示操作者已经读完了它；`active`（含 PAUSED）永不在此清除，否则 `/loop answer`、`/loop stop` 就没有目标。测试：`tests/controller/commands.test.ts`、`tests/ui/app.test.tsx` |

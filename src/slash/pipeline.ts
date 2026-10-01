@@ -13,7 +13,7 @@
  * so every stage can be tested without mounting anything.
  */
 import { parseCommand, type Command } from './parse.ts';
-import { COMMAND_POLICY, resolveCommand, type CommandPolicy } from './registry.ts';
+import { policyFor, resolveCommand } from './registry.ts';
 
 /** A front-end action: a mode of the composer, never an application effect. */
 export type UiAction =
@@ -117,12 +117,6 @@ export interface AuthorizeFacts {
   sessionSelected: boolean;
   /** An interaction of that conversation is waiting. */
   pending: boolean;
-  /** Another operation already owns the client's single foreground slot.
-   *
-   * A front end reads this from the controller, so "may this line run while something else is running"
-   * is answered here — with a reason — instead of by each front end dropping the line in silence.
-   */
-  foreground: boolean;
   /** Whether the selected conversation has a turn or a loop in flight.
    *
    * A loop is reported as `loop` rather than as the turn it runs, because stopping the loop is what
@@ -133,10 +127,11 @@ export interface AuthorizeFacts {
 
 /** Why a line the policy accepted is not running yet.
  *
- * The fact that has to clear: the foreground slot, a turn, or a whole loop. One fact, because a line is
- * held behind the longest-lived of them and a front end only needs to know what to watch for.
+ * The fact that has to clear: a turn, or a whole loop. One fact, because a line is held behind the
+ * longest-lived of them and a front end only needs to know what to watch for. The foreground slot is
+ * not one of them: it is acquired at execution time (§6.4), so a line never waits for it here.
  */
-export type DeferReason = 'busy' | 'turn' | 'loop';
+export type DeferReason = 'turn' | 'loop';
 
 /** Whether one command may run now, may run later, or may not run at all.
  *
@@ -148,8 +143,9 @@ export type Verdict =
 
 /** Apply one command's declared policy to the current application facts.
  *
- * The policy is data on the command kind, so this function never enumerates commands. A kind with no
- * entry has no constraint. The constraint names describe the fact, not the screen: `requiresSession`
+ * The policy is data on the command kind, so this function never enumerates commands. A catalog kind
+ * with no entry is fail-closed (`policyFor`), never unconstrained. The constraint names describe the
+ * fact, not the screen: `requiresSession`
  * is refused in headless too (where a session always exists, so the check simply passes), and
  * `requiresNoInteraction` is refused wherever an interaction waits, because a front end without an
  * answer channel cannot satisfy it either.
@@ -158,8 +154,7 @@ export type Verdict =
  * @returns The verdict; on refusal, the error command the application should report.
  */
 export function authorize(command: LineCommand, facts: AuthorizeFacts): Verdict {
-  // `answer` and `path` are lines, not catalog kinds, so the table lookup is by kind string.
-  const policy = (COMMAND_POLICY as Readonly<Record<string, CommandPolicy | undefined>>)[command.kind];
+  const policy = policyFor(command.kind);
   if (policy?.requiresSession === true && !facts.sessionSelected) {
     return { allow: false, error: { kind: 'error', message: 'Select a session first' } };
   }
@@ -168,23 +163,15 @@ export function authorize(command: LineCommand, facts: AuthorizeFacts): Verdict 
   }
   // `during` is checked last: "answer what is waiting" is a more actionable reason than "something is
   // running", and a pending interaction usually means a turn is running too.
-  const during = facts.during === 'loop' ? policy?.duringLoop : facts.during === 'turn' ? policy?.duringTurn : undefined;
-  const whileBusy = policy?.whileBusy ?? 'deny';
+  const during = facts.during === 'loop' ? policy.duringLoop : facts.during === 'turn' ? policy.duringTurn : undefined;
   if (during === 'deny') {
     return { allow: false, error: { kind: 'error',
       message: facts.during === 'loop' ? 'Stop the running loop first' : 'Wait for the running turn to finish' } };
   }
-  // A queue behind a turn or a loop is decided first: the line runs later anyway, so the slot being
-  // busy right now says nothing about whether it should. The held line waits for both facts.
+  // A queue behind a turn or a loop is decided first: the line runs later anyway, so what the client
+  // happens to be showing right now says nothing about whether it should.
   if (during === 'queue') return { allow: true, command, defer: facts.during === 'loop' ? 'loop' : 'turn' };
-  // Only the commands declared to answer the operator or the host are admitted while the client is
-  // busy (§3.4); everything else waits for a reason the operator can read, because running it now
-  // would interleave with the operation they are watching.
-  if (facts.foreground) {
-    if (whileBusy === 'deny') {
-      return { allow: false, error: { kind: 'error', message: 'Wait for the running operation to finish' } };
-    }
-    if (whileBusy === 'queue') return { allow: true, command, defer: 'busy' };
-  }
+  // Nothing here reads the foreground slot: whether the client can *show* this line is decided when
+  // the line acquires the slot, which is the only place that cannot race its own check (§6.4).
   return { allow: true, command };
 }

@@ -1,13 +1,17 @@
 /** Model routes, reasoning efforts and agent-preset metadata for the selected session. */
 import type { Client } from '../transport/client.ts';
 import type { HostAccess } from '../transport/host.ts';
-import { array, errorText, object, string, type ObjectValue } from '../transport/wire.ts';
+import { errorText } from '../transport/wire.ts';
+import {
+  presets as readPresets, readModelCatalog, selectModel as selectHostModel,
+  type ModelCatalog, type ModelSelection, type PresetRow,
+} from '../transport/dsh.ts';
 
 /** Catalog can publish its metadata and selection result, but cannot navigate or mutate sessions. */
 export interface CatalogUpdate {
-  defaultModel?: ObjectValue;
+  defaultModel?: ModelSelection;
   modelError?: string;
-  presets?: ObjectValue[];
+  presets?: PresetRow[];
   presetError?: string;
   status?: string;
 }
@@ -57,8 +61,8 @@ export class CatalogController {
     if (!client || !this.host.online() || this.presetClient === client || signal.aborted) return;
     this.presetClient = client;
     const current = () => !signal.aborted && client === this.host.client();
-    const task = client.call('agentPresets/list', {}, signal).then(value => {
-      if (current()) this.host.publish({ presets: array(object(value).presets).map(object), presetError: undefined });
+    const task = readPresets(client, signal).then(presets => {
+      if (current()) this.host.publish({ presets: [...presets], presetError: undefined });
     }).catch(error => {
       if (current()) this.host.publish({ presets: [], presetError: errorText(error) });
     });
@@ -68,12 +72,12 @@ export class CatalogController {
   /** Fetch current model routes and adapter-owned reasoning choices for the selected session.
    * @returns Host catalog; provider failures remain available to the selector.
    */
-  async modelCatalog(caller?: AbortSignal): Promise<ObjectValue> {
+  async modelCatalog(caller?: AbortSignal): Promise<ModelCatalog> {
     const selection = this.selected();
     const signal = this.signal(caller);
     signal.throwIfAborted();
     return this.track((async () => {
-      const value = object(await this.host.require().call('session/modelCatalog', {}, signal));
+      const value = await readModelCatalog(this.host.require(), signal);
       signal.throwIfAborted();
       if (!this.isSelected(selection)) throw new Error('Session changed while loading models');
       return value;
@@ -90,12 +94,11 @@ export class CatalogController {
     const signal = this.signal(caller);
     signal.throwIfAborted();
     await this.track((async () => {
-      const selected = object(object(await this.host.require().call('session/selectModel', { request: {
-        sessionId: selection.sessionId, provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-      } }, signal)).selected);
+      const selected = await selectHostModel(this.host.require(),
+        { sessionId: selection.sessionId, provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }, signal);
       signal.throwIfAborted();
       if (!this.isSelected(selection)) return;
-      this.host.publish({ status: `Next request: ${string(selected.provider)} / ${string(selected.model)}${selected.reasoningEffort ? ` · ${string(selected.reasoningEffort)}` : ''}` });
+      this.host.publish({ status: `Next request: ${selected.provider} / ${selected.model}${selected.reasoningEffort ? ` · ${selected.reasoningEffort}` : ''}` });
       this.refresh();
     })());
   }
@@ -110,8 +113,8 @@ export class CatalogController {
     if (signal.aborted) return;
     const revision = ++this.revision;
     const current = () => !signal.aborted && client === this.host.client() && revision === this.revision;
-    const task = client.call('session/modelCatalog', {}, signal).then(value => {
-      if (current()) this.host.publish({ defaultModel: object(object(value).default), modelError: undefined });
+    const task = readModelCatalog(client, signal).then(catalog => {
+      if (current()) this.host.publish({ defaultModel: catalog.default, modelError: undefined });
     }).catch(error => {
       if (current()) this.host.publish({ defaultModel: undefined, modelError: errorText(error) });
     });

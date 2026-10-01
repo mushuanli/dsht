@@ -7,8 +7,12 @@
 import type { ControlFrame } from '../transport/events.ts';
 import { Telemetry } from './telemetry.ts';
 
-/** Projection capabilities this client consumes; the host retains every other key. */
-const RETAINED_PROJECTIONS = new Set(['title', 'modelSelection', 'contextPressure', 'tokenUsage', 'sessionStats', 'agentPreset']);
+/** Projection capabilities this client consumes; the host retains every other key.
+ *
+ * `inbox` replaced the retired `session/control` queue section: it is the durable list of input the
+ * next step or the next turn will claim, which is what the composer shows as pending.
+ */
+const RETAINED_PROJECTIONS = new Set(['title', 'modelSelection', 'contextPressure', 'tokenUsage', 'sessionStats', 'agentPreset', 'inbox']);
 
 export class SessionRuntime {
   /** Host projection values for every session of the current generation. */

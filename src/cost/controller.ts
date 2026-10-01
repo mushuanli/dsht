@@ -83,7 +83,7 @@ export class CostController {
     const task = Promise.resolve().then(async () => {
       try {
         combined.throwIfAborted();
-        const sessions = array(object(await client.call('session/list', { _request: {} }, combined)).items).map(object);
+        const sessions = await client.listSessions(undefined, combined);
         combined.throwIfAborted();
         const failures: string[] = [];
         let scanned = 0, pages = 0, events = 0;
@@ -94,7 +94,7 @@ export class CostController {
         const selected = this.host.selectedSessionId?.();
         for (const session of sessions) {
           combined.throwIfAborted();
-          const sessionId = string(session.sessionId);
+          const sessionId = session.sessionId;
           // The selected session is exempt from the window, not from the within-generation skip: the
           // panel reports its own total, but an unchanged history is still not read twice a minute.
           if (!session.running && typeof session.updatedAt === 'number') {

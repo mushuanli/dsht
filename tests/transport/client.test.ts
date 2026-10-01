@@ -284,10 +284,10 @@ test('a synchronous workspace baseline also releases its subscription', async ()
   const client = new Client('http://localhost');
   let cancelled = 0;
   client.subscribe = (_endpoint, _args, listener) => {
-    listener.item({ type: 'baseline', value: { items: [{ workspaceId: 'w' }], archivedSessionIds: ['s'] } });
+    listener.item({ type: 'baseline', value: { items: [{ workspaceId: 'w', path: '/w', title: 'W', sessionIds: ['s'] }], archivedSessionIds: ['s'] } });
     return { cancel: () => { cancelled++; } };
   };
-  assert.deepEqual(await client.listWorkspaces(), [{ workspaceId: 'w' }]);
+  assert.deepEqual(await client.listWorkspaces(), [{ workspaceId: 'w', path: '/w', title: 'W', sessionIds: ['s'] }]);
   assert.equal(cancelled, 1);
   assert.deepEqual([...client.archivedSessionIds], ['s']);
 });

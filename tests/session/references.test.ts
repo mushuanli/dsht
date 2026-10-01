@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileReferences } from '../../src/session/references.ts';
 import { activeReference, fileMention } from '../../src/references.ts';
+import { fileReferenceCandidates } from '../../src/transport/dsh-contract.ts';
 
 test('finds trailing mentions without treating emails or closed quotes as queries', () => {
   assert.equal(activeReference('email a@b.com'), undefined);
@@ -21,11 +22,11 @@ test('quotes spaced paths and keeps directory descent open', () => {
 });
 
 test('rejects malformed remote rows and hides unrepresentable paths', () => {
-  assert.throws(() => fileReferences({ items: [] }), /array/);
-  assert.throws(() => fileReferences([{ path: 'x', kind: 'unknown' }]), /kind/);
-  assert.throws(() => fileReferences([{ path: 1, kind: 'file' }]), /string/);
-  assert.deepEqual(fileReferences([
+  assert.throws(() => fileReferenceCandidates({ items: [] }), /array/);
+  assert.throws(() => fileReferenceCandidates([{ path: 'x', kind: 'unknown' }]), /kind/);
+  assert.throws(() => fileReferenceCandidates([{ path: 1, kind: 'file' }]), /string/);
+  assert.deepEqual(fileReferences(fileReferenceCandidates([
     { path: 'a\nb', kind: 'file' }, { path: 'a"b', kind: 'file' },
     { path: '\u001b[31mred', kind: 'file' }, { path: 'README.md', kind: 'file' },
-  ]), [{ path: 'README.md', kind: 'file' }]);
+  ])), [{ path: 'README.md', kind: 'file' }]);
 });

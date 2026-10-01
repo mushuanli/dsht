@@ -1,7 +1,7 @@
 /** Bounded background recall indexing, owned by one selected record and connection lifetime. */
 import { setTimeout as delay } from 'node:timers/promises';
 import type { HostAccess } from '../transport/host.ts';
-import { object } from '../json.ts';
+import { page as readPage } from '../transport/dsh.ts';
 import { Transcript } from './transcript.ts';
 import type { PromptCache, PromptIndex } from './info.ts';
 
@@ -55,13 +55,13 @@ export class PromptBackfill {
       let beforeSeq = record.beforeSeq, hasMore = record.hasMore;
       for (let page = 0; hasMore && beforeSeq !== undefined && page < PAGE_LIMIT; page++) {
         check();
-        const result = object(await client.call('session/page', { request: {
+        const result = await readPage(client, {
           address: { kind: 'session', sessionId }, throughSeq, beforeSeq, maxMessages: 80,
-        } }, signal));
+        }, signal);
         check();
         const temporary = new Transcript();
         try {
-          temporary.accept({ type: 'snapshot', cursor: throughSeq, assistantStream: { revision: 0 }, records: result.records, hasMore: result.hasMore });
+          temporary.openPage(result, throughSeq);
           const next = temporary.beforeSeq;
           if (temporary.hasMore && (next === undefined || next >= beforeSeq)) throw new Error('Host history page did not advance');
           prompts.prepend(temporary.promptsSince(-1).prompts);

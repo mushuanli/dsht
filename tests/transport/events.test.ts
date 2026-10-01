@@ -1,7 +1,7 @@
 /** The wire → semantic boundary: DSH field names must not survive into a HostEvent. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { controlFrame, hostEvent, projectionSnapshot } from '../../src/transport/events.ts';
+import { controlFrame, hostEvent, inboxInputs, projectionSnapshot } from '../../src/transport/events.ts';
 
 test('the ready handshake and unrecognized frames are not domain events', () => {
   assert.equal(hostEvent({ type: 'ready', clientId: 'c1' }), undefined);
@@ -85,4 +85,24 @@ test('a baseline without a queue or job section still yields its projections', (
   assert.equal(baseline.jobs.size, 0);
   // A section that is present but not an object is still malformed, not absent.
   assert.throws(() => controlFrame({ type: 'baseline', value: { projections: {}, queues: 'nope' } }), /Expected a JSON object/);
+});
+
+test('the durable inbox projection flattens into the pending inputs a host holds', () => {
+  const inputs = inboxInputs({
+    'next-step': [{ id: 'm2', content: [{ type: 'text', text: 'steer this' }], source: { kind: 'user', rpcId: 'r2' } }],
+    'next-turn': [
+      { id: 'm3', content: [{ type: 'text', text: 'later' }, { type: 'image' }], source: { kind: 'user', rpcId: 'r3' } },
+      // An injected occurrence has no submission identity and must not retire anyone's local row.
+      { id: 'm4', content: [{ type: 'text', text: 'context' }], source: { kind: 'system-prompt' } },
+    ],
+  });
+  assert.deepEqual(inputs, [
+    { id: 'm2', placement: 'steering', rpcId: 'r2', text: 'steer this' },
+    { id: 'm3', placement: 'queued', rpcId: 'r3', text: 'later [image]' },
+    { id: 'm4', placement: 'queued', text: 'context' },
+  ]);
+  assert.deepEqual(inboxInputs(undefined), []);
+  assert.deepEqual(inboxInputs({ 'next-step': 'not a list' }), []);
+  // A row this client cannot read is skipped rather than failing the whole control stream.
+  assert.deepEqual(inboxInputs({ 'next-step': [null, {}, { id: 'ok' }] }), [{ id: 'ok', placement: 'steering', text: '' }]);
 });

@@ -1,4 +1,5 @@
 /** Rich transcript snapshots and malformed streaming input exercise the actual history layout. */
+import { followFrame } from '../../src/transport/dsh-contract.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -17,9 +18,9 @@ const source = readFileSync(new URL('../fixtures/markdown.md', import.meta.url),
 const lines = (text: string, width = 80) => markdownRows(text, width).map(row => row.text);
 function transcript(text: string): Transcript {
   const result = new Transcript();
-  result.accept({ type: 'snapshot', cursor: 1, hasMore: false, assistantStream: { revision: 0 }, records: [
+  result.accept(followFrame({ type: 'snapshot', cursor: 1, hasMore: false, assistantStream: { revision: 0 }, records: [
     { type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text }] } } } },
-  ] });
+  ] }));
   return result;
 }
 
@@ -90,12 +91,12 @@ test('MathJax parses all delimiters, fractions, scripts and matrices without int
 
 test('every rich streaming delta matches complete parsing and final history keeps the source', () => {
   const conversation = new Transcript();
-  conversation.accept({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'rich', revision: 1 } });
+  conversation.accept(followFrame({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'rich', revision: 1 } }));
   let text = ''; let frame = 0;
   for (let offset = 0; offset < source.length; offset += 19) {
     const delta = source.slice(offset, offset + 19); text += delta;
-    conversation.accept({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'rich', index: frame, revision: frame + 2,
-      chunk: { type: 'text-delta', index: 0, text: delta } } }); frame++;
+    conversation.accept(followFrame({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'rich', index: frame, revision: frame + 2,
+      chunk: { type: 'text-delta', index: 0, text: delta } } })); frame++;
     for (const width of [32, 100]) {
       const layout = historyLayout(conversation, width);
       assert.deepEqual(layout.lines.slice(1), lines(conversation.liveParts(width)[0]!.text, width), `delta ${offset}, width ${width}`);
@@ -123,6 +124,6 @@ test('offline HTML export includes inert SVG and MathJax math, preserves files, 
   const line = interpret({ line: '/export-html', referenceOpen: false, copyMode: false, screen: 'sessions' });
   assert.equal(line.kind, 'line');
   const command = normalize(line as Extract<typeof line, { kind: 'line' }>, { sessionSelected: false, question: false, pending: false });
-  assert.deepEqual(authorize(command, { sessionSelected: false, pending: false, during: 'idle', foreground: false }),
+  assert.deepEqual(authorize(command, { sessionSelected: false, pending: false, during: 'idle' }),
     { allow: false, error: { kind: 'error', message: 'Select a session first' } });
 });

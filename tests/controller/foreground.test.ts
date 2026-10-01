@@ -212,3 +212,24 @@ test('each operation is traced with its kind and whether it was cancelled', asyn
     .map(entry => `${entry.phase}:${entry.kind}:${entry.cancelled ?? ''}`),
     ['begin:model:', 'end:model:false', 'begin:search:', 'end:search:true']);
 });
+
+test('a refused claim names the operation holding the slot, in the failure line and the trace', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-refusal-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { app } = await controller(t, { tracePath: join(directory, 'trace.log') });
+  const held = gate();
+  const owner = app.actions.foreground('search', 'Searching sessions…', async () => { await held.promise; });
+  await until(() => app.queries.foreground?.kind === 'search');
+  // The refusal carries the owner: the mechanism that decided it already knows what the operator is
+  // waiting for, so no listener reads back into the slot to name it.
+  assert.equal(await app.actions.foreground('history', 'Loading history…', async () => 'unexpected'), undefined);
+  assert.equal(app.state.lastFailure, 'Another operation is running: Searching sessions…');
+  held.release();
+  await owner;
+  await app.trace?.settle();
+  const events = (await readTrace(join(directory, 'trace.log'))).filter(line => !line.startsWith('#'))
+    .map(line => JSON.parse(line) as { event: string; phase?: string; label?: string; owner?: { label?: string } });
+  const refused = events.find(entry => entry.event === 'foreground' && entry.phase === 'refused');
+  assert.equal(refused?.label, 'Loading history…');
+  assert.equal(refused?.owner?.label, 'Searching sessions…');
+});

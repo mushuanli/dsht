@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { Controller, runCommand, type CommandPort, type ControllerOptions } from '../../src/controller/index.ts';
 import { readTrace } from '../../src/controller/trace-log.ts';
 import { parseCommand } from '../../src/slash/index.ts';
-import type { ObjectValue } from '../../src/transport/wire.ts';
+import { object, type ObjectValue } from '../../src/transport/wire.ts';
 import { host, until } from '../support/host.ts';
 
 /** A port that runs nothing cancellable; none of these cases needs one. */
@@ -86,4 +86,27 @@ test('a loop sends its turns through the same admission point as the reader', as
   assert.ok(recorded.length >= 2, JSON.stringify(recorded));
   assert.ok(recorded.every(entry => entry.session === 's1'), JSON.stringify(recorded));
   assert.deepEqual(recorded.map(entry => entry.lane), ['normal', 'control']);
+});
+
+test('a second submission steers the turn the first one started, before the host reports it', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-writes-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { fixture, app } = await controller(t, directory);
+  // The host reports nothing about running state here, which is exactly the window the local admission
+  // shadow exists for: the first prompt was accepted, so the second must steer the turn it started
+  // rather than queue a new one behind it.
+  assert.equal(await app.actions.prompt('first'), true);
+  assert.equal(await app.actions.prompt('second'), true);
+  const modes = fixture.calls.filter(call => call.method === 'session/prompt')
+    .map(call => object(object(object(call.payload).args).request).mode);
+  assert.deepEqual(modes, ['queue', 'steer']);
+  // The authoritative report clears the shadow: with the host saying "running", steering is what the
+  // projection alone implies too.
+  fixture.emit({ type: 'emit', event: 'api-session/status', args: ['s1', true] });
+  await until(() => app.queries.running);
+  assert.equal(await app.actions.prompt('third'), true);
+  assert.deepEqual(fixture.calls.filter(call => call.method === 'session/prompt')
+    .map(call => object(object(object(call.payload).args).request).mode), ['queue', 'steer', 'steer']);
+  // Drain the trace before the directory hook removes it, like every other case in this file.
+  await app.trace?.settle();
 });

@@ -2,11 +2,14 @@
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
-import { cacheHitText, clockText, compactStatusRows, metricLines, elapsedTime, phaseText, type StatusGroups } from '../../src/ui/chat/status.tsx';
+import { runtimeActivity, cacheHitText, clockText, compactStatusRows, metricLines, elapsedTime, phaseText, StatusBar, type StatusGroups, type StatusSource } from '../../src/ui/chat/status.tsx';
+import React from 'react';
+import { render } from 'ink-testing-library';
 import wrapAnsi from 'wrap-ansi';
 import stringWidth from 'string-width';
 import { Telemetry } from '../../src/session/telemetry.ts';
 import { controlFrame, projectionSnapshot } from '../../src/transport/events.ts';
+import { sessionMetrics } from '../../src/transport/dsh-contract.ts';
 
 test('shows current and pending models, approximate occupancy and disjoint usage totals', () => {
   const values = {
@@ -14,18 +17,18 @@ test('shows current and pending models, approximate occupancy and disjoint usage
     contextPressure: { pressureTokens: 10, projectedTokens: 25, contextWindow: 100 },
     tokenUsage: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 300, cacheWriteTokens: 400 },
   };
-  assert.deepEqual(metricLines(values, undefined, true), [
+  assert.deepEqual(metricLines(sessionMetrics(values), undefined, true), [
     'Model: p/current · Next: p/next (high)',
     'Context ~25% (25/100) · 1K tok',
     'In 100 · Out 200 · Cache 300/400',
   ]);
-  assert.equal(metricLines(values, undefined, false)[0], 'Model: p/next (high)');
-  assert.equal(metricLines({}, { provider: 'default', model: 'chat' }, false)[0], 'Model: default/chat');
-  assert.deepEqual(metricLines({}, undefined, false).slice(1), [
+  assert.equal(metricLines(sessionMetrics(values), undefined, false)[0], 'Model: p/next (high)');
+  assert.equal(metricLines(sessionMetrics({}), { provider: 'default', model: 'chat' }, false)[0], 'Model: default/chat');
+  assert.deepEqual(metricLines(sessionMetrics({}), undefined, false).slice(1), [
     'Context unknown · ? tok', 'In ? · Out ? · Cache ?/?',
   ]);
-  assert.match(metricLines({ contextPressure: { pressureTokens: 200, contextWindow: 100 } }, undefined, false)[1]!, /~100%/);
-  assert.match(metricLines({ contextPressure: { pressureTokens: 200, contextWindow: 0 } }, undefined, false)[1]!, /unknown/);
+  assert.match(metricLines(sessionMetrics({ contextPressure: { pressureTokens: 200, contextWindow: 100 } }), undefined, false)[1]!, /~100%/);
+  assert.match(metricLines(sessionMetrics({ contextPressure: { pressureTokens: 200, contextWindow: 0 } }), undefined, false)[1]!, /unknown/);
 });
 
 test('projection snapshots preserve newer keys, remove absent capabilities and reset on reconnect', () => {
@@ -153,4 +156,48 @@ test('the working clock and the phase age use the compact forms the bar shows', 
   assert.equal(phaseText(28_000), '28s');
   assert.equal(phaseText(59_999), '59s');
   assert.equal(phaseText(68_000), '1:08');
+});
+
+/** One runtime source with only the facts a case is about; the rest is an idle, connected chat. */
+function sourceOf(patch: Partial<StatusSource> = {}): StatusSource {
+  return { host: 'http://h', online: true, status: 'Connected', running: false, workspaceLabel: 'Project α',
+    pendingCount: 0, metrics: sessionMetrics({}), shell: { running: false }, ...patch };
+}
+
+test('the activity projection names every lifecycle once, and a terminal loop is not one of them', () => {
+  // One function feeds the bar and the panel, so this is the single answer to "what is happening now".
+  // The slot says where it belongs; callers never compare text to decide that.
+  assert.deepEqual(runtimeActivity(sourceOf()), {});
+  assert.deepEqual(runtimeActivity(sourceOf({ running: true })), {}, 'a bare turn is the clock, not a second word');
+  assert.deepEqual(runtimeActivity(sourceOf({ running: true, activity: { kind: 'turn', since: 1 } })), {});
+  assert.deepEqual(runtimeActivity(sourceOf({ activity: { kind: 'loop', activity: 'verify', title: 'Review', step: 3, total: 10, startedAt: 1 } })),
+    { phase: { kind: 'loop', text: 'Loop 3/10 · Verifying' } });
+  assert.deepEqual(runtimeActivity(sourceOf({ activity: { kind: 'loop', activity: 'settle', title: 'Review', step: 3, total: 10, startedAt: 1 } })),
+    { phase: { kind: 'loop', text: 'Loop 3/10 · Settling' } });
+  assert.deepEqual(runtimeActivity(sourceOf({ foreground: { label: 'Compacting history…' } })),
+    { phase: { kind: 'foreground', text: 'Compacting history…' } });
+  // The two slots fill in parallel: the local shell is a badge of its own, not the loser of the phase
+  // priority, because both lifecycles really are running.
+  assert.deepEqual(runtimeActivity(sourceOf({ shell: { running: true } })), { badge: { kind: 'shell', text: '! shell' } });
+  assert.deepEqual(runtimeActivity(sourceOf({ foreground: { label: 'Exporting…' }, shell: { running: true } })),
+    { phase: { kind: 'foreground', text: 'Exporting…' }, badge: { kind: 'shell', text: '! shell' } });
+  // A loop that ended is a result, not an activity: the controller drops it from `activity`, so the bar
+  // reports Ready and the progress line above the composer keeps the verdict.
+  assert.deepEqual(runtimeActivity(sourceOf({ activity: undefined })), {});
+});
+
+test('the bar and the expanded panel name the same lifecycle', () => {
+  const source = sourceOf({ running: true, foreground: { label: 'Exporting session log…' }, shell: { running: true } });
+  const compact = render(React.createElement(StatusBar, { source, width: 100 }));
+  const frame = compact.lastFrame()!;
+  compact.unmount(); compact.cleanup();
+  // The foreground operation outranks the turn for the phase slot; the local shell keeps its own badge.
+  // No clock is printed because the operation is not the turn the clock measures — the ◐ token alone
+  // says the client is working.
+  assert.match(frame, /◐ · Exporting session log…/);
+  assert.match(frame, /! shell/);
+  const detail = render(React.createElement(StatusBar, { source, width: 100, expanded: true }));
+  const panel = detail.lastFrame()!;
+  detail.unmount(); detail.cleanup();
+  assert.match(panel, /◐ Exporting session log… · Esc cancel/);
 });

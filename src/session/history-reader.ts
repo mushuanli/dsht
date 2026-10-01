@@ -2,7 +2,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Client } from '../transport/client.ts';
 import type { HostAccess } from '../transport/host.ts';
-import { object } from '../json.ts';
+import { page as readPage } from '../transport/dsh.ts';
 import { toolLine } from '../text.ts';
 import { Transcript } from './transcript.ts';
 import type { HistorySearch } from './types.ts';
@@ -75,10 +75,10 @@ export class HistoryReader {
     context.check();
     if (!transcript.ready || !transcript.hasMore || transcript.beforeSeq === undefined) return;
     const before = transcript.beforeSeq;
-    const result = await context.client.call('session/page', { request: {
+    const result = await readPage(context.client, {
       address: { kind: 'session', sessionId: context.sessionId }, throughSeq: transcript.cursor,
       beforeSeq: before, maxMessages: 80,
-    } }, context.signal);
+    }, context.signal);
     context.check();
     if (!this.host.owns(transcript)) throw new Error('History window closed');
     transcript.addPage(result);
@@ -124,13 +124,13 @@ export class HistoryReader {
       let beforeSeq = source.beforeSeq;
       let hasMore = source.hasMore;
       while (hasMore && beforeSeq !== undefined) {
-        const page = object(await context.client.call('session/page', { request: {
+        const page = await readPage(context.client, {
           address: { kind: 'session', sessionId: context.sessionId }, throughSeq, beforeSeq, maxMessages: 80,
-        } }, context.signal));
+        }, context.signal);
         context.check();
         const temporary = new Transcript();
         try {
-          temporary.accept({ type: 'snapshot', cursor: throughSeq, assistantStream: { revision: 0 }, records: page.records, hasMore: page.hasMore });
+          temporary.openPage(page, throughSeq);
           const next = temporary.beforeSeq;
           if (temporary.hasMore && (next === undefined || next >= beforeSeq)) throw new Error('Host history page did not advance');
           if (!scan(temporary)) return result;
@@ -145,14 +145,14 @@ export class HistoryReader {
   historyAt(target: number, signal: AbortSignal): Promise<Transcript> {
     return this.read(signal, undefined, async context => {
       const throughSeq = context.record.readThrough;
-      const page = object(await context.client.call('session/page', { request: {
+      const page = await readPage(context.client, {
         address: { kind: 'session', sessionId: context.sessionId }, throughSeq,
         beforeSeq: target + 1, maxMessages: 80,
-      } }, context.signal));
+      }, context.signal);
       context.check();
       const window = new Transcript();
       try {
-        window.accept({ type: 'snapshot', cursor: throughSeq, assistantStream: { revision: 0 }, records: page.records, hasMore: page.hasMore });
+        window.openPage(page, throughSeq);
         if (!window.messages.some(message => message.seq === target)) throw new Error('The host did not return the requested message');
         return window;
       } catch (error) { window.dispose(); throw error; }

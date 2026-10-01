@@ -1,4 +1,5 @@
 /** Background prompt reads belong to the selected session and must settle on shutdown. */
+import { followFrame } from '../../src/transport/dsh-contract.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller } from '../../src/controller/controller.ts';
@@ -14,7 +15,7 @@ const message = (seq: number) => ({ type: 'event', event: { seq, type: 'user/mes
 function harness(call: Client['call'], ready = true) {
   const abort = new AbortController();
   const record = new Transcript();
-  if (ready) record.accept({ ...snapshot, cursor: 5, hasMore: true, records: [message(4), message(5)] });
+  if (ready) record.accept(followFrame({ ...snapshot, cursor: 5, hasMore: true, records: [message(4), message(5)] }));
   const prompts = new PromptIndex({ maxEntries: 3, maxBytes: 1000 });
   prompts.fold(record.promptsSince(-1));
   const selection = { sessionId: 's', revision: 0, record, prompts };

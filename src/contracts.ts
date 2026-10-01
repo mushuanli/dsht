@@ -6,7 +6,6 @@
  */
 import type { Transcript } from './session/transcript.ts';
 
-export type { Json, ObjectValue } from './json.ts';
 export type { HistoryRow, Reasoning, RowKind, SessionRender } from './session/history.ts';
 export type { Transcript } from './session/transcript.ts';
 export type { LivePhase, Message } from './session/transcript.ts';
@@ -14,15 +13,19 @@ export type { FileReference } from './references.ts';
 export type { HistorySearch, RemovalTarget } from './session/types.ts';
 export type { QueuedInput } from './session/telemetry.ts';
 export type { CostTotal, Coverage } from './cost/index.ts';
+export type {
+  CatalogModel, ModelCatalog, ModelSelection, PresetRow, SearchItem, SessionMetrics, SessionRow,
+  WorkspaceRow,
+} from './transport/dsh.ts';
 export type { ShellBlock } from './shell/index.ts';
 
 import type { HistorySearch, RemovalTarget } from './session/types.ts';
-import type { ObjectValue } from './json.ts';
+import type { CatalogModel, ModelCatalog, SearchItem } from './transport/dsh.ts';
 
 /** Data delivered to dialogs; visibility and keyboard ownership belong to the UI. */
-export interface ModelState { catalog: ObjectValue; provider?: string; model?: ObjectValue }
+export interface ModelState { catalog: ModelCatalog; provider?: string; model?: CatalogModel }
 export interface HistoryPanel { query: string; contentSearch: boolean; matches?: HistorySearch }
-export interface SearchPanel { query: string; items: ObjectValue[]; hasMore: boolean }
+export interface SearchPanel { query: string; items: SearchItem[]; hasMore: boolean }
 
 /** One user-saved shortcut prompt; the client owns the list, no session or host does. */
 export interface SavedPrompt { id: string; text: string }

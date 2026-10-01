@@ -2,7 +2,13 @@
 import { randomUUID } from 'node:crypto';
 import type { Subscription } from '../transport/client.ts';
 import type { HostAccess } from '../transport/host.ts';
-import { array, errorText, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
+import { array, errorText, object, string, type Json } from '../transport/wire.ts';
+import {
+  archiveSession, cancel, createSession as createHostSession, deleteWorkspace, executeCommand,
+  fileReferences as listFileReferences, follow, presets as readPresets, prompt as sendPrompt,
+  renameSession, searchSessions, updateQueue,
+  type PresetRow, type SearchItem, type SessionRow, type WorkspaceRow,
+} from '../transport/dsh.ts';
 import type { SessionStore } from './state.ts';
 import { saveSessionLog } from './export.ts';
 import { saveTranscriptHtml } from './export-html.ts';
@@ -48,7 +54,23 @@ export class SessionController {
   private get prompts(): PromptIndex { return this.info.prompts; }
   private stoppingSession?: string;
   private interruptTask: Promise<boolean> | undefined;
-  private admission: Promise<Json | undefined> | undefined;
+  private admission: Promise<unknown> | undefined;
+  /** Prompts this client sent that the host has not written into the session yet.
+   *
+   * A steering message is appended to the session only at the next step boundary, so between Enter
+   * and that boundary the operator's own text would otherwise be nowhere on screen. Each entry is
+   * keyed by the request id the host echoes as `source.rpcId` (or reports in its pending input), which
+   * is what retires it at the same moment the durable row appears.
+   */
+  private readonly outbox = new Map<string, { sessionId: string; text: string; at: number }>();
+  /** Sessions this client has submitted a prompt for, whose running state the host has not reported yet.
+   *
+   * The host's status event and the list row are the authority, but they arrive *after* the request was
+   * accepted. Without this shadow, a second submission inside that window reads "idle" and queues a new
+   * turn instead of steering the one the host already started — a logical race the mutation gate cannot
+   * see, because the gate serializes admissions rather than remote state (§6.3).
+   */
+  private readonly admittedTurn = new Set<string>();
   /** Admission order of this session's writes, so two concurrent decisions cannot interleave. */
   private readonly mutations: SessionMutationGate;
   constructor(private readonly store: SessionStore, private readonly host: HostAccess,
@@ -100,20 +122,23 @@ export class SessionController {
   get sessionName(): string | undefined {
     const id = this.store.state.sessionId;
     if (!id) return;
-    const title = this.runtime.telemetry.view(id).values.title;
+    const title = this.runtime.telemetry.metrics(id).title;
     const row = this.store.state.sessions.find(item => item.sessionId === id);
-    return title !== undefined ? sessionLabel({ sessionId: id, projections: { values: { title } } })
+    return title !== undefined ? sessionLabel({ sessionId: id, title })
       : row ? sessionLabel(row) : id;
   }
 
   /** Current agent-preset name, matching the web header's built-in labels and custom metadata. */
-  sessionMode(presets: readonly ObjectValue[] = []): string | undefined {
+  sessionMode(presets: readonly PresetRow[] = []): string | undefined {
     if (!this.store.state.sessionId) return undefined;
-    const id = this.runtime.telemetry.view(this.store.state.sessionId).values.agentPreset;
+    const id = this.runtime.telemetry.metrics(this.store.state.sessionId).agentPresetId;
     if (typeof id !== 'string') return undefined;
     const preset = presets.find(item => item.id === id);
-    return preset?.trust === 'system' && BUILT_IN_MODES.has(id) ? BUILT_IN_MODES.get(id)
-      : typeof preset?.name === 'string' ? preset.name : id;
+    // A roster row no longer carries the `trust` that used to prove a preset was built in (0.2 dropped
+    // it), so a known built-in id labels itself and an older host's `trust` only has to agree when it
+    // is present at all. A renamed preset still wins, because the host named it.
+    const builtIn = (preset?.trust === undefined || preset.trust === 'system') && BUILT_IN_MODES.has(id);
+    return builtIn ? BUILT_IN_MODES.get(id) : typeof preset?.name === 'string' ? preset.name : id;
   }
 
   /** Epoch start from the retained turn log, or when this client first observed the run. */
@@ -123,7 +148,7 @@ export class SessionController {
   }
 
   /** Present only sessions explicitly accounted to the selected workspace. */
-  get visibleSessions(): ObjectValue[] { return this.navigation.visibleSessions; }
+  get visibleSessions(): SessionRow[] { return this.navigation.visibleSessions; }
 
   /** Whether a turn, cancellation or prompt admission is still in flight. */
   get active(): boolean { return this.interruptTask !== undefined || this.running || this.admission !== undefined; }
@@ -155,13 +180,13 @@ export class SessionController {
   }
 
   /** Apply one normalized control frame to this session's runtime. */
-  acceptControl(frame: ControlFrame): void { this.runtime.acceptControl(frame); }
+  acceptControl(frame: ControlFrame): void { this.runtime.acceptControl(frame); this.retireOutbox(); }
 
   /** Whether reading protects the loaded window, suspending history reclamation. */
   get pinned(): boolean { return this.historyPinned; }
 
   /** Drop generation-scoped state before a new connection generation begins. */
-  beginGeneration(): void { this.stoppingSession = undefined; this.runtime.reset(); }
+  beginGeneration(): void { this.stoppingSession = undefined; this.outbox.clear(); this.admittedTurn.clear(); this.runtime.reset(); }
 
   /** Invalidate in-flight work and drop transient interactions when a generation ends. */
   endGeneration(): void {
@@ -212,6 +237,8 @@ export class SessionController {
    */
   status(sessionId: string, running: boolean): void {
     this.runtime.accept(sessionId, running);
+    // The authoritative report has arrived, so the local shadow has nothing left to cover.
+    if (running) this.admittedTurn.delete(sessionId);
     if (!running && this.stoppingSession === sessionId) this.stoppingSession = undefined;
     this.store.update({ sessions: this.store.state.sessions.map(row => row.sessionId === sessionId ? { ...row, running } : row),
       ...(sessionId === this.store.state.sessionId ? { status: running ? 'Running…' : 'Idle' } : {}) });
@@ -246,7 +273,7 @@ export class SessionController {
         // This wait stays outside the gate: a control admission overtakes the *waiting* queue, and
         // holding the gate while waiting here would block the very writes it precedes.
         await this.admission?.catch(() => undefined);
-        await this.mutations.admit(sessionId, 'control', () => this.host.require().call('session/cancel', { request: { sessionId } }));
+        await this.mutations.admit(sessionId, 'control', () => cancel(this.host.require(), sessionId));
         if (this.stoppingSession === sessionId && this.store.state.sessionId === sessionId) this.store.update({ status: 'Cancellation requested · waiting for host' });
       } catch (error) { this.stoppingSession = undefined; this.store.update({ status: 'Cancellation failed', lastFailure: errorText(error) }); }
       return false;
@@ -269,7 +296,7 @@ export class SessionController {
   async cancelTurn(): Promise<void> {
     const sessionId = this.sessionId;
     // Cancellation is a control action: it may overtake queued writes, since its whole value is speed.
-    await this.mutations.admit(sessionId, 'control', () => this.host.require().call('session/cancel', { request: { sessionId } }));
+    await this.mutations.admit(sessionId, 'control', () => cancel(this.host.require(), sessionId));
     this.store.update({ status: 'Cancellation requested' });
   }
 
@@ -298,16 +325,19 @@ export class SessionController {
    */
   async removalTarget(kind: 'workspace' | 'session', query: string): Promise<RemovalTarget> {
     const client = this.host.require();
-    const items = kind === 'workspace' ? await client.listWorkspaces() : await client.listSessions();
-    const row = resolveTarget(items, query, kind === 'workspace' ? 'workspaceId' : 'sessionId',
-      item => kind === 'workspace' ? [string(item.title), string(item.path)] : [sessionLabel(item)]);
-    return kind === 'workspace' ? { kind, id: string(row.workspaceId), name: string(row.title), path: string(row.path) }
-      : { kind, id: string(row.sessionId), name: sessionLabel(row),
-        empty: row.blank === true && row.running === false
-          && !this.runtime.runningFor(string(row.sessionId))
-          && !(this.runtime.telemetry.view(string(row.sessionId)).queued ?? 0)
-          && !(this.runtime.telemetry.view(string(row.sessionId)).jobs ?? 0)
-          && !(this.store.state.sessionId === row.sessionId && this.admission) };
+    if (kind === 'workspace') {
+      const row = resolveTarget(await client.listWorkspaces(), query,
+        item => item.workspaceId, item => [item.title, item.path]);
+      return { kind, id: row.workspaceId, name: row.title, path: row.path };
+    }
+    const row = resolveTarget(await client.listSessions(), query,
+      item => item.sessionId, item => [sessionLabel(item)]);
+    return { kind, id: row.sessionId, name: sessionLabel(row),
+      empty: row.blank && !row.running
+        && !this.runtime.runningFor(row.sessionId)
+        && !(this.runtime.telemetry.view(row.sessionId).queued ?? 0)
+        && !(this.runtime.telemetry.view(row.sessionId).jobs ?? 0)
+        && !(this.store.state.sessionId === row.sessionId && this.admission) };
   }
 
   /** Apply a confirmed removal or freshly verified empty-session archival; directories and logs are preserved.
@@ -315,22 +345,26 @@ export class SessionController {
    */
   async removeTarget(target: RemovalTarget): Promise<void> {
     const client = this.host.require();
+    // Read before any mutation: selecting another workspace afterwards is itself a navigation change.
     const intent = this.navigation.intent;
-    const receipt = object(target.kind === 'workspace'
-      ? await client.call('workspace/delete', { request: { workspaceId: target.id } })
-      // Archiving a session is a write on that session, so it queues behind that session's admissions.
-      : await this.mutations.admit(target.id, 'normal', () => client.call('workspace/archiveSession', { request: { sessionId: target.id } })));
-    if (client !== this.host.client()) return;
-    const navigate = intent === this.navigation.intent;
-    if (target.kind === 'session') {
-      client.archivedSessionIds = new Set(array(receipt.archivedSessionIds).map(string));
-      if (this.store.state.sessionId === target.id) this.pickWorkspace(this.store.state.workspaceId);
-    } else {
-      if (receipt.deleted !== true) throw new Error('Host did not confirm workspace removal');
+    const navigate = () => intent === this.navigation.intent;
+    if (target.kind === 'workspace') {
+      await deleteWorkspace(client, target.id);
+      if (client !== this.host.client()) return;
       this.store.update({ workspaces: this.store.state.workspaces.filter(row => row.workspaceId !== target.id),
         ...(this.store.state.workspaceId === target.id ? { workspaceId: undefined } : {}) });
+    } else {
+      // Archiving a session is a write on that session, so it queues behind that session's admissions.
+      // Since 0.2 the host refuses to archive a session that still has running work unless the caller
+      // asks it to stop that work (`workspace/session-active` otherwise); the operator confirmed this
+      // archival, and the pre-0.2 host archived whatever it was given, so the stop is part of the
+      // action rather than a second question.
+      const archived = await this.mutations.admit(target.id, 'normal', () => archiveSession(client, target.id));
+      if (client !== this.host.client()) return;
+      client.archivedSessionIds = new Set(archived);
+      if (this.store.state.sessionId === target.id) this.pickWorkspace(this.store.state.workspaceId);
     }
-    this.store.update({ ...(navigate ? { screen: target.kind === 'workspace' ? 'workspaces' as const : 'sessions' as const } : {}),
+    this.store.update({ ...(navigate() ? { screen: target.kind === 'workspace' ? 'workspaces' as const : 'sessions' as const } : {}),
       status: target.kind === 'workspace' ? 'Workspace registration removed' : 'Session archived' });
     // A refresh failure must not make a successful mutation look like a rejected deletion.
     try { await this.refreshLists(); }
@@ -383,9 +417,8 @@ export class SessionController {
   async createNamedSession(title: string): Promise<string | undefined> {
     const workspaceId = this.store.state.workspaceId;
     if (!workspaceId) throw new Error('Select a workspace before creating a session');
-    const created = object(await this.host.require().call('session/create', { request: { workspaceId } }));
-    const sessionId = string(created.sessionId);
-    try { await this.host.require().call('session/rename', { request: { sessionId, title } }); }
+    const sessionId = await createHostSession(this.host.require(), workspaceId);
+    try { await renameSession(this.host.require(), sessionId, title); }
     catch { /* A deployment without the title service still gets a usable session. */ }
     return sessionId;
   }
@@ -398,7 +431,7 @@ export class SessionController {
    */
   async cancelNamedSession(sessionId: string): Promise<void> {
     // Keyed by the session being stopped, not the selection: the verifier's session is someone else's.
-    await this.mutations.admit(sessionId, 'control', () => this.host.require().call('session/cancel', { request: { sessionId } }));
+    await this.mutations.admit(sessionId, 'control', () => cancel(this.host.require(), sessionId));
   }
 
   /** Replace the selected transcript and cancel its preceding follow stream.
@@ -419,31 +452,37 @@ export class SessionController {
     this.promptBackfill.cancel();
     this.history.cancel();
     this.stoppingSession = undefined;
+    // A pending submission belongs to the conversation it was typed in; another session's transcript
+    // is what would retire it, so it must not follow the reader across.
+    this.outbox.clear();
+    this.admittedTurn.clear();
     this.store.bumpSelection();
     const selection = this.store.selection();
     this.follow?.cancel(); this.follow = undefined;
     this.info.reset(sessionId);
     const transcript = this.info.record;
-    const workspace = this.store.state.workspaces.find(item => array(item.sessionIds).includes(sessionId));
-    const workspaceId = workspace ? string(workspace.workspaceId)
+    const workspace = this.store.state.workspaces.find(item => item.sessionIds.includes(sessionId));
+    const workspaceId = workspace ? workspace.workspaceId
       : this.store.state.sessions.some(item => item.sessionId === sessionId) ? undefined : this.store.state.workspaceId;
     this.runtime.observe(sessionId);
     this.store.update({ sessionId, status: 'Loading session…',
       ...(navigate ? { workspaceId, showAllSessions: false, screen: 'chat' as const } : {}) });
-    this.follow = this.host.require().subscribe('session/follow', {
-      request: { address: { kind: 'session', sessionId }, maxMessages: 80, assistantStream: true },
-    }, {
-      item: value => {
+    this.follow = follow(this.host.require(), { address: { kind: 'session', sessionId } }, {
+      frame: frame => {
         if (selection !== this.store.selection()) return;
         try {
-          transcript.accept(value);
+          transcript.accept(frame);
           this.prompts.fold(transcript.promptsSince(this.prompts.through));
           this.reclaimHistory();
-          const frame = object(value);
-          if (frame.type === 'snapshot') this.runtime.telemetry.snapshot(sessionId, projectionSnapshot(frame.projections));
+          this.retireOutbox();
+          if (frame.kind === 'snapshot') this.runtime.telemetry.snapshot(sessionId, projectionSnapshot(frame.snapshot.projections));
           this.store.update({ status: this.stoppingSession === sessionId ? this.store.state.status : transcript.hasLiveContent ? 'Responding…' : 'Connected' });
-        } catch (error) { this.connection.fail(new Error(errorText(error))); }
+        // The frame kind is part of the diagnosis: "which envelope broke" is what makes a wire-shape
+        // regression actionable, and this path is where a host upgrade shows up first.
+        } catch (error) { this.connection.fail(new Error(`Session ${frame.kind} frame could not be applied: ${errorText(error)}`)); }
       },
+      // A frame this client cannot read restarts the generation, which reopens a fresh snapshot.
+      invalid: error => { if (selection === this.store.selection()) this.connection.fail(new Error(`Session frame could not be read: ${errorText(error)}`)); },
       end: error => {
         if (selection !== this.store.selection()) return;
         transcript.ready = false;
@@ -464,18 +503,13 @@ export class SessionController {
    * @param signal - Cancels the HTTP search.
    * @returns Session snippets and the global truncation flag, preserved after filtering.
    */
-  async searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: ObjectValue[]; hasMore: boolean }> {
+  async searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: SearchItem[]; hasMore: boolean }> {
     const workspace = this.store.state.workspaces.find(item => item.workspaceId === this.store.state.workspaceId);
     if (workspaceOnly && !workspace) throw new Error('Select a workspace first');
-    const result = object(await this.host.require().call('session/search', { request: { query } }, signal));
-    if (!Array.isArray(result.items) || typeof result.hasMore !== 'boolean') throw new Error('Invalid session search response');
-    const items = result.items.map(value => {
-      const item = object(value);
-      if (typeof item.sessionId !== 'string' || typeof item.snippet !== 'string') throw new Error('Invalid session search item');
-      return item;
-    });
-    const ids = new Set(array(workspace?.sessionIds ?? []));
-    return { items: workspaceOnly ? items.filter(item => ids.has(item.sessionId!)) : items, hasMore: result.hasMore };
+    const result = await searchSessions(this.host.require(), query, signal);
+    if (!workspaceOnly || workspace === undefined) return result;
+    const ids = new Set(workspace.sessionIds);
+    return { items: result.items.filter(item => ids.has(item.sessionId)), hasMore: result.hasMore };
   }
 
   /** Search paths on the host; does not read or upload file contents.
@@ -484,7 +518,7 @@ export class SessionController {
    * @returns Validated candidates in host order.
    */
   async references(query: string, signal: AbortSignal): Promise<FileReference[]> {
-    return fileReferences(await this.host.require().call('fileReferences/list', { agentId: this.sessionId, query }, signal));
+    return fileReferences(await listFileReferences(this.host.require(), this.sessionId, query, signal));
   }
 
   /** Execute a human command directly, outside the model prompt queue.
@@ -498,28 +532,23 @@ export class SessionController {
     // compaction can take minutes and must not hold every other write on this session.
     const execution = await this.mutations.admit(sessionId, 'normal', () => {
       if (!this.info.record.ready) throw new Error('Wait for the session snapshot before running commands');
-      return this.host.require().call('commands/execute', { agentId: sessionId, line, submittedAttachments: [] }, signal, null);
+      return executeCommand(this.host.require(), sessionId, line, [], signal);
     });
     if (execution === undefined) throw new Error(`This host does not provide ${line.split(/\s/, 1)[0]}`);
-    const result = object(object(execution).result);
-    if ((result.kind !== 'success' && result.kind !== 'error') || (result.text !== undefined && typeof result.text !== 'string')) {
-      throw new Error('Invalid command result from host');
-    }
-    if (result.kind === 'error') throw new Error(string(result.text));
+    if (execution.result.kind === 'error') throw new Error(execution.result.text ?? `${line.split(/\s/, 1)[0]} failed`);
     // Compaction rewrites the host log, so a cached prompt list for this session may describe
     // records that no longer exist. The live index keeps what the reader already sees; the cache is
     // dropped so the next open reads the rewritten history.
     if (line.trim().split(/\s/, 1)[0] === '/compact') this.promptCache.drop(this.sessionId);
-    return result.text === undefined ? 'Command completed.' : string(result.text);
+    return execution.result.text === undefined ? 'Command completed.' : execution.result.text;
   }
 
   /** Remove one host-owned pending input; an already claimed item reports a host error.
-   * @param itemId - Queue occurrence identity from session/control.
+   * @param itemId - Durable message identity from the host's `inbox` projection.
    */
   async removeQueued(itemId: string): Promise<void> {
     const sessionId = this.sessionId;
-    await this.mutations.admit(sessionId, 'normal', () => this.host.require().call('session/updateQueue', {
-      request: { sessionId, itemId, action: { kind: 'remove' } } }));
+    await this.mutations.admit(sessionId, 'normal', () => updateQueue(this.host.require(), sessionId, itemId, { kind: 'remove' }));
   }
 
   /** Export the selected host log to a new local ZIP file.
@@ -542,25 +571,42 @@ export class SessionController {
 
   /** Admit text once as steering while running, or a new turn while idle; a lost response can leave delivery uncertain.
    * @param text - Composed prompt text.
+   * @param track - Whether the composer should show it until the host records it.
    */
-  async prompt(text: string): Promise<void> {
+  async prompt(text: string, track = true): Promise<void> {
     const sessionId = this.sessionId;
-    // Deciding steer-versus-queue and issuing the request are one admitted step: the loop's own sends
-    // and everything the reader types go through this same point, so two of them cannot be decided
-    // against the same stale running state. The host's answer is awaited outside the gate.
-    const admission = await this.mutations.admit(sessionId, 'normal', () => {
-      if (this.store.state.pending.length) throw new Error('Answer the pending question or approval first');
-      this.stoppingSession = undefined;
-      if (!this.info.record.ready) throw new Error('Wait for the session snapshot before sending');
-      const issued = this.host.require().call('session/prompt', { request: {
-        sessionId, requestId: randomUUID(), mode: this.running ? 'steer' : 'queue',
-        content: [{ type: 'text', text }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      } });
-      this.admission = issued;
-      return issued;
-    });
-    try { await admission; } finally { if (this.admission === admission) this.admission = undefined; }
+    const requestId = randomUUID();
+    const entry = { sessionId, text, at: Date.now() };
+    // Recorded before the request so a host that echoes the message and answers in either order can
+    // never leave a row behind; a rejected send takes it back.
+    if (track) this.outbox.set(requestId, entry);
+    try {
+      // Deciding steer-versus-queue and issuing the request are one admitted step: the loop's own sends
+      // and everything the reader types go through this same point, so two of them cannot be decided
+      // against the same stale running state. The host's answer is awaited outside the gate.
+      const admission = await this.mutations.admit(sessionId, 'normal', () => {
+        if (this.store.state.pending.length) throw new Error('Answer the pending question or approval first');
+        this.stoppingSession = undefined;
+        if (!this.info.record.ready) throw new Error('Wait for the session snapshot before sending');
+        // The delivery mode reads the authoritative projection *and* the local shadow: a prompt this
+        // client just accepted has started (or continued) a turn the host has not reported yet, and the
+        // next line must steer that turn rather than queue behind it. Both facts are read and the
+        // request issued inside the gate, so two submissions cannot decide against the same staleness.
+        const running = this.running || this.admittedTurn.has(sessionId);
+        const issued = sendPrompt(this.host.require(), { sessionId, requestId,
+          delivery: running ? 'steer' : 'queue', text });
+        this.admittedTurn.add(sessionId);
+        this.admission = issued;
+        return issued;
+      });
+      try { await admission; } finally { if (this.admission === admission) this.admission = undefined; }
+    } catch (error) {
+      if (this.outbox.get(requestId) === entry) { this.outbox.delete(requestId); this.store.update({}); }
+      throw error;
+    }
     this.store.update({ status: 'Accepted · waiting for host' });
+    // The echo can arrive before the HTTP answer: retire here rather than waiting for the next frame.
+    this.retireOutbox();
   }
 
   /** Send one prompt the client assembled, keeping its durable echo out of composer recall.
@@ -572,7 +618,42 @@ export class SessionController {
    */
   async promptInternal(text: string): Promise<void> {
     this.prompts.suppress(text);
-    await this.prompt(text);
+    await this.prompt(text, false);
+  }
+
+  /** Prompts the operator sent that the host has not yet written into the selected session.
+   *
+   * The composer shows them above the input, so a steering line typed while the agent works is not
+   * invisible until the next step boundary. Nothing here is durable or host-owned.
+   * @returns One entry per submission still waiting for its durable echo, oldest first.
+   */
+  pendingPrompts(): readonly { requestId: string; text: string }[] {
+    const sessionId = this.store.state.sessionId;
+    if (sessionId === undefined) return [];
+    return [...this.outbox].filter(([, entry]) => entry.sessionId === sessionId)
+      .map(([requestId, entry]) => ({ requestId, text: entry.text }));
+  }
+
+  /** Retire every outbox entry the host has recorded, or reported as pending input, since it was sent.
+   *
+   * Called after each follow frame (the durable user message) and after each control frame (the `inbox`
+   * projection, or the retired queue section on an older host), so the local row leaves in the same
+   * render as the material that replaces it — no duplicate and no gap.
+   */
+  private retireOutbox(): void {
+    if (this.outbox.size === 0) return;
+    const sessionId = this.store.state.sessionId;
+    if (sessionId === undefined) { this.outbox.clear(); return; }
+    const transcript = this.info.record;
+    const reported = this.runtime.telemetry.pending(sessionId);
+    let retired = false;
+    for (const [requestId, entry] of this.outbox) {
+      if (entry.sessionId !== sessionId) continue;
+      if (transcript.hasPromptRpc(requestId) || reported.some(item => item.rpcId === requestId)) {
+        this.outbox.delete(requestId); retired = true;
+      }
+    }
+    if (retired) this.store.update({});
   }
 
   /** Answer the oldest selected-session interaction, after explicit user action.

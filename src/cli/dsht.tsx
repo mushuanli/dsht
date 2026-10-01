@@ -125,12 +125,13 @@ async function main(): Promise<void> {
     try {
       await login(client, token, store);
       if (positionals[1] === 'workspaces' || values.workspace) await client.connect();
-      const items = positionals[1] === 'workspaces' ? await client.listWorkspaces() : await client.listSessions(values.workspace);
+      const workspaces = positionals[1] === 'workspaces';
+      const items = workspaces ? await client.listWorkspaces() : await client.listSessions(values.workspace);
       if (values.json) process.stdout.write(`${JSON.stringify({ items }, null, 2)}\n`);
       else {
-        const lines = items.map(item => positionals[1] === 'workspaces'
-          ? `${string(item.workspaceId)}\t${string(item.title)}\t${string(item.path)}`
-          : `${string(item.sessionId)}\t${sessionLabel(item)}\t${item.running ? 'running' : 'idle'}`);
+        const lines = workspaces
+          ? (items as Awaited<ReturnType<typeof client.listWorkspaces>>).map(item => `${item.workspaceId}\t${item.title}\t${item.path}`)
+          : (items as Awaited<ReturnType<typeof client.listSessions>>).map(item => `${item.sessionId}\t${sessionLabel(item)}\t${item.running ? 'running' : 'idle'}`);
         process.stdout.write(`${safeText(lines.join('\n'))}${lines.length ? '\n' : ''}`);
       }
     } finally { await client.close(); }

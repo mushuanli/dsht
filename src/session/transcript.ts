@@ -2,6 +2,7 @@
 import sliceAnsi from 'slice-ansi';
 import type { HistoryLimits } from './memory.ts';
 import { array, object, string, type Json, type ObjectValue } from '../transport/wire.ts';
+import { surfaceAppends, type FollowFrame, type FollowSnapshot, type PageResult } from '../transport/dsh.ts';
 import { safeText, toolLine } from '../text.ts';
 
 /** A durable user prompt projected from the transcript, before recall retention. */
@@ -57,6 +58,9 @@ export function contentText(content: Json | undefined, tools?: ReadonlyMap<strin
 /** Event types that contribute a displayed message; other retained events only affect live state. */
 const DISPLAY_EVENTS = new Set(['user/message', 'assistant/message', 'tool/result']);
 
+/** How many recent prompt-RPC identities one transcript remembers; only the newest can still be pending. */
+const MAX_PROMPT_RPCS = 64;
+
 /** One durable `user/message` event as a recallable prompt.
  *
  * Injected context and every other record type return undefined. This is the single place the rule
@@ -67,8 +71,9 @@ const DISPLAY_EVENTS = new Set(['user/message', 'assistant/message', 'tool/resul
  * @returns The prompt text, or undefined when the record is not a user prompt.
  */
 export function eventPrompt(seq: number, event: ObjectValue | undefined): PromptRecord | undefined {
-  if (!event || event.type !== 'user/message' || event.surfaceOp !== 'append') return undefined;
-  const data = object(event.data);
+  if (!event || event.type !== 'user/message' || !surfaceAppends(event.surfaceOp)) return undefined;
+  const data = retainedData(event);
+  if (data === undefined) return undefined;
   if (data.source && object(data.source).kind !== 'user') return undefined;
   return { seq, text: contentText(data.content) };
 }
@@ -130,6 +135,13 @@ export class Transcript {
   private throughSeq = -1;
   private promptBeforeWindow: { seq: number; text: string } | undefined;
   private disposed = false;
+  /** Prompt-RPC identities of retained user messages, so a local submission retires on its echo.
+   *
+   * The host writes a steering message into the session only at the next step boundary, so the
+   * client's own record of "sent but not yet recorded" needs exactly this identity to disappear at
+   * the same moment the durable row appears — never a duplicate, never a gap.
+   */
+  private readonly promptRpcIds = new Set<string>();
   /** Increments when cached bodies are evicted, so view state can drop obsolete references. */
   memoryRevision = 0;
   private transientSeqs = new Set<number>();
@@ -167,15 +179,52 @@ export class Transcript {
   hasMore = false;
   ready = false;
 
-  /** Apply one follow frame; reject stream gaps so callers can reopen a snapshot. */
-  accept(value: unknown): void {
+  /** Apply one decoded follow frame; reject stream gaps so callers can reopen a snapshot. */
+  accept(frame: FollowFrame): void {
     if (this.disposed) return;
     this.version++;
-    const frame = object(value);
-    switch (frame.type) {
-      case 'snapshot': {
+    switch (frame.kind) {
+      case 'snapshot': this.open(frame.snapshot); break;
+      case 'record': this.addRecords([frame.record]); break;
+      case 'assistant': {
+        const live = frame.frame;
+        if (live.revision !== this.revision + 1) throw new Error('Assistant stream revision gap');
+        this.revision = live.revision;
+        if (live.type === 'start') {
+          this.clearBlocks();
+          this.attempt = live.attemptId;
+          this.nextIndex = 0;
+        } else {
+          if (live.attemptId !== this.attempt || live.index !== this.nextIndex) {
+            throw new Error('Assistant stream chunk gap');
+          }
+          if (live.type === 'chunk') { this.chunk(object(live.chunk)); this.nextIndex++; }
+          else { this.attempt = undefined; this.clearBlocks(); this.settlePhase(); }
+        }
+        break;
+      }
+    }
+    if (this.pendingDirty) { this.pendingDirty = false; this.settlePhase(); }
+  }
+
+  /** Open this record from one history page without a follow stream.
+   *
+   * Search and a history jump read a page and need it folded as a record, not appended to a live one:
+   * the page becomes this transcript's opening snapshot, with the caller's cursor.
+   */
+  openPage(page: PageResult, cursor: number): void {
+    if (this.disposed) return;
+    this.version++;
+    this.open({ cursor, hasMore: page.hasMore, records: page.records, headerSeeded: false });
+    if (this.pendingDirty) { this.pendingDirty = false; this.settlePhase(); }
+  }
+
+  /** Reset this record to one opening snapshot. */
+  private open(snapshot: FollowSnapshot): void {
+    {
         this.ready = false;
         this.events.clear();
+        this.promptRpcIds.clear();
         this.sizes.clear(); this.storedBytes = 0; this.throughSeq = -1; this.promptBeforeWindow = undefined;
         this.dropProjections();
         this.transientSeqs.clear();
@@ -187,18 +236,17 @@ export class Transcript {
         this.keysDirty = true;
         this.projectionRevision++;
         this.legacyDirty = true;
-        this.legacyStream = frame.assistantStream === undefined;
-        this.cursor = number(frame.cursor);
-        this.hasMore = frame.hasMore === true;
-        this.addRecords(array(frame.records));
-        const baseline = object(frame.assistantStream ?? { revision: 0 });
-        this.revision = number(baseline.revision);
+        this.legacyStream = snapshot.assistantStream === undefined;
+        this.cursor = snapshot.cursor;
+        this.hasMore = snapshot.hasMore;
+        this.addRecords([...snapshot.records]);
+        this.revision = snapshot.assistantStream?.revision ?? 0;
         this.attempt = undefined;
-        if (baseline.activeAttempt) {
-          const attempt = object(baseline.activeAttempt);
-          this.attempt = string(attempt.attemptId);
-          this.nextIndex = number(attempt.nextIndex);
-          for (const value of array(attempt.stream)) {
+        const attempt = snapshot.assistantStream?.activeAttempt;
+        if (attempt !== undefined) {
+          this.attempt = attempt.attemptId;
+          this.nextIndex = attempt.nextIndex;
+          for (const value of attempt.stream) {
             const record = object(value);
             if (record.type === 'chunk') this.chunk(object(record.chunk));
             else if (record.type === 'text-chunks' || record.type === 'reasoning-chunks') {
@@ -212,40 +260,15 @@ export class Transcript {
           }
         }
         this.ready = true;
-        break;
-      }
-      case 'event':
-      case 'chunks': this.addRecords([frame]); break;
-      case 'assistant-stream': {
-        const live = object(frame.frame);
-        if (number(live.revision) !== this.revision + 1) throw new Error('Assistant stream revision gap');
-        this.revision = number(live.revision);
-        if (live.type === 'start') {
-          this.clearBlocks();
-          this.attempt = string(live.attemptId);
-          this.nextIndex = 0;
-        } else {
-          if (live.attemptId !== this.attempt || number(live.index) !== this.nextIndex) {
-            throw new Error('Assistant stream chunk gap');
-          }
-          if (live.type === 'chunk') { this.chunk(object(live.chunk)); this.nextIndex++; }
-          else if (live.type === 'end') { this.attempt = undefined; this.clearBlocks(); this.settlePhase(); }
-          else throw new Error('Unknown assistant stream frame');
-        }
-        break;
-      }
-      default: throw new Error('Unknown session follow frame');
     }
-    if (this.pendingDirty) { this.pendingDirty = false; this.settlePhase(); }
   }
 
   /** Add an older page without replacing the live tail. */
-  addPage(value: unknown): void {
+  addPage(page: PageResult): void {
     if (this.disposed) return;
     this.version++;
-    const page = object(value);
-    this.addRecords(array(page.records));
-    this.hasMore = page.hasMore === true;
+    this.addRecords([...page.records]);
+    this.hasMore = page.hasMore;
     if (this.pendingDirty) { this.pendingDirty = false; this.settlePhase(); }
   }
 
@@ -277,8 +300,9 @@ export class Transcript {
     const tools = new Map<string, ToolSummary>();
     for (const seq of keys) {
       const event = this.events.get(seq)!;
-      if (!DISPLAY_EVENTS.has(string(event.type)) || event.surfaceOp !== 'append') continue;
-      const data = object(event.data);
+      if (!DISPLAY_EVENTS.has(string(event.type)) || !surfaceAppends(event.surfaceOp)) continue;
+      const data = retainedData(event);
+      if (data === undefined) continue;
       if (event.type === 'user/message') {
         if (seq < cutoff && (!data.source || object(data.source).kind === 'user')) this.promptBeforeWindow = { seq, text: toolLine(contentText(data.content), 120) };
         continue;
@@ -305,6 +329,7 @@ export class Transcript {
   dispose(): void {
     this.disposed = true;
     this.events.clear(); this.sizes.clear(); this.storedBytes = 0;
+    this.promptRpcIds.clear();
     this.clearBlocks(); this.clearPhase(); this.transientSeqs.clear();
     this.sortedSeqs = []; this.displayed = []; this.promptBeforeWindow = undefined;
     this.oldestSeq = undefined; this.turnMarker = undefined; this.attempt = undefined; this.legacyPosition = '';
@@ -323,6 +348,34 @@ export class Transcript {
     this.storedBytes += bytes - (this.sizes.get(seq) ?? 0);
     this.sizes.set(seq, bytes); this.events.set(seq, event);
   }
+
+  /** Remember the prompt-RPC identity one durable user message echoes.
+   *
+   * Read from the raw record, before any projection drops the source, and bounded because only the
+   * newest submissions can still be waiting for their echo.
+   * @param event - One decoded session event.
+   */
+  private rememberPromptRpc(event: ObjectValue): void {
+    if (!surfaceAppends(event.surfaceOp)) return;
+    const data = retainedData(event);
+    if (data === undefined) return;
+    const source = data.source;
+    if (source === null || typeof source !== 'object' || Array.isArray(source)) return;
+    const identity = source as ObjectValue;
+    if (identity.kind !== 'user' || typeof identity.rpcId !== 'string' || identity.rpcId === '') return;
+    this.promptRpcIds.delete(identity.rpcId); this.promptRpcIds.add(identity.rpcId);
+    while (this.promptRpcIds.size > MAX_PROMPT_RPCS) {
+      const oldest = this.promptRpcIds.values().next().value;
+      if (oldest === undefined) break;
+      this.promptRpcIds.delete(oldest);
+    }
+  }
+
+  /** Whether a durable user message echoing this prompt-RPC identity is retained.
+   * @param rpcId - Identity the client sent with its own submission.
+   * @returns True once the host has written that submission into the session.
+   */
+  hasPromptRpc(rpcId: string): boolean { return this.promptRpcIds.has(rpcId); }
 
   private deleteEvent(seq: number): void {
     this.storedBytes -= this.sizes.get(seq) ?? 0;
@@ -368,8 +421,13 @@ export class Transcript {
       if (seq <= marker.seq) continue;
       const event = this.events.get(seq)!;
       if (event.type !== 'assistant/message' && event.type !== 'tool/result') continue;
+      // A retained event may carry no data (see `retainedData`); such a record says nothing about the
+      // calls it belongs to, so it is skipped rather than treated as a protocol error. This is the
+      // reader that a 0.2 surface rewrite used to break the whole session on.
+      const data = retainedData(event);
+      if (data === undefined) continue;
       const startedAt = typeof event.time === 'number' ? event.time : marker.start;
-      for (const block of array(object(object(event.data).message).content).map(object)) {
+      for (const block of array(object(data.message).content).map(object)) {
         if (block.type === 'tool-call') calls.push({ id: string(block.id), name: string(block.name ?? 'tool'), startedAt });
         else if (block.type === 'tool-result') answered.add(string(block.toolCallId));
       }
@@ -391,8 +449,9 @@ export class Transcript {
     let promptSeq = this.promptBeforeWindow?.seq;
     for (const seq of this.displaySeqs()) {
       const event = this.events.get(seq)!;
-      if (event.surfaceOp !== 'append') continue;
-      const data = object(event.data);
+      if (!surfaceAppends(event.surfaceOp)) continue;
+      const data = retainedData(event);
+      if (data === undefined) continue;
       if (event.type === 'user/message') {
         if (!data.source || object(data.source).kind === 'user') { prompt = toolLine(contentText(data.content), 120); promptSeq = seq; }
       } else if (event.type === 'assistant/message') {
@@ -491,16 +550,19 @@ export class Transcript {
     const calls = new Set<string>();
     for (const seq of this.displaySeqs()) {
       const event = this.events.get(seq)!;
-      if (event.surfaceOp !== 'append' || event.type === 'user/message') continue;
-      for (const block of array(object(object(event.data).message).content).map(object)) {
+      if (!surfaceAppends(event.surfaceOp) || event.type === 'user/message') continue;
+      const eventData = retainedData(event);
+      if (eventData === undefined) continue;
+      for (const block of array(object(eventData.message).content).map(object)) {
         if (block.type === 'tool-call') calls.add(string(block.id));
         if (block.type === 'tool-result') outcomes.set(string(block.toolCallId), block.isError === true);
       }
     }
     for (const seq of this.displaySeqs()) {
       const event = this.events.get(seq)!;
-      if (event.surfaceOp !== 'append') continue;
-      const data = object(event.data);
+      if (!surfaceAppends(event.surfaceOp)) continue;
+      const data = retainedData(event);
+      if (data === undefined) continue;
       const isUser = event.type === 'user/message';
       const blocks = isUser ? [] : array(object(data.message).content).map(object);
       for (const block of blocks) {
@@ -586,6 +648,7 @@ export class Transcript {
         throw new Error(`Unsupported history record type: ${typeof entry.type === 'string' ? entry.type.slice(0, 100) : typeof entry.type}`);
       }
       const event = object(entry.event);
+      if (event.type === 'user/message') this.rememberPromptRpc(event);
       if (entry.type === 'chunks' && !['chunkrow/text-chunks', 'chunkrow/reasoning-chunks', 'chunkrow/tool-call-chunks'].includes(string(event.type))) {
         throw new Error(`Unsupported packed history event: ${string(event.type).slice(0, 100)}`);
       }
@@ -644,7 +707,8 @@ export class Transcript {
         this.clearBlocks();
         this.legacyPosition = '';
       } else if (event.type === 'assistant/chunk' || string(event.type).startsWith('chunkrow/')) {
-        const data = object(event.data);
+        const data = retainedData(event);
+        if (data === undefined) continue;
         const nextPosition = `${number(data.turn)}:${number(data.step)}`;
         if (this.legacyPosition !== nextPosition) this.clearBlocks();
         this.legacyPosition = nextPosition;
@@ -750,17 +814,40 @@ function toolPhaseKey(id: string, name: string | undefined): string {
 }
 
 /** Keep only user-visible content in durable client memory; the host owns raw tool results. */
+/** The data one retained event carries, when it carries any.
+ *
+ * A retained event is a *reduced* record: it may have no `data` at all (a surface rewrite that carries
+ * nothing this client displays, or an unrecognized op). Readers must use this rather than `object()`,
+ * because "the host sent nothing" and "the host sent the wrong shape" are different failures and only
+ * one of them is a protocol error. Every reader of a retained event goes through here.
+ * @param event - One event out of `this.events`.
+ * @returns The data object, or undefined when this event retained none.
+ */
+function retainedData(event: ObjectValue): ObjectValue | undefined {
+  const data = event.data;
+  return data !== null && typeof data === 'object' && !Array.isArray(data) ? data as ObjectValue : undefined;
+}
+
 function retainedEvent(event: ObjectValue): ObjectValue {
   if (!DISPLAY_EVENTS.has(string(event.type))) return event;
-  if (event.surfaceOp !== 'append') return { seq: event.seq!, type: event.type!, ...(typeof event.time === 'number' ? { time: event.time } : {}) };
-  const data = object(event.data);
+  const op = event.surfaceOp;
+  const data = retainedData(event);
+  // Identity is always kept, and the op with it: whether a record appends or rewrites decides only
+  // whether the *display* projection shows it, never whether its content survives. That separation is
+  // what a 0.2 `{op:'replace'}` record needs — and it is the reason no branch here may drop `data` by
+  // op, because a reader that loses a tool result shows a finished tool as still running.
+  const identity = { seq: event.seq!, type: event.type!,
+    ...(typeof event.time === 'number' ? { time: event.time } : {}), ...(op === undefined ? {} : { surfaceOp: op }) };
+  // A record with no readable data keeps its identity alone; readers treat that as "no information"
+  // rather than as a protocol error (see `retainedData`).
+  if (data === undefined) return identity;
   const clean = (value: Json): Json => {
     const block = object(value);
     if (block.type === 'tool-call') return { type: 'tool-call', id: block.id!, ...toolSummary(block) } as ObjectValue;
     if (block.type === 'tool-result') return { type: 'tool-result', toolCallId: block.toolCallId!, isError: block.isError === true };
     return block;
   };
-  return { seq: event.seq!, type: event.type!, ...(typeof event.time === 'number' ? { time: event.time } : {}), surfaceOp: 'append', data: event.type === 'user/message'
+  return { ...identity, surfaceOp: op ?? 'append', data: event.type === 'user/message'
     ? { content: data.content!, ...(data.source ? { source: data.source } : {}) }
     : { message: { content: array(object(data.message).content).filter(block => event.type !== 'tool/result' || object(block).type === 'tool-result').map(clean) } } };
 }

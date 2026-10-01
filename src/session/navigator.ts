@@ -1,14 +1,14 @@
 /** Workspace/session navigation owns view intent independently of background list refreshes. */
-import { array, object, string, type ObjectValue } from '../json.ts';
 import type { Client } from '../transport/client.ts';
 import type { HostAccess } from '../transport/host.ts';
+import { createSession as createHostSession, createWorkspace as createHostWorkspace, type SessionRow, type WorkspaceRow } from '../transport/dsh.ts';
 import { sessionLabel } from '../session-title.ts';
 import { resolveTarget } from './navigation.ts';
 
 export interface NavigationState {
   screen: 'workspaces' | 'sessions' | 'chat' | 'path';
-  workspaces: ObjectValue[];
-  sessions: ObjectValue[];
+  workspaces: WorkspaceRow[];
+  sessions: SessionRow[];
   showAllSessions: boolean;
   workspaceId?: string;
   sessionId?: string;
@@ -23,7 +23,7 @@ export interface NavigationHost extends HostAccess {
 }
 
 interface Context { client: Client; signal: AbortSignal; check(): void }
-interface Lists { workspaces: ObjectValue[]; sessions: ObjectValue[]; version: number }
+interface Lists { workspaces: WorkspaceRow[]; sessions: SessionRow[]; version: number }
 
 export class SessionNavigator {
   private active?: AbortController;
@@ -107,9 +107,9 @@ export class SessionNavigator {
     if (!query) return this.showPicker('workspaces', signal);
     return this.run(signal, true, async context => {
       const lists = await this.load(context);
-      const workspace = resolveTarget(lists.workspaces, query, 'workspaceId', row => [string(row.title), string(row.path)]);
+      const workspace = resolveTarget(lists.workspaces, query, row => row.workspaceId, row => [row.title, row.path]);
       this.publishLists(lists); context.check();
-      this.commitWorkspace(string(workspace.workspaceId));
+      this.commitWorkspace(workspace.workspaceId);
     });
   }
 
@@ -120,20 +120,20 @@ export class SessionNavigator {
         this.publishLists(lists); context.check();
         this.host.publish({ screen: query === 'all' || this.host.read().workspaceId ? 'sessions' : 'workspaces', showAllSessions: query === 'all' });
       } else {
-        const session = resolveTarget(lists.sessions, query, 'sessionId', row => [sessionLabel(row)]);
+        const session = resolveTarget(lists.sessions, query, row => row.sessionId, row => [sessionLabel(row)]);
         this.publishLists(lists); context.check();
-        this.host.follow(string(session.sessionId));
+        this.host.follow(session.sessionId);
       }
     });
   }
 
   createWorkspace(path: string, signal?: AbortSignal): Promise<void> {
     return this.run(signal, true, async context => {
-      const result = object(await context.client.call('workspace/create', { request: { path } }, context.signal));
+      const workspace = await createHostWorkspace(context.client, path, context.signal);
       context.check();
       const lists = await this.load(context);
       this.publishLists(lists); context.check();
-      this.commitWorkspace(string(object(result.workspace).workspaceId));
+      this.commitWorkspace(workspace.workspaceId);
     });
   }
 
@@ -141,21 +141,20 @@ export class SessionNavigator {
     return this.run(signal, true, async context => {
       const workspaceId = this.host.read().workspaceId;
       if (!workspaceId) throw new Error('Select a workspace before creating a session');
-      const result = object(await context.client.call('session/create', { request: { workspaceId } }, context.signal));
+      const sessionId = await createHostSession(context.client, workspaceId, context.signal);
       context.check();
-      const sessionId = string(result.sessionId);
       this.host.follow(sessionId);
       return sessionId;
     });
   }
 
-  get visibleSessions(): ObjectValue[] {
+  get visibleSessions(): SessionRow[] {
     const state = this.host.read();
-    const sessions = state.sessions.filter(item => !this.host.client()?.archivedSessionIds.has(string(item.sessionId)));
+    const sessions = state.sessions.filter(item => !this.host.client()?.archivedSessionIds.has(item.sessionId));
     if (state.showAllSessions || !state.workspaceId) return sessions;
     const workspace = state.workspaces.find(item => item.workspaceId === state.workspaceId);
-    const ids = new Set(array(workspace?.sessionIds ?? []).map(string));
-    return sessions.filter(item => ids.has(string(item.sessionId)));
+    const ids = new Set(workspace?.sessionIds ?? []);
+    return sessions.filter(item => ids.has(item.sessionId));
   }
 
   /** Longest registered path wins, with whole-segment matching for nested workspaces. */
@@ -165,9 +164,9 @@ export class SessionNavigator {
     if (!target) return undefined;
     let best: { id: string; length: number } | undefined;
     for (const workspace of this.host.read().workspaces) {
-      const path = slashed(string(workspace.path));
+      const path = slashed(workspace.path);
       if (!path || target !== path && !target.startsWith(`${path}/`)) continue;
-      if (!best || path.length > best.length) best = { id: string(workspace.workspaceId), length: path.length };
+      if (!best || path.length > best.length) best = { id: workspace.workspaceId, length: path.length };
     }
     if (best) this.pickWorkspace(best.id);
     return best?.id;

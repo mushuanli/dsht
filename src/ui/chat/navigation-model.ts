@@ -3,8 +3,19 @@
  * Marker, label and rollup text are the list screens' vocabulary, so they live next to the screens
  * that render them. `session/navigation.ts` keeps only target resolution, which the domain needs.
  */
-import { string, type ObjectValue } from '../../json.ts';
-import { safeText } from '../../text.ts';
+import type { SessionRow } from '../../contracts.ts';
+
+/** The row fields the list screens read.
+ *
+ * Structural rather than the transport row itself: a marker, a label and a rollup only need these
+ * four facts, so a test (or a future host row) can supply exactly them without fabricating the rest.
+ */
+export interface ListSession {
+  readonly sessionId?: string;
+  readonly running?: boolean;
+  readonly blank?: boolean;
+  readonly updatedAt?: number;
+}
 
 /** User-visible activity of one session, most actionable first.
  *
@@ -19,10 +30,10 @@ export type SessionState = 'needs' | 'running' | 'idle' | 'blank';
  * @param pending - Whether this client holds an unanswered interaction for that session.
  * @returns Needs-you while an answer is owed, running while its agent works, otherwise idle or blank.
  */
-export function sessionState(session: ObjectValue, pending = false): SessionState {
+export function sessionState(session: ListSession, pending = false): SessionState {
   if (pending) return 'needs';
-  if (session.running === true) return 'running';
-  return session.blank === true ? 'blank' : 'idle';
+  if (session.running) return 'running';
+  return session.blank ? 'blank' : 'idle';
 }
 
 /** Leading marker per state: a question mark, a working clock, a filled dot, and an unused circle. */
@@ -52,8 +63,8 @@ export function activityAge(time: number | undefined, now: number): string {
  * @param pending - Whether this client holds an unanswered interaction for that session.
  * @returns Marker with an optional age, without a trailing space when unknown.
  */
-export function sessionStatus(session: ObjectValue, now: number, pending = false): string {
-  const age = activityAge(typeof session.updatedAt === 'number' ? session.updatedAt : undefined, now);
+export function sessionStatus(session: ListSession, now: number, pending = false): string {
+  const age = activityAge(session.updatedAt, now);
   return `${SESSION_MARKERS[sessionState(session, pending)]}${age === '' ? '' : ` ${age}`}`;
 }
 
@@ -77,11 +88,10 @@ export type RollupStyle = 'words' | 'badges';
  * @param pending - Session IDs this client holds an unanswered interaction for.
  * @returns One count per state that occurs, most actionable first, or an empty list.
  */
-export function workspaceCounts(sessions: readonly ObjectValue[], pending: ReadonlySet<string> = new Set()): RollupCount[] {
+export function workspaceCounts(sessions: readonly ListSession[], pending: ReadonlySet<string> = new Set()): RollupCount[] {
   const counts: Record<RollupState, number> = { needs: 0, running: 0, idle: 0 };
   for (const session of sessions) {
-    const id = session.sessionId;
-    const state = sessionState(session, typeof id === 'string' && pending.has(id));
+    const state = sessionState(session, session.sessionId !== undefined && pending.has(session.sessionId));
     if (state !== 'blank') counts[state] += 1;
   }
   return ROLLUP_STATES.filter(state => counts[state] > 0).map(state => ({ state, count: counts[state] }));

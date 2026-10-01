@@ -23,10 +23,10 @@ export async function host() {
   const failFollow = new Set<string>();
   let subagent: ObjectValue | undefined;
   let subagentMode: 'one-shot' | 'continuable' = 'continuable';
-  let presets: ObjectValue[] = ['standard', 'ptc', 'minimal', 'cordis'].map(id => ({ id, trust: 'system' }));
+  let presets: ObjectValue[] = ['standard', 'ptc', 'minimal', 'cordis'].map((id, index) => ({ id, isDefault: index === 0 }));
   let modelCatalog: ObjectValue = { groups: [], failures: [], routableProviders: ['fixture'] };
   let defaultModel: ObjectValue = { provider: 'fixture', model: 'chat' };
-  let controlBaseline: ObjectValue = { queues: { s1: [] }, jobs: { s1: [] }, projections: {} };
+  let controlBaseline: ObjectValue = { projections: {} };
   const follows = new Map<WebSocket, string>();
   let baseline = [workspace];
   let archivedSessionIds: string[] = [];
@@ -38,7 +38,27 @@ export async function host() {
   let followSnapshot: ObjectValue = snapshot;
   let onCommand: ((line: string) => Promise<ObjectValue | undefined>) | undefined;
   let queuePrompts = false;
-  let queue: ObjectValue[] = [];
+  // The durable pending-input state a 0.2 host publishes as the `inbox` session projection: input the
+  // next step will claim (`next-step`) and input that wakes a new turn (`next-turn`).
+  let inbox: { 'next-step': ObjectValue[]; 'next-turn': ObjectValue[] } = { 'next-step': [], 'next-turn': [] };
+  let inboxSeq = 0;
+  /** Publish the whole inbox, as a host does after every splice that changes it. */
+  const publishInbox = () => {
+    inboxSeq++;
+    for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId,
+      value: { type: 'projection', sessionId: 's1', key: 'inbox', seq: inboxSeq, value: { ...inbox } } }));
+  };
+  /** One control baseline: the configured projections plus the durable inbox this host now holds. */
+  const controlSnapshot = (): ObjectValue => {
+    const baseline = object(controlBaseline);
+    const projections = { ...object(baseline.projections ?? {}) };
+    const current = object(projections.s1 ?? {});
+    const declared = typeof current.asOfSeq === 'number' ? current.asOfSeq : -1;
+    // Keep the injection newer than anything the test declared, so a following splice frame is accepted.
+    if (declared > inboxSeq) inboxSeq = declared;
+    return { ...baseline, projections: { ...projections,
+      s1: { asOfSeq: inboxSeq, values: { ...object(current.values ?? {}), inbox: { ...inbox } } } } };
+  };
   let exportDelayMs = 0;
   let exportRequests = 0;
   let exportBody: Buffer = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]);
@@ -82,7 +102,7 @@ export async function host() {
       calls.push(body);
       let value: unknown;
       switch (body.method) {
-        case 'agentPresets/list': assert.deepEqual(args, {}); value = { presets, authorable: false }; break;
+        case 'agentPresets/list': assert.deepEqual(args, {}); value = { presets }; break;
         case 'session/modelCatalog': assert.deepEqual(args, {}); value = { ...modelCatalog, default: defaultModel }; break;
         case 'session/selectModel': {
           const selection = object(args.request);
@@ -125,9 +145,10 @@ export async function host() {
           assert.equal(typeof prompt.sessionId, 'string');
           assert.equal(array(prompt.content).length, 1);
           if (queuePrompts) {
-            queue.push({ id: `m-${prompt.requestId}`, rpcId: String(prompt.requestId), placement: prompt.mode === 'steer' ? 'steering' : 'queued',
-              message: { id: `m-${prompt.requestId}`, content: array(prompt.content) } });
-            for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId, value: { type: 'queue', sessionId: 's1', items: queue } }));
+            const id = `m-${prompt.requestId}`;
+            const target = prompt.mode === 'steer' ? 'next-step' : 'next-turn';
+            inbox[target] = [...inbox[target], { id, content: array(prompt.content), source: { kind: 'user', rpcId: String(prompt.requestId) } }];
+            publishInbox();
           }
           value = { accepted: true }; break;
         }
@@ -135,13 +156,15 @@ export async function host() {
           const change = object(args.request);
           assert.equal(change.sessionId, 's1');
           assert.deepEqual(change.action, { kind: 'remove' });
-          if (!queue.some(item => item.id === change.itemId)) {
+          const held = [...inbox['next-step'], ...inbox['next-turn']].some(item => item.id === change.itemId);
+          if (!held) {
             value = undefined;
             response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId,
               result: { ok: false, error: { code: 'session/queue-item-not-found', message: 'queued item is no longer pending' } } })); return;
           }
-          queue = queue.filter(item => item.id !== change.itemId);
-          for (const [ws, streamId] of controls) ws.send(JSON.stringify({ type: 'item', streamId, value: { type: 'queue', sessionId: 's1', items: queue } }));
+          inbox = { 'next-step': inbox['next-step'].filter(item => item.id !== change.itemId),
+            'next-turn': inbox['next-turn'].filter(item => item.id !== change.itemId) };
+          publishInbox();
           value = { accepted: true }; break;
         }
         case 'session/cancel': assert.equal(typeof object(args.request).sessionId, 'string'); await onCancel?.(); value = { accepted: true }; break;
@@ -176,7 +199,7 @@ export async function host() {
       else if (frame.endpoint === 'workspace/follow') { assert.deepEqual(object(frame.payload).args, {}); item({ type: 'baseline', value: { items: baseline, archivedSessionIds } }); }
       else if (frame.endpoint === 'session/control') {
         if (!controlAvailable) { ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error: { code: 'gateway/method-unavailable', message: 'not installed' } })); return; }
-        assert.deepEqual(object(frame.payload).args, {}); controls.set(ws, String(frame.streamId)); item({ type: 'baseline', value: controlBaseline }); }
+        assert.deepEqual(object(frame.payload).args, {}); controls.set(ws, String(frame.streamId)); item({ type: 'baseline', value: controlSnapshot() }); }
       else if (frame.endpoint === 'session/follow') {
         const request = object(object(object(frame.payload).args).request);
         assert.equal(request.assistantStream, true);
@@ -205,6 +228,9 @@ export async function host() {
     set searchResult(value: ObjectValue) { searchResult = value; },
     set followSnapshot(value: ObjectValue) { followSnapshot = value; },
     set queuePrompts(value: boolean) { queuePrompts = value; },
+    /** Replace the durable pending input and publish it, as one host splice does. */
+    set inbox(value: { 'next-step': ObjectValue[]; 'next-turn': ObjectValue[] }) { inbox = value; publishInbox(); },
+    get inbox() { return inbox; },
     get exportRequests() { return exportRequests; },
     set exportDelayMs(value: number) { exportDelayMs = value; },
     set exportBody(value: Buffer) { exportBody = value; },

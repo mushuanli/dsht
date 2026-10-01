@@ -7,7 +7,7 @@
  */
 import type { Subscription } from '../transport/client.ts';
 import type { HostAccess } from '../transport/host.ts';
-import type { ObjectValue } from '../transport/wire.ts';
+import { follow, type SessionAddress } from '../transport/dsh.ts';
 import { releaseHistoryLayout } from './history.ts';
 import { Transcript } from './transcript.ts';
 
@@ -29,7 +29,7 @@ export class SessionPeek {
   private subscription: Subscription | undefined;
   private state: PeekState | undefined;
   /** Address forms left to try, in order; a host may refuse the child form for one delivery mode. */
-  private pending: ObjectValue[] = [];
+  private pending: SessionAddress[] = [];
   /** Bumped on every open and close, so a cancelled stream's late frame cannot revive the state. */
   private generation = 0;
 
@@ -40,7 +40,7 @@ export class SessionPeek {
    * @param addresses - Address forms to try in order.
    * @param onChange - Called when the transcript or the state moves.
    */
-  open(addresses: readonly ObjectValue[], onChange: () => void): void {
+  open(addresses: readonly SessionAddress[], onChange: () => void): void {
     this.close();
     // `close` bumped the generation; this open owns the next one and every callback checks it.
     const generation = ++this.generation;
@@ -80,14 +80,17 @@ export class SessionPeek {
     let attempted = false;
     let subscription: Subscription;
     try {
-      subscription = this.host.require().subscribe('session/follow', {
-        request: { address, maxMessages: PEEK_MESSAGES, assistantStream: true },
-      }, {
-        item: value => {
+      subscription = follow(this.host.require(), { address, maxMessages: PEEK_MESSAGES }, {
+        frame: frame => {
           if (generation !== this.generation) return;
           // A peek is a diagnostic surface: a malformed frame ends it with a reason rather than taking
           // the whole client down the way a selected session's stream would.
-          try { transcript.accept(value); } catch { this.state = { transcript, ended: true, error: 'the session stream sent a frame this client cannot read' }; }
+          try { transcript.accept(frame); } catch { this.state = { transcript, ended: true, error: 'the session stream sent a frame this client cannot read' }; }
+          onChange();
+        },
+        invalid: error => {
+          if (generation !== this.generation) return;
+          this.state = { transcript, ended: true, error: errorTextOf(error) };
           onChange();
         },
         end: error => {

@@ -1,6 +1,6 @@
 {
   "name": "@itookit/dsht",
-  "version": "0.6.10",
+  "version": "0.6.15",
   "type": "module",
   "description": "Remote-first TUI for DeepSeek Harness with SSH-friendly mobile access and request-level cost tracking",
   "engines": {
@@ -37,7 +37,8 @@
     "prepublishOnly": "npm run typecheck && npm run test:terminal",
     "bench:input": "tsx scripts/benchmarks/input.tsx",
     "bench:history": "node --import tsx scripts/benchmarks/history.tsx",
-    "build:prompts": "tsx scripts/build/loop-prompts.mts"
+    "build:prompts": "tsx scripts/build/loop-prompts.mts",
+    "diagnose:host": "tsx scripts/diagnose-host.mts"
   },
   "keywords": [
     "deepseek",

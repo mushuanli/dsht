@@ -1,4 +1,5 @@
 /** History budgets preserve reloadability, live state, and explicit ownership of read-only windows. */
+import { followFrame } from '../../src/transport/dsh-contract.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Transcript, contentText } from '../../src/session/transcript.ts';
@@ -15,13 +16,13 @@ const message = (seq: number, text = `Message ${seq}`): ObjectValue => ({ type: 
 
 function filled(count: number, text?: string) {
   const transcript = new Transcript();
-  transcript.accept({ ...snapshot, cursor: count - 1, records: Array.from({ length: count }, (_, seq) => message(seq, text)) });
+  transcript.accept(followFrame({ ...snapshot, cursor: count - 1, records: Array.from({ length: count }, (_, seq) => message(seq, text)) }));
   return transcript;
 }
 
 test('record and payload budgets reclaim a prefix with hysteresis and advance its reload cutoff', () => {
   const transcript = filled(10);
-  transcript.accept(message(10));
+  transcript.accept(followFrame(message(10)));
   const bytes = transcript.retainedBytes;
   assert.equal(transcript.trimHistory({ maxRecords: 8, maxBytes: 100_000 }), 5);
   assert.equal(transcript.retainedRecordCount, 6);
@@ -39,16 +40,16 @@ test('record and payload budgets reclaim a prefix with hysteresis and advance it
 
 test('trimming keeps a compact prompt and tool identity when their full messages are evicted', () => {
   const transcript = filled(1, 'Original prompt');
-  transcript.accept({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-call', id: 't', name: 'bash', arguments: '{"description":"Run tests","command":"npm test"}' }] } } } });
-  transcript.accept({ type: 'event', event: { seq: 2, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-result', toolCallId: 't', isError: false }] } } } });
-  transcript.accept({ type: 'event', event: { seq: 3, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'reasoning', text: 'Retained thought' }] } } } });
+  transcript.accept(followFrame({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-call', id: 't', name: 'bash', arguments: '{"description":"Run tests","command":"npm test"}' }] } } } }));
+  transcript.accept(followFrame({ type: 'event', event: { seq: 2, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-result', toolCallId: 't', isError: false }] } } } }));
+  transcript.accept(followFrame({ type: 'event', event: { seq: 3, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'reasoning', text: 'Retained thought' }] } } } }));
   transcript.trimHistory({ maxRecords: 2, maxBytes: 100_000 });
   assert.equal(transcript.thoughts[0]?.prompt, 'Original prompt');
   transcript.addPage({ records: [message(0, 'Original prompt')], hasMore: false });
   assert.equal(transcript.latestPrompt, 'Original prompt');
   const result = filled(1, 'Original prompt');
-  result.accept({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-call', id: 't', name: 'bash', arguments: '{"description":"Run tests"}' }] } } } });
-  result.accept({ type: 'event', event: { seq: 2, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-result', toolCallId: 't', isError: false }] } } } });
+  result.accept(followFrame({ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-call', id: 't', name: 'bash', arguments: '{"description":"Run tests"}' }] } } } }));
+  result.accept(followFrame({ type: 'event', event: { seq: 2, type: 'tool/result', surfaceOp: 'append', data: { message: { content: [{ type: 'tool-result', toolCallId: 't', isError: false }] } } } }));
   result.trimHistory({ maxRecords: 1, maxBytes: 100_000 });
   assert.equal(result.messages[0]?.text, '✓ bash · Run tests');
 });
@@ -62,16 +63,16 @@ test('dispose releases transcript and layout caches and refuses late content', (
   assert.equal(transcript.retainedRecordCount, 0);
   assert.equal(transcript.retainedBytes, 0);
   assert.equal(transcript.messages.length, 0);
-  transcript.accept(message(100));
+  transcript.accept(followFrame(message(100)));
   transcript.addPage({ records: [message(0)], hasMore: false });
   assert.equal(transcript.messages.length, 0);
 });
 
 test('command indentation survives truncation and the terminal row renderer', () => {
   const transcript = new Transcript();
-  transcript.accept({ ...snapshot, records: [{ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [
+  transcript.accept(followFrame({ ...snapshot, records: [{ type: 'event', event: { seq: 1, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [
     { type: 'tool-call', id: 't', name: 'bash', arguments: JSON.stringify({ description: 'Run tests', command: 'npm test ' + '中文'.repeat(20) }) },
-  ] } } } }] });
+  ] } } } }] }));
   const command = historyLayout(transcript, 24).lines[1]!;
   assert.ok(command.startsWith('  $ npm test '), command);
   assert.ok(command.endsWith('…'));

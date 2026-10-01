@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { Client } from '../transport/client.ts';
 import { removeFile, writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, string, type Json, type ObjectValue } from '../transport/wire.ts';
+import type { ModelCatalog, SearchItem, SessionRow } from '../transport/dsh.ts';
 import type { HostEvent } from '../transport/events.ts';
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from '../session/memory.ts';
 import { layoutStats, type SessionRender } from '../session/history.ts';
@@ -109,7 +110,7 @@ export interface Actions {
   removeTarget(target: RemovalTarget): Promise<boolean>;
   removalTarget(kind: 'workspace' | 'session', query: string): Promise<RemovalTarget | undefined>;
   waitForHistory(signal: AbortSignal): Promise<boolean>;
-  searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: ObjectValue[]; hasMore: boolean } | undefined>;
+  searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: SearchItem[]; hasMore: boolean } | undefined>;
   searchHistory(query: string, signal: AbortSignal): Promise<HistorySearch | undefined>;
   prompt(text: string): Promise<boolean>;
   /** Clear this client's HANDOFF.md, then ask the agent to write a fresh handoff there. */
@@ -142,7 +143,7 @@ export interface Actions {
   exportLog(path: string | undefined, signal: AbortSignal): Promise<string | undefined>;
   exportHtml(path: string | undefined, signal: AbortSignal): Promise<string | undefined>;
   selectModel(provider: string, model: string, reasoningEffort?: string): Promise<boolean>;
-  modelCatalog(): Promise<ObjectValue | undefined>;
+  modelCatalog(): Promise<ModelCatalog | undefined>;
   refreshCosts(signal?: AbortSignal): Promise<boolean>;
   /** Local, immediate setters: no request, so they keep the synchronous contract. */
   loadPresetNames(): void;
@@ -177,11 +178,13 @@ export interface Queries {
   readonly sessionName: string | undefined;
   readonly sessionMode: string | undefined;
   readonly workingSince: number | undefined;
-  readonly visibleSessions: ObjectValue[];
+  readonly visibleSessions: SessionRow[];
   readonly record: Transcript;
   readonly window: Transcript | undefined;
   readonly interaction: InteractionState;
   readonly telemetry: TelemetryReader;
+  /** Prompts sent to the selected session that the host has not written into it yet, oldest first. */
+  readonly pendingPrompts: readonly { requestId: string; text: string }[];
   readonly recallAtOldest: boolean;
   readonly recallLength: number;
   readonly recallHasOlder: boolean;
@@ -307,7 +310,15 @@ export class Controller implements ControllerStore, ConnectionListener {
   /** Scheduling and cancellation are owned independently of domain operations. */
   private readonly foregroundSlot = new ForegroundSlot({
     changed: started => this.update(started ? { lastFailure: '' } : {}),
-    trace: event => this.traceEvent('foreground', event),
+    trace: event => {
+      this.traceEvent('foreground', event);
+      // The slot is the only place that can decide this, so its event already names the owner: a
+      // refused claim is otherwise indistinguishable from a command that did nothing.
+      if (event.phase === 'refused') {
+        this.update({ lastFailure: event.owner === undefined ? 'Another operation is already running'
+          : `Another operation is running: ${event.owner.label}` });
+      }
+    },
   });
   /** Read-only follower for the full-screen view; it borrows the connection and never selects. */
   readonly peek: SessionPeek;
@@ -388,6 +399,9 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** Record of the selected session; the one strong owner lives in `State.session`. */
   private get record(): Transcript { return this.state.session.record; }
+
+  /** Prompts sent to the selected session and not yet written into it by the host. */
+  private get pendingPrompts(): readonly { requestId: string; text: string }[] { return this.session.pendingPrompts(); }
 
   /** @returns The current selector generation. */
   selection(): number { return this.selector; }
@@ -567,6 +581,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       get window() { return controller.window; },
       get interaction() { return controller.interaction; },
       get telemetry() { return controller.telemetry.reader; },
+      get pendingPrompts() { return controller.pendingPrompts; },
       get recallAtOldest() { return controller.recallAtOldest; },
       get recallLength() { return controller.recallLength; },
       get recallHasOlder() { return controller.recallHasOlder; },
@@ -829,7 +844,7 @@ export class Controller implements ControllerStore, ConnectionListener {
   }
 
   /** @returns Sessions accounted to the selected workspace, minus archived identities. */
-  private get visibleSessions(): ObjectValue[] { return this.session.visibleSessions; }
+  private get visibleSessions(): SessionRow[] { return this.session.visibleSessions; }
 
   /** Every readable output source, newest activity first.
    *
@@ -859,13 +874,13 @@ export class Controller implements ControllerStore, ConnectionListener {
       });
     }
     for (const row of this.visibleSessions) {
-      const sessionId = string(row.sessionId);
-      const parent = typeof row.parentSessionId === 'string' ? row.parentSessionId : '';
+      const sessionId = row.sessionId;
+      const parent = row.parentSessionId ?? '';
       if (sessionId === '' || parent === '' || row.origin !== 'subagent' || seen.has(sessionId)) continue;
       seen.add(sessionId);
       sources.push({
         id: sessionId, kind: 'session', label: sessionLabel(row), state: 'ended',
-        ...(typeof row.updatedAt === 'number' ? { startedAt: row.updatedAt } : {}),
+        ...(row.updatedAt === undefined ? {} : { startedAt: row.updatedAt }),
         createdBy: 'agent', parentSessionId: parent,
       });
     }
@@ -913,7 +928,7 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.peekId = id;
     this.traceEvent('peek begin', { source: id, kind: source.kind });
     if (source.kind === 'session') {
-      const row = this.visibleSessions.find(candidate => string(candidate.sessionId) === id);
+      const row = this.visibleSessions.find(candidate => candidate.sessionId === id);
       // The list row is the only place that knows a child needs its parent in the address.
       this.peek.open(row === undefined ? [{ kind: 'session', sessionId: id }] : costAddresses(row), () => this.update({}));
     }
@@ -1134,7 +1149,7 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @param signal - Cancels the HTTP search.
    * @returns Session snippets and the global truncation flag.
    */
-  private async searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: ObjectValue[]; hasMore: boolean }> {
+  private async searchSessions(query: string, workspaceOnly: boolean, signal: AbortSignal): Promise<{ items: SearchItem[]; hasMore: boolean }> {
     return this.session.searchSessions(query, workspaceOnly, signal);
   }
 

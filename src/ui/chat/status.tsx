@@ -7,7 +7,10 @@ import stringWidth from 'string-width';
 import type { CostTotal } from '../../contracts.ts';
 import { costText } from '../status/model.ts';
 import { toolLine } from '../../text.ts';
-import type { ClientActivity, Coverage, LivePhase } from '../../contracts.ts';
+import type { ClientActivity, Coverage, LivePhase, ModelSelection, SessionMetrics } from '../../contracts.ts';
+
+/** The one reason a status display may stop moving: the reader froze the screen for native selection. */
+export type StatusPause = 'copy';
 
 /** One formatted cost scope, with the raw totals the money column needs. */
 export interface StatusCostLine { text: string; amount: number; unknown: number }
@@ -32,11 +35,19 @@ export interface StatusSource {
   pendingCount: number;
   /** What the live attempt is doing now, straight from the record. */
   livePhase?: LivePhase;
-  /** Retained host projections for the selected session. */
-  values: ObjectValue;
+  /** Decoded host projections for the selected session. */
+  metrics: SessionMetrics;
+  /** The long operation that owns the client right now, when one does.
+   *
+   * A controller fact, not a host projection: it is what this client is doing, and the bar names it
+   * while the operation runs instead of reporting a state that is only about the turn.
+   */
+  foreground?: { readonly label: string };
+  /** Whether a local `!` run is in flight. Client work the host knows nothing about. */
+  shell?: { readonly running: boolean };
   queued?: number;
   jobs?: number;
-  defaultModel?: ObjectValue;
+  defaultModel?: ModelSelection;
   /** Billing summary; absent when this run has no ledger. */
   cost?: {
     sessionText: string;
@@ -50,7 +61,6 @@ export interface StatusSource {
   presetError?: string;
   modelError?: string;
 }
-import type { Json, ObjectValue } from '../../json.ts';
 import { safeText } from '../../text.ts';
 
 /** One detail row of the expanded panel before it is wrapped to the terminal width. */
@@ -74,28 +84,28 @@ const compactNumber = new Intl.NumberFormat('en', { notation: 'compact', maximum
  *
  * Counts use the compact form the single-row bar already uses, because a full count of a long
  * session is eight digits wide and pushes each line past the terminal width on its own.
- * @param values - Current host projection values.
+ * @param metrics - Decoded host projections for the selected session.
  * @param defaultModel - Host catalog default used before a session selects a route.
  * @param running - Whether the current route or next route is primary.
  * @returns Model, approximate context occupancy, and cumulative token buckets.
  */
-export function metricLines(values: ObjectValue, defaultModel: ObjectValue | undefined, running: boolean): string[] {
-  const selection = record(values.modelSelection);
-  const current = running ? selection.lastUsed ?? selection.next ?? defaultModel : selection.next ?? selection.lastUsed ?? defaultModel;
+export function metricLines(metrics: SessionMetrics, defaultModel: ModelSelection | undefined, running: boolean): string[] {
+  const { lastUsed, next } = metrics.models;
+  const current = running ? lastUsed ?? next ?? defaultModel : next ?? lastUsed ?? defaultModel;
   const model = modelName(current);
-  const next = modelName(selection.next);
+  const nextName = modelName(next);
   const compact = (value: number | undefined) => value === undefined ? '?' : compactNumber.format(value);
-  const pressure = record(values.contextPressure);
-  const used = numeric(pressure.projectedTokens) ?? numeric(pressure.pressureTokens);
-  const capacity = numeric(pressure.contextWindow);
+  const pressure = metrics.context;
+  const used = pressure?.projectedTokens ?? pressure?.pressureTokens;
+  const capacity = pressure?.window;
   const context = used !== undefined && capacity !== undefined && capacity > 0
     ? `~${Math.min(100, Math.round(used / capacity * 100))}% (${compact(used)}/${compact(capacity)})`
     : 'unknown';
-  const usage = record(values.tokenUsage);
-  const buckets = [usage.uncachedInputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].map(numeric);
+  const usage = metrics.usage;
+  const buckets = [usage?.uncachedInputTokens, usage?.outputTokens, usage?.cacheReadTokens, usage?.cacheWriteTokens];
   const total = buckets.every(value => value !== undefined) ? (buckets as number[]).reduce((a, b) => a + b, 0) : undefined;
   return [
-    `Model: ${model}${running && next !== 'unknown' && next !== model ? ` · Next: ${next}` : ''}`,
+    `Model: ${model}${running && nextName !== 'unknown' && nextName !== model ? ` · Next: ${nextName}` : ''}`,
     `Context ${context} · ${compact(total)} tok`,
     `In ${compact(buckets[0])} · Out ${compact(buckets[1])} · Cache ${compact(buckets[2])}/${compact(buckets[3])}`,
   ];
@@ -122,12 +132,55 @@ export interface StatusGroups {
   model?: StatusSegment;
   /** Reasoning effort, kept only while the model name still fits beside it. */
   effort?: StatusSegment;
+  /** A local `!` run: client work beside the host's, kept while the bar has room for one word. */
+  shell?: StatusSegment;
   /** Completed turns. */
   turns?: StatusSegment;
   /** Cumulative tokens. */
   tokens?: StatusSegment;
   /** Cache-hit share of billed prompt input; it restates the token total, so the packer drops it first. */
   cache?: StatusSegment;
+}
+
+/** The runtime activity the bar and the panel both read, split by the slot each fact belongs to.
+ *
+ * Both slots can be filled at once, because the lifecycles coexist: a local `!` run keeps going while
+ * the host turn it was typed during is still working. `phase` is chosen by display priority
+ * (foreground → loop → paused), `badge` is independent. Callers switch on these fields instead of
+ * comparing text, so renaming a badge cannot change whether the bar shows one.
+ */
+export interface RuntimeActivity {
+  /** What belongs beside the clock, when a lifecycle owns that place. */
+  readonly phase?: { readonly kind: 'foreground' | 'loop' | 'paused'; readonly text: string };
+  /** Client work beside the host's answer: the local `!` run, never instead of the phase. */
+  readonly badge?: { readonly kind: 'shell'; readonly text: string };
+}
+
+/** What this client is doing right now, in one place.
+ *
+ * The controller already merges a turn and a loop into `activity`; this adds the two facts that belong
+ * to other owners — the foreground operation and a local `!` run — and states the display priority
+ * once, so the compact bar and the `/status` panel cannot end up disagreeing about which lifecycle is
+ * the current one. Priority is display order only: every lifecycle keeps running behind the named one.
+ * @param source - The runtime facts the bar and the panel share.
+ * @returns The activity, or undefined when nothing is running.
+ */
+export function runtimeActivity(source: StatusSource): RuntimeActivity {
+  const activity = source.activity;
+  // The phase is one winner by display priority; the badge is a fact of its own and fills in parallel.
+  const phase = source.foreground !== undefined ? { kind: 'foreground' as const, text: source.foreground.label }
+    : activity?.kind === 'loop' ? { kind: 'loop' as const, text: `Loop ${activity.step}/${activity.total} · ${loopActivityText(activity.activity)}` }
+    : activity?.kind === 'paused' ? { kind: 'paused' as const, text: 'needs you' }
+    // A bare turn has no phase beyond the clock the state token already carries, so naming it here
+    // would say "Working" twice; the panel adds that word where there is room for it.
+    : undefined;
+  return { ...(phase === undefined ? {} : { phase }),
+    ...(source.shell?.running === true ? { badge: { kind: 'shell' as const, text: '! shell' } } : {}) };
+}
+
+/** One word for what a running loop is waiting on. */
+function loopActivityText(activity: 'turn' | 'verify' | 'settle'): string {
+  return activity === 'verify' ? 'Verifying' : activity === 'settle' ? 'Settling' : 'Agent';
 }
 
 /** Cache-hit share of billed prompt input, without reporting a partial hit as a full one.
@@ -185,15 +238,19 @@ export function compactStatusRows(groups: StatusGroups, width: number): StatusSe
     group === undefined ? undefined : { ...group, text: safeText(group.text).replace(/[\r\n\t]+/g, ' ') };
   groups = { state: clean(groups.state)!, phase: clean(groups.phase), stop: clean(groups.stop), cost: clean(groups.cost),
     context: clean(groups.context), contextBar: clean(groups.contextBar),
-    model: clean(groups.model), effort: clean(groups.effort), turns: clean(groups.turns), tokens: clean(groups.tokens),
-    cache: clean(groups.cache) };
+    model: clean(groups.model), effort: clean(groups.effort), shell: clean(groups.shell),
+    turns: clean(groups.turns), tokens: clean(groups.tokens), cache: clean(groups.cache) };
   const cluster = [groups.state, groups.phase, groups.stop].filter(Boolean) as StatusSegment[];
   // The cost is one group carrying two scopes: this session's spend, with today's in parentheses.
   // Display order reads the model beside its effort and the money after the share it sits next to;
   // keep order is by value, so a narrow bar holds the cost and the share before a model it cannot
   // show, and the cache share goes before the token total it restates.
-  const order = [groups.model, groups.effort, groups.context, groups.cost, groups.turns, groups.tokens, groups.cache].filter(Boolean) as StatusSegment[];
-  const rank = [groups.cost, groups.context, groups.model, groups.effort, groups.turns, groups.tokens, groups.cache].filter(Boolean) as StatusSegment[];
+  const order = [groups.model, groups.effort, groups.shell, groups.context, groups.cost,
+    groups.turns, groups.tokens, groups.cache].filter(Boolean) as StatusSegment[];
+  // Rank keeps every existing group in its previous order: a new group may not silently outrank one the
+  // bar already promised to keep when it fits.
+  const rank = [groups.cost, groups.context, groups.model, groups.effort, groups.turns,
+    groups.tokens, groups.shell, groups.cache].filter(Boolean) as StatusSegment[];
   // One row while enough of the sequence fits; each step drops the least valuable group first. The
   // cost is never dropped while a row can hold it, only moved to the second one, so the search stops
   // above it; a second row that cannot hold even the cost is not opened.
@@ -298,8 +355,13 @@ function measure(row: StatusSegment[]): number {
 export const StatusBar = memo(function StatusBar({ source, expanded = false, width, scroll = 0, pageSize, onScroll, onOverflow, onRows, pauseReason }:
 { source: StatusSource; expanded?: boolean; width?: number; revision?: number; scroll?: number; pageSize?: number;
   onScroll?(next: number): void; onOverflow?(overflow: boolean): void; onRows?(rows: number): void;
-  /** Why the display is paused, so a frozen clock can say so instead of looking stalled. */
-  pauseReason?: 'copy' | 'dialog' | 'history' }) {
+  /** Why the *display* is frozen. Only copy mode stops time.
+   *
+   * A panel is another view of live state, not a pause: freezing the clock behind `/help` or `/status`
+   * would print a reading that stopped being true, so the runtime projection keeps moving and only the
+   * screen itself is held.
+   */
+  pauseReason?: StatusPause }) {
   const paused = pauseReason !== undefined;
   const theme = useTheme();
   const { stdout } = useStdout();
@@ -307,8 +369,11 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
   const [reported, setReported] = useState(1);
   const running = source.running;
   const activity = source.activity;
-  // The controller already merged a turn and a loop into one answer; the bar only draws it.
-  const busy = activity !== undefined;
+  // The controller already merged a turn and a loop into one answer; the bar only draws it, plus the
+  // foreground operation and the local shell, which are the other two owners of "what is happening".
+  const foreground = source.foreground;
+  const shellRunning = source.shell?.running === true;
+  const busy = activity !== undefined || foreground !== undefined || shellRunning;
   const since = activity?.kind === 'turn' ? activity.since : activity?.kind === 'loop' ? activity.startedAt : undefined;
   useEffect(() => {
     setNow(Date.now());
@@ -319,23 +384,24 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
     return () => clearInterval(timer);
   }, [busy, since, paused]);
   const state = source;
-  const view = { values: source.values, queued: source.queued, jobs: source.jobs };
+  const metrics = source.metrics;
+  const view = { queued: source.queued, jobs: source.jobs };
   const costs = source.cost;
   const sessionCost = source.cost?.sessionText ?? '?';
   // `*` belongs to costText alone; incomplete coverage is a separate degradation, reported by `!`.
   const coverage = source.cost?.coverage ?? 'complete';
   const label = source.workspaceLabel;
   if (!expanded) {
-    const selection = record(view.values.modelSelection);
-    const route = record(running ? selection.lastUsed ?? selection.next ?? state.defaultModel : selection.next ?? selection.lastUsed ?? state.defaultModel);
-    const model = typeof route.model === 'string' ? route.model.replace(/^deepseek-/, '') : undefined;
-    const effort = typeof route.reasoningEffort === 'string' ? route.reasoningEffort : undefined;
-    const pressure = record(view.values.contextPressure);
-    const used = numeric(pressure.projectedTokens) ?? numeric(pressure.pressureTokens);
-    const capacity = numeric(pressure.contextWindow);
+    const { lastUsed, next } = metrics.models;
+    const route = (running ? lastUsed ?? next : next ?? lastUsed) ?? state.defaultModel;
+    const model = route?.model.replace(/^deepseek-/, '');
+    const effort = route?.reasoningEffort;
+    const pressure = metrics.context;
+    const used = pressure?.projectedTokens ?? pressure?.pressureTokens;
+    const capacity = pressure?.window;
     const percent = used !== undefined && capacity !== undefined && capacity > 0 ? Math.min(100, Math.round(used / capacity * 100)) : undefined;
-    const usage = record(view.values.tokenUsage);
-    const buckets = [usage.uncachedInputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].map(numeric);
+    const usage = metrics.usage;
+    const buckets = [usage?.uncachedInputTokens, usage?.outputTokens, usage?.cacheReadTokens, usage?.cacheWriteTokens];
     const total = buckets.every(value => value !== undefined) ? (buckets as number[]).reduce((a, b) => a + b, 0) : undefined;
     // Billed prompt input is the three disjoint prompt buckets; a provider that reports no cache
     // write has not billed one, which is how the ledger reads the same projection.
@@ -347,13 +413,14 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
     const phaseLabel = phase === undefined ? undefined
       : phase.kind === 'tool' ? `${phase.name ?? 'tool'} ${phaseText(now - phase.startedAt)}`
       : `${phase.kind === 'thinking' ? 'think' : 'write'} ${phaseText(now - phase.startedAt)}`;
-    // A host turn's phase wins; without one, the controller's loop activity names what the client is
-    // doing, so the bar never reports an idle session while a review is in flight.
+    // A host turn's phase wins; without one, the shared activity projection names what the client is
+    // doing, so the bar never reports an idle session while a review or an export is in flight. The
+    // shell badge has its own group, because it is client work beside the host's rather than the thing
+    // the clock is measuring.
+    const projected = runtimeActivity(source);
     const phaseSegment: StatusSegment | undefined = !busy ? undefined
       : phaseLabel !== undefined ? { text: phaseLabel }
-      : activity?.kind === 'loop' ? { text: `${activity.activity} ${activity.step}/${activity.total}` }
-      : activity?.kind === 'paused' ? { text: 'needs you' }
-      : undefined;
+      : projected.phase === undefined ? undefined : { text: projected.phase.text };
     // The state token reports a fact and never guesses: a paused clock is named, offline and errors
     // take the token over, and an unknown phase simply leaves the phase group empty. An answer this
     // client still owes outranks the paused reason, because that reason is only why the clock stopped.
@@ -399,7 +466,9 @@ export const StatusBar = memo(function StatusBar({ source, expanded = false, wid
         contextBar: { text: `ctx: ${'█'.repeat(cells)}${'░'.repeat(10 - cells)} ~${percent}%`, color: contextColor } }),
       ...(model === undefined ? {} : { model: { text: model, color: theme.status.model } }),
       ...(model === undefined || effort === undefined ? {} : { effort: { text: effort, color: theme.status.model } }),
-      ...(numeric(record(view.values.sessionStats).turns) === undefined ? {} : { turns: { text: `${count(numeric(record(view.values.sessionStats).turns))} turns`, color: theme.status.usage } }),
+      // A local `!` run is client work: it is named beside the host's answer, never instead of it.
+      ...(projected.badge === undefined ? {} : { shell: { text: projected.badge.text, color: theme.colors.context } }),
+      ...(metrics.turns === undefined ? {} : { turns: { text: `${count(metrics.turns)} turns`, color: theme.status.usage } }),
       ...(total === undefined ? {} : { tokens: { text: `${compactCount(total)} tok`, color: theme.status.usage } }),
       ...(hit === undefined ? {} : { cache: { text: `hit ${hit}`, color: theme.status.usage } }),
     };
@@ -425,7 +494,8 @@ const StatusDetails = memo(function StatusDetails({ source, theme, width, now, s
   const activity = source.activity;
   const busy = activity !== undefined;
   const since = activity?.kind === 'turn' ? activity.since : activity?.kind === 'loop' ? activity.startedAt : undefined;
-  const view = { values: source.values, queued: source.queued, jobs: source.jobs };
+  const metrics = source.metrics;
+  const view = { queued: source.queued, jobs: source.jobs };
   const costs = source.cost;
   const sessionCost = source.cost?.sessionText ?? '?';
   const todayCost = source.cost?.today().text ?? '?';
@@ -436,23 +506,32 @@ const StatusDetails = memo(function StatusDetails({ source, theme, width, now, s
   // still do not fit are scrolled rather than dropped, because the panel shares the screen height.
   // Rows are merged and labelled compactly so a normal terminal shows every detail on one screen;
   // the wrap and the scroll offset remain the fallback for a short or very narrow terminal.
-  const turns = count(numeric(record(view.values.sessionStats).turns));
+  const turns = count(metrics.turns);
   const duration = since === undefined ? 'unknown duration' : elapsedTime(now - since);
+  const projected = runtimeActivity(source);
   const detail: StatusDetail[] = [
-    { key: 'activity', color: source.pendingCount > 0 ? theme.status.critical : busy ? theme.colors.context : theme.colors.muted, text: source.pendingCount > 0
+    // The same projection the bar shows, so the two can never name different lifecycles. The panel adds
+    // what the bar has no width for: the clock, the cancel key, and the loop's own title.
+    { key: 'activity', color: source.pendingCount > 0 ? theme.status.critical
+      : source.foreground !== undefined ? theme.status.working
+      : busy ? theme.colors.context : theme.colors.muted, text: source.pendingCount > 0
       ? '? Needs you · answer the request above to continue'
+      : source.foreground !== undefined
+        ? `◐ ${source.foreground.label} · Esc cancel`
       : running
-        ? `◐ Working · ${duration}${source.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
+        ? `◐ ${projected.phase?.text ?? 'Working'} · ${duration}${source.activeTurnStartedAt === undefined ? ' (observed)' : ''} · Ctrl+C Stop`
         : activity?.kind === 'loop'
-          ? `◐ ${activity.activity} ${activity.step}/${activity.total} · ${duration} · Ctrl+C Stop`
+          ? `◐ ${projected.phase?.text ?? `Loop ${activity.step}/${activity.total}`} · ${duration} · Ctrl+C Stop`
           : activity?.kind === 'paused'
             ? `⏸ ${activity.title} · needs you · /loop answer <text> or /loop abort`
-            : '● Ready · Ctrl+C exit' },
+            : projected.badge !== undefined
+              ? `◐ ${projected.badge.text} · client-side command`
+              : '● Ready · Ctrl+C exit' },
     { key: 'host', text: `${safeText(source.host)} · ${safeText(state.status)}${!source.online ? ' · offline, last known status' : ''}` },
     ...source.sessionId
       ? [{ key: 'session', text: `Session ${safeText(source.sessionId)}${source.sessionMode ? ` · ${safeText(source.sessionMode)}` : ''}` }] : [],
     { key: 'workspace', text: `Workspace ${safeText(label)}` },
-    ...metricLines(view.values, source.defaultModel, running).map((line, index) => ({ key: `metric-${index}`, text: safeText(line), dim: true })),
+    ...metricLines(metrics, source.defaultModel, running).map((line, index) => ({ key: `metric-${index}`, text: safeText(line), dim: true })),
     ...costs ? [{ key: 'cost', text: `Cost ${sessionCost} session · ${todayCost} today · ${turns} turns`, dim: true }] : [],
     { key: 'queued', text: `Queued ${count(view.queued)} · Jobs ${count(view.jobs)}${costs ? '' : ` · ${turns} turns`}`, dim: true },
     ...costs && coverage === 'partial'
@@ -482,17 +561,11 @@ const StatusDetails = memo(function StatusDetails({ source, theme, width, now, s
   </Box>;
 });
 
-function record(value: Json | ObjectValue | undefined): ObjectValue {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
-}
-function numeric(value: Json | undefined): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
-}
 function count(value: number | undefined): string { return value === undefined ? '?' : value.toLocaleString('en-US'); }
-function modelName(value: Json | ObjectValue | undefined): string {
-  const model = record(value);
-  if (typeof model.model !== 'string' || typeof model.provider !== 'string') return 'unknown';
-  return safeText(`${model.provider}/${model.model}${typeof model.reasoningEffort === 'string' ? ` (${model.reasoningEffort})` : ''}`);
+/** Name one selected route the way the bar shows it; an unset route reads `unknown`. */
+function modelName(selection: ModelSelection | undefined): string {
+  if (selection === undefined) return 'unknown';
+  return safeText(`${selection.provider}/${selection.model}${selection.reasoningEffort === undefined ? '' : ` (${selection.reasoningEffort})`}`);
 }
 
 function compactCost(total: CostTotal): string {

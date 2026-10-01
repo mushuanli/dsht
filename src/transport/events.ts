@@ -6,6 +6,7 @@
  * `waterfall-delegate` rather than silently dropped.
  */
 import { array, errorText, object, string, type Json, type ObjectValue } from './wire.ts';
+import { entriesOf, optionalString } from './decode.ts';
 
 /** One selectable answer of a host question, already flattened out of the raw request. */
 export interface QuestionOption { label: string; description?: string }
@@ -36,7 +37,9 @@ export type HostEvent =
 const CATALOG_EVENTS = new Set(['llm/adapters-updated', 'settings/document-updated', 'credentials/reference-updated']);
 
 /** One host-owned pending input, flattened to the text the UI shows. */
-export interface QueuedInput { id: string; placement: 'queued' | 'steering' | 'context'; text: string }
+export interface QueuedInput { id: string; placement: 'queued' | 'steering' | 'context'; text: string;
+  /** Prompt-RPC identity of the submission this occurrence stands for, when the host reports one. */
+  rpcId?: string }
 
 /** A capability value the host owns. Individual keys are typed incrementally as they are consumed. */
 export type ProjectionValue = Json;
@@ -58,15 +61,63 @@ function sequence(value: unknown): number {
   return value;
 }
 
+/** Read one probe-supplied string out of a value that may be absent or of another shape. */
+function probeString(container: unknown, key: string): string | undefined {
+  if (container === null || typeof container !== 'object' || Array.isArray(container)) return undefined;
+  return optionalString((container as ObjectValue)[key]);
+}
+
+/** Flatten one message's content blocks into the single line the composer shows. */
+function contentLine(value: Json | undefined): string {
+  return array(value).map(object)
+    .map(block => block.type === 'text' ? string(block.text) : `[${string(block.type)}]`).join(' ');
+}
+
 /** Flatten one session's pending-input list. */
 function queuedInputs(value: Json | undefined): QueuedInput[] {
   return array(value).map(raw => {
     const item = object(raw);
     if (!['queued', 'steering', 'context'].includes(string(item.placement))) throw new Error('Invalid queue placement');
+    const rpcId = optionalString(item.rpcId);
     return { id: string(item.id), placement: item.placement as QueuedInput['placement'],
-      text: array(object(item.message).content).map(object)
-        .map(block => block.type === 'text' ? string(block.text) : `[${string(block.type)}]`).join(' ') };
+      ...(rpcId === undefined ? {} : { rpcId }),
+      text: contentLine(object(item.message).content) };
   });
+}
+
+/** Pending input as carried by the durable `inbox` session projection, newest shape first.
+ *
+ * The Host stopped sending the `session/control` queue and job sections, so the same pending input
+ * now rides the projection its agent loop already publishes: `next-step` is input the next step will
+ * claim as steering, `next-turn` is input that wakes a new turn. Each row is the durable user
+ * message itself, so its `id` is the identity `session/updateQueue` addresses and its uploaded
+ * `source.rpcId` is the submission this client sent.
+ *
+ * A projection value belongs to a capability this client merely displays, so a row it cannot read is
+ * skipped rather than allowed to fail the control stream the way a malformed frame would.
+ * @param value - Raw `inbox` projection cell, or undefined when the host publishes none.
+ * @returns Pending inputs in the host's own order, steering first.
+ */
+export function inboxInputs(value: Json | undefined): QueuedInput[] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return [];
+  const inbox = value as ObjectValue;
+  const rows: QueuedInput[] = [];
+  for (const [key, placement] of [['next-step', 'steering'], ['next-turn', 'queued']] as const) {
+    const list = inbox[key];
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const message = raw as ObjectValue;
+      const id = optionalString(message.id);
+      if (id === undefined) continue;
+      // Only a submission this client itself sent carries the identity that retires its local row;
+      // an injected or model-authored occurrence has none.
+      const rpcId = probeString(message.source, 'kind') === 'user' ? probeString(message.source, 'rpcId') : undefined;
+      const content = Array.isArray(message.content) ? message.content : [];
+      rows.push({ id, placement, ...(rpcId === undefined ? {} : { rpcId }), text: contentLine(content) });
+    }
+  }
+  return rows;
 }
 
 /** Count the jobs the host still considers active. */
@@ -92,10 +143,10 @@ export function controlFrame(value: unknown): ControlFrame {
     // The baseline's sections are capabilities, not a fixed schema: a host that reports no queue or
     // job stream simply omits them, and demanding the newer three-section shape would discard the
     // projection snapshot those hosts do send. An absent section is empty, not an error.
-    const projections = optionalRows(baseline.projections)
+    const projections = entriesOf(baseline.projections)
       .map(([id, snapshot]) => [id, projectionSnapshot(snapshot)!] as const);
-    const queues = optionalRows(baseline.queues).map(([id, items]) => [id, queuedInputs(items)] as const);
-    const jobs = optionalRows(baseline.jobs).map(([id, items]) => [id, activeJobs(items)] as const);
+    const queues = entriesOf(baseline.queues).map(([id, items]) => [id, queuedInputs(items)] as const);
+    const jobs = entriesOf(baseline.jobs).map(([id, items]) => [id, activeJobs(items)] as const);
     return { kind: 'baseline', projections: new Map(projections), queues: new Map(queues), jobs: new Map(jobs) };
   }
   if (frame.type === 'projection' || frame.type === 'queue' || frame.type === 'jobs') {
@@ -111,14 +162,13 @@ export function controlFrame(value: unknown): ControlFrame {
   throw new Error('Unknown session control frame');
 }
 
-/** Read a baseline section that a host may not provide, as an empty list rather than a throw. */
-function optionalRows(value: Json | undefined): [string, Json][] {
-  return value === undefined ? [] : Object.entries(object(value));
-}
-
-/** Read a possibly-absent string field without turning protocol drift into a throw. */
-function optionalString(value: Json | undefined): string | undefined {
-  return typeof value === 'string' ? value : undefined;
+/** Read the opening `$events` handshake, which binds every later answer to one generation.
+ * @param value - One raw `$events` frame.
+ * @returns The client identity, or undefined when this is not the ready frame.
+ */
+export function readyClientId(value: unknown): string | undefined {
+  const frame = object(value);
+  return frame.type === 'ready' ? string(frame.clientId) : undefined;
 }
 
 /** Flatten one raw question into the semantic shape the session domain retains. */
@@ -185,8 +235,9 @@ function emitEvent(frame: ObjectValue): HostEvent | undefined {
  * @param frame - One decoded `$events` frame.
  * @returns The normalized event, or undefined when it is not one this client consumes.
  */
-export function hostEvent(frame: ObjectValue): HostEvent | undefined {
+export function hostEvent(value: unknown): HostEvent | undefined {
   try {
+    const frame = object(value);
     if (frame.type === 'waterfall') return waterfallEvent(frame);
     if (frame.type === 'cancel') return { kind: 'cancel', eventId: string(frame.eventId) };
     if (frame.type === 'emit') return emitEvent(frame);

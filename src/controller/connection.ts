@@ -4,7 +4,9 @@ import { AuthenticationRequired } from '../transport/auth.ts';
 import { Client, HttpError } from '../transport/client.ts';
 import { errorText, type Json } from '../transport/wire.ts';
 import type { HostEvent } from '../transport/events.ts';
+import { eventResult } from '../transport/dsh.ts';
 import { ConnectionStreams } from './connection-streams.ts';
+import { nextReconnectAttempt, reconnectDelayMs } from './reconnect.ts';
 import type { HostAccess } from '../transport/host.ts';
 import type { ConnectionView } from '../session/connection-view.ts';
 
@@ -82,12 +84,19 @@ export class ConnectionController implements HostAccess, ConnectionView {
 
   /** Answer one retained host waterfall through the event-result endpoint. */
   async reply(eventId: string, outcome: Json): Promise<void> {
-    await this.require().call('$events/result', { clientId: this.clientId, eventId, outcome });
+    await eventResult(this.require(), this.clientId, eventId, outcome);
   }
 
-  /** Run one generation, then retry with bounded jittered backoff until stopped. */
+  /** Run one generation, then retry with the policy in `reconnect.ts` until stopped.
+   *
+   * How long a generation must stay up before its failure counts as a fresh start, and how long to wait,
+   * are policy and live in that module: this loop only supplies the two facts they need (how many
+   * unstable generations in a row, and how long the finished one was ready).
+   */
   private async run(): Promise<void> {
     let attempt = 0;
+    /** How long the generation that just ended was ready; 0 when it never reached ready. */
+    let readyForMs = 0;
     while (!this.abort.signal.aborted) {
       this.listener.begin();
       if (this.abort.signal.aborted) break;
@@ -119,8 +128,9 @@ export class ConnectionController implements HostAccess, ConnectionView {
         signal.throwIfAborted();
         await this.listener.ready();
         signal.throwIfAborted();
-        attempt = 0;
+        const readyAt = Date.now();
         const error = await disconnected;
+        readyForMs = Date.now() - readyAt;
         if (!this.abort.signal.aborted) throw error;
       } catch (error) {
         if (this.abort.signal.aborted) break;
@@ -141,8 +151,12 @@ export class ConnectionController implements HostAccess, ConnectionView {
         await this.listener.ended();
       }
       if (!this.abort.signal.aborted) {
-        try { await delay(Math.min(500 * 2 ** attempt++, 10_000) * (0.8 + Math.random() * 0.4), undefined,
-          { signal: this.abort.signal }); } catch (error) { if (!this.abort.signal.aborted) throw error; }
+        // The delay is computed from the *current* count, and the count only resets after a stable
+        // generation; both rules live in `reconnect.ts` with their own tests.
+        const waitMs = reconnectDelayMs(attempt);
+        attempt = nextReconnectAttempt(attempt, readyForMs);
+        try { await delay(waitMs, undefined, { signal: this.abort.signal }); }
+        catch (error) { if (!this.abort.signal.aborted) throw error; }
       }
     }
   }

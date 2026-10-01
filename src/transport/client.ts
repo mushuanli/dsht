@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import WebSocket from 'ws';
 import { array, object, string, type Json, type ObjectValue } from './wire.ts';
+import { sessionRows, workspaceBaseline, type SessionRow, type WorkspaceRow } from './dsh-contract.ts';
 
 /** HTTP failure remains distinct from host business errors. */
 export class HttpError extends Error {
@@ -25,7 +26,7 @@ export class RemoteError extends Error {
 export interface Subscription {
   cancel(): void;
 }
-interface Listener {
+export interface Listener {
   item(value: Json | undefined): void;
   end(error?: Error): void;
 }
@@ -192,12 +193,12 @@ export class Client {
   archivedSessionIds: ReadonlySet<string> = new Set();
 
   /** List workspaces by consuming and cancelling the authoritative opening baseline. */
-  async listWorkspaces(signal?: AbortSignal): Promise<ObjectValue[]> {
+  async listWorkspaces(signal?: AbortSignal): Promise<WorkspaceRow[]> {
     signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
       let sub: Subscription | undefined;
       let settled = false;
-      const finish = (error?: unknown, items?: ObjectValue[]) => {
+      const finish = (error?: unknown, items?: WorkspaceRow[]) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer); signal?.removeEventListener('abort', cancel); sub?.cancel();
@@ -212,8 +213,9 @@ export class Client {
           try {
             const frame = object(value);
             if (frame.type !== 'baseline') throw new Error('Workspace stream omitted its baseline');
-            this.archivedSessionIds = new Set(array(object(frame.value).archivedSessionIds).map(string));
-            finish(undefined, array(object(frame.value).items).map(object));
+            const baseline = workspaceBaseline(frame.value);
+            this.archivedSessionIds = new Set(baseline.archivedSessionIds);
+            finish(undefined, [...baseline.items]);
           } catch (error) { finish(error); }
         },
         end: error => finish(error ?? new Error('Workspace stream ended before baseline')),
@@ -224,13 +226,13 @@ export class Client {
   }
 
   /** List visible sessions, optionally filtering by the workspace's accounted IDs. */
-  async listSessions(workspaceId?: string, signal?: AbortSignal): Promise<ObjectValue[]> {
-    const sessions = array(object(await this.call('session/list', { _request: {} }, signal)).items).map(object);
+  async listSessions(workspaceId?: string, signal?: AbortSignal): Promise<SessionRow[]> {
+    const sessions = sessionRows(await this.call('session/list', { _request: {} }, signal));
     if (!workspaceId) return sessions;
     const workspace = (await this.listWorkspaces(signal)).find(item => item.workspaceId === workspaceId);
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`);
-    const ids = new Set(array(workspace.sessionIds).map(string));
-    return sessions.filter(item => ids.has(string(item.sessionId)));
+    const ids = new Set(workspace.sessionIds);
+    return sessions.filter(item => ids.has(item.sessionId));
   }
 
   /** Close all streams, abort in-flight HTTP, and await the physical socket's closure. */

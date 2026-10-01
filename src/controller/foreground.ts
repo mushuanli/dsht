@@ -4,6 +4,15 @@ import type { ForegroundKind, ForegroundSnapshot } from '../contracts.ts';
 
 type ForegroundEvent =
   | { phase: 'queued'; kind: ForegroundKind; label: string }
+  /** A claim that could not start because the slot is taken and the caller did not wait.
+   *
+   * It carries the operation that owns the slot, because that is the fact the operator needs and the
+   * slot is the only place that knows it: a listener must not have to read back into the slot to name
+   * what the refused line was waiting for.
+   */
+  | { phase: 'refused'; kind: ForegroundKind; label: string;
+    /** The operation holding the slot, as the trace records it. */
+    owner?: { id: number; kind: ForegroundKind; label: string } }
   | { phase: 'begin'; id: number; kind: ForegroundKind; label: string }
   | { phase: 'end'; id: number; kind: ForegroundKind; cancelled: boolean };
 
@@ -45,7 +54,14 @@ export class ForegroundSlot {
       return signal.aborted ? undefined : await work(signal);
     }
     if (this.current !== undefined || this.granted) {
-      if (!wait) return undefined;
+      // The check and the claim are the same step: an `authorize` that read `snapshot` first would race
+      // exactly this decision. A non-waiting claim reports the refusal so the caller can say why.
+      if (!wait) {
+        const owner = this.current?.snapshot;
+        this.listener.trace({ phase: 'refused', kind, label,
+          ...(owner === undefined ? {} : { owner: { id: owner.id, kind: owner.kind, label: owner.label } }) });
+        return undefined;
+      }
       this.listener.trace({ phase: 'queued', kind, label });
       await new Promise<void>(resolve => this.waiters.push(resolve));
       this.granted = false;

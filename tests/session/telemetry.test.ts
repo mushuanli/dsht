@@ -44,6 +44,41 @@ test('readers cannot mutate projection values, nested objects or queue entries',
   assert.equal(telemetry.pending('s')[0]?.text, 'original');
 });
 
+test('the durable inbox projection supplies the pending inputs a current host reports', () => {
+  const telemetry = mounted();
+  // A 0.2 host reports pending input on the `inbox` projection and never on the retired queue section.
+  telemetry.accept({ kind: 'baseline', queues: new Map(), jobs: new Map(),
+    projections: new Map([['s', { asOfSeq: 2, values: { inbox: {
+      'next-step': [{ id: 'm1', content: [{ type: 'text', text: 'steer' }], source: { kind: 'user', rpcId: 'r1' } }],
+      'next-turn': [{ id: 'm2', content: [{ type: 'text', text: 'later' }] }] } } }]]) });
+  assert.deepEqual(telemetry.pending('s'), [
+    { id: 'm1', placement: 'steering', rpcId: 'r1', text: 'steer' },
+    { id: 'm2', placement: 'queued', text: 'later' },
+  ]);
+  assert.equal(telemetry.view('s').queued, 2);
+  // The projection is a whole value, so the splice that claims the row replaces the list with an empty one.
+  telemetry.accept({ kind: 'projection', sessionId: 's', key: 'inbox', seq: 3, value: { 'next-step': [], 'next-turn': [] } });
+  assert.deepEqual(telemetry.pending('s'), []);
+  assert.equal(telemetry.view('s').queued, 0);
+});
+
+test('an absent inbox stays unknown rather than claiming no pending input', () => {
+  const telemetry = mounted();
+  assert.equal(telemetry.view('s').queued, undefined);
+  assert.deepEqual(telemetry.pending('s'), []);
+  // A follow snapshot without the cell is not a claim that the inbox is empty.
+  telemetry.snapshot('s', { asOfSeq: 4, values: { title: 'T' } });
+  assert.equal(telemetry.view('s').queued, undefined);
+});
+
+test('an older host\u2019s explicit queue report still wins over the projection it also publishes', () => {
+  const telemetry = mounted();
+  telemetry.accept({ kind: 'projection', sessionId: 's', key: 'inbox', seq: 2,
+    value: { 'next-turn': [{ id: 'm1', content: [{ type: 'text', text: 'from inbox' }] }] } });
+  telemetry.accept({ kind: 'queue', sessionId: 's', items: [{ id: 'q', placement: 'queued', text: 'from queue' }] });
+  assert.deepEqual(telemetry.pending('s').map(item => item.text), ['from queue']);
+});
+
 test('the read capability caches unchanged views and refreshes counts without changing retained snapshots', () => {
   const telemetry = mounted();
   const reader = telemetry.reader;

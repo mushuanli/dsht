@@ -172,7 +172,6 @@ async function authorizeWhenReady(controller: Controller, command: LineCommand) 
       sessionSelected: controller.state.sessionId !== undefined,
       pending: controller.state.pending.length > 0,
       during: controller.queries.loop?.active === true ? 'loop' : controller.queries.running ? 'turn' : 'idle',
-      foreground: controller.queries.foreground !== undefined,
     });
     if (!verdict.allow || verdict.defer === undefined) return verdict;
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for the client to be free: ${command.kind}`);

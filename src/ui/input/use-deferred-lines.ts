@@ -9,6 +9,13 @@ interface DeferredFacts extends AuthorizeFacts {
   sessionId: string | undefined;
   /** Both the connection baseline and the selected conversation snapshot must be restored. */
   ready: boolean;
+  /** Whether an operation owns the foreground slot.
+   *
+   * Scheduling input, not authorization: the queue waits for a free slot so the line it dispatches is
+   * not refused by the claim and lost. `authorize` deliberately never reads it — the claim itself is
+   * the only place that can decide, atomically (§6.4).
+   */
+  foreground: boolean;
 }
 
 interface DeferredOptions {
@@ -39,7 +46,7 @@ export function useDeferredLines(options: DeferredOptions) {
       options.notify('Dropped a queued line: the selected session changed');
       return;
     }
-    if (!facts.ready || facts.foreground || (next.defer !== 'busy' && facts.during !== 'idle')) return;
+    if (!facts.ready || facts.foreground || facts.during !== 'idle') return;
     const verdict = authorize(next.command, facts);
     if (verdict.allow && verdict.defer !== undefined) return;
     draining.current = true;

@@ -4,7 +4,7 @@
 
 **读者**：维护 `tui/` 的改动者（含在本仓库工作的 agent），以及需要判断某个子系统边界与接口的评审者。只想了解怎么使用 `dsht` 的读者请读 `README.md`／`README.zh.md`。
 **本文记录**：项目定位与包事实（§1）、模块划分与依赖方向、对外接口与导出符号、内部事件流、本地存储格式、成本口径、协作与验证清单，以及术语表（附录 B；不变量清单在 4.7）。
-**本文不记录**：① 宿主 `dsh web` 的协议规范——协议定义在父仓库 `packages/api/gateway/src/stream-protocol.ts`，本文只记录客户端实际消费与校验的部分（见 3.1）；② 面向用户的操作说明——见 `README.md`／`README.zh.md`；③ 单次变更的决策理由——见 `.agents/notes/implemented/`；④ 实施期方案与进度——见 `tui-refactor-plan.md`；⑤ 计费方案评审——见 `cost.md`；⑥ 未被 `src/`／`tests/` 支撑的规划项——7.6 是限制清单，不是承诺。
+**本文不记录**：① 宿主 `dsh web` 的协议规范——协议定义在父仓库 `packages/api/gateway/src/stream-protocol.ts`，本文只记录客户端实际消费与校验的部分（见 3.1）；② 面向用户的操作说明——见 `README.md`／`README.zh.md`；③ 单次变更的决策理由——见 `.agents/notes/implemented/`；④ 实施期方案与进度——见 `tui-refactor-plan.md`；⑤ 计费方案评审——见 `cost.md`；⑥ 宿主接口的门面化方案与升级流程——见 `dsh-adapter-plan.md`（proposed）；⑦ 未被 `src/`／`tests/` 支撑的规划项——7.6 是限制清单，不是承诺。
 
 **事实基线**：`tui/` 目录内容，以核实时点的 `git HEAD` 与 `package.json` 为准（本文核对时 HEAD `6f67f87`、版本以 `package.json` 为准）。模块化重构及其后续提交序列 `e3a921e`…`0b837d7`（2026-09-11）只是历史切片，见 7.8。所有结论均从 `tui/src`、`tui/tests`、`tui/README.md`、`tui/.agents/notes/implemented/` 与本文明确引用的父仓库文件（如 `packages/api/gateway/src/stream-protocol.ts`、`CONTRIBUTING.md`）读出，未使用其他来源。本文是记录与索引，不是规范：模块边界、接口签名与文件清单的权威定义始终在 `src/`，与本文件冲突处以源码为准。
 **图形约定**：结构图使用 Mermaid C4（`C4Context` / `C4Container` / `C4Component`），流程使用 `C4Dynamic`；仅在 C4 无法表达报文先后顺序时补充 `sequenceDiagram`。
@@ -265,7 +265,7 @@ PromptRecord 属于 `session/transcript.ts` 的投影输出，提示词索引消
 
 渲染链路存在**四层表示**，任意两层都不允许互相污染：
 
-1. **宿主事件层**：`session/follow` 的 `snapshot` / `event` / `chunks` / `assistant-stream` 帧，以及 `session/control` 的 `baseline` / `projection` / `queue` / `jobs` 帧。
+1. **宿主事件层**：`session/follow` 的 `snapshot` / `event` / `chunks` / `assistant-stream` 帧，以及 `session/control` 的 `baseline` / `projection` 帧（`queue` / `jobs` 是 0.1.7 之前的兼容帧，待发输入现在走 `inbox` 投影）。
 2. **语义消息层**（`Transcript`）：只保留可显示事件（`user/message`、`assistant/message`、`tool/result`）的裁剪副本；未完成的 assistant 流保存在独立的 `blocks` 中，永不写入持久历史。
 3. **投影视图层**（`historyLayout` / `LayoutIndex`）：把语义消息按当前终端宽度包装成行，缓存每段的行数与起始偏移，只物化可见视口；最多缓存 2,048 行且单条消息不超过 256 KiB。文本部分先经 `markdown.ts` 解析成纯文本行加局部样式区间（表格按终端列宽分配、Mermaid 闭图渲染为字符网格、TeX 经 MathJax 编译为 Unicode 公式），样式由 Ink 在排版后应用，因此行几何与索引保持一致。未完成的实时尾部按稳定 `key` 增量换行：文本只会增长，因此最后一个非空行之前的行不再重排，每帧只重排该行残余与新到的增量。
 4. **渲染层**（Ink）：仅可见行成为 React 节点，远端文本先经 `safeText` 清洗再着色。
@@ -280,7 +280,7 @@ PromptRecord 属于 `session/transcript.ts` 的投影输出，提示词索引消
 
 **扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。`usePanels` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、是否寄存输入框（`parksComposer`）及保留键，关闭操作由同一 hook 处理，`dialogOpen`／`panelBlocksKeys`／`parksComposer`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
-阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话，而 `dialogOpen = modalOpen || referenceOpen` 只回答"是否要让出一行布局"；`modalOpen`（面板、待答交互、非 chat 屏）才是"停下来读的一屏"，暂停时钟与 `⏸ dialog` 只由它派生。输入框里的 `@` 补全列表是正在写的一行而不是读的一屏，把它也算作暂停面会让状态栏报出并不存在的暂留，并遮住唯一能解释按键归属的界面。状态另用 `statusPaused = copyMode || (screen === 'chat' && modalOpen)`，因此工作区选择、会话选择与主机路径输入界面的连接提示和状态栏保持实时，只有 chat 模态面与历史回看（`statusFrozen`）暂停它们。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
+阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话，而 `dialogOpen = modalOpen || referenceOpen` 只回答"是否要让出一行布局"；`modalOpen`（面板、待答交互、非 chat 屏）才是"停下来读的一屏"，它决定让出布局，但**不再决定是否停表**。输入框里的 `@` 补全列表是正在写的一行而不是读的一屏，把它也算作暂停面会让状态栏报出并不存在的暂留，并遮住唯一能解释按键归属的界面。**画面冻结与运行态冻结是两件事**：`displayPaused` 冻结背后的对话内容（页眉与 transcript 保持打开时的画面），而状态投影只由 `copyMode` 冻结（`statusPause = copyMode ? 'copy' : undefined`）——面板与历史回看不再暂停计时，因为它们是同一份运行态的另一种宽度，冻住会印出一个已经不再成立的读数；`/status` 面板打开期间随新投影即时更新。工作区选择、会话选择与主机路径输入界面的连接提示和状态栏一直保持实时。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
 ### 2.6 关键架构决策
 
@@ -385,6 +385,8 @@ cookie: dsh-auth-...
 
 #### 3.1.5 端点清单
 
+**本节的字段与线形状由 `src/transport/dsh-contract.ts` 单点持有**：该文件按端点组织 dsht 真正读取的字段子集与解码器，文件头标注校验过的宿主版本（当前 `dsh 0.2.0-rc.2`）与对应源类型路径；`src/transport/dsh.ts` 是唯一发请求的地方（方法名、`request`/`_request` 包装、`agentId` 查找参数、无截止时间的那个端点都在那里）。因此下面的表是**为什么这么接**的说明，升级时以契约文件为准；`dsh-adapter-plan.md` §7 是升级流程。
+
 | 端点 | 传输 | 参数 | 用途 |
 | --- | --- | --- | --- |
 | `$events` | 流 | `{}` | 网关转发的 Cordis 事件：`ready` / `waterfall` / `cancel` / `emit` |
@@ -392,12 +394,12 @@ cookie: dsh-auth-...
 | `workspace/follow` | 流 | `{}` | 消费首个 `baseline` 以取得工作区列表与 `archivedSessionIds` |
 | `workspace/create` | RPC | `{ request: { path } }` | 注册宿主目录 |
 | `workspace/delete` | RPC | `{ request: { workspaceId } }` | 仅移除注册，不删目录与会话 |
-| `workspace/archiveSession` | RPC | `{ request: { sessionId } }` | 归档会话并返回新的 `archivedSessionIds` |
+| `workspace/archiveSession` | RPC | `{ request: { sessionId, stopActivity: true } }` | 归档会话并返回新的 `archivedSessionIds`；0.2 起不带上 `stopActivity` 时会话仍有在跑的工作就以 `workspace/session-active` 拒绝 |
 | `session/list` | RPC | `{ _request: {} }` | 全部 HTTP 可见会话 |
 | `session/create` | RPC | `{ request: { workspaceId } }` | 显式新建会话 |
 | `session/follow` | 流 | `{ request: { address, maxMessages: 80, assistantStream: true } }` | 会话快照、持久增量与助手流 |
 | `session/page` | RPC | `{ request: { address, throughSeq, beforeSeq, maxMessages: 80 } }` | 向更早历史分页 |
-| `session/control` | 流 | `{}` | 投影、队列与活动任务的世代基线 |
+| `session/control` | 流 | `{}` | 投影世代基线（0.1.7 起宿主只发 `projections`） |
 | `session/search` | RPC | `{ request: { query } }` | 宿主侧会话搜索（最多 20 条，带截断标志） |
 | `session/prompt` | RPC | `{ request: { sessionId, requestId, mode, content, clientTimeZone } }` | 投递用户输入 |
 | `session/cancel` | RPC | `{ request: { sessionId } }` | 取消当前回合 |
@@ -406,9 +408,9 @@ cookie: dsh-auth-...
 | `session/selectModel` | RPC | `{ request: { sessionId, provider, model, reasoningEffort? } }` | 选择下一请求模型 |
 | `commands/execute` | RPC（无期限） | `{ agentId, line, submittedAttachments: [] }` | 直接执行宿主命令（`/compact`、`/plan` 等） |
 | `fileReferences/list` | RPC | `{ agentId, query }` | 宿主工作目录下的路径候选 |
-| `agentPresets/list` | RPC | `{}` | preset 名称与 trust 元数据 |
+| `agentPresets/list` | RPC | `{}` | preset 名称与默认标记（0.2 的 roster 不再带 `trust`） |
 
-`address` 有两种形态：普通会话 `{ kind: 'session', sessionId }`；子代理会话 `{ kind: 'subagent', parentSessionId, childSessionId, mode: 'continuable' | 'one-shot' }`。子代理的投递模式在 `session/list` 行中缺失，因此成本扫描先试 `continuable`，仅当返回 `RemoteError.code === 'subagent/unauthorized'` 时才重试 `one-shot`。
+`address` 有两种形态：普通会话 `{ kind: 'session', sessionId }`；子代理会话 `{ kind: 'subagent', parentSessionId, childSessionId, mode: 'continuable' | 'one-shot' | 'unknown' }`（`unknown` 是 0.2 新增的取值，客户端不据此拒绝地址）。子代理的投递模式在 `session/list` 行中缺失，因此成本扫描先试 `continuable`，仅当返回 `RemoteError.code === 'subagent/unauthorized'` 时才重试 `one-shot`。
 
 #### 3.1.6 帧结构（客户端实际消费的字段）
 
@@ -431,13 +433,21 @@ cookie: dsh-auth-...
 ```text
 { type: 'baseline', value: { projections: { <sessionId>: { asOfSeq, values } }, queues?: { <sessionId>: [ ... ] }, jobs?: { <sessionId>: [ ... ] } } }
 { type: 'projection', sessionId, key, seq, value }
-{ type: 'queue', sessionId, items }
-{ type: 'jobs',  sessionId, items }
+{ type: 'queue', sessionId, items }        // 0.1.7 起宿主不再发送
+{ type: 'jobs',  sessionId, items }        // 0.1.7 起宿主不再发送
 ```
 
 `queues` 与 `jobs` 是**可选能力**：宿主没有队列／活动任务流时不带这两个键，客户端按空处理而不是把整条 baseline 作废——否则连它确实提供的投影快照也会一起丢掉，实时指标会永久停在降级。投影基线仍必须有；某一节存在但不是对象才算协议错误。
 
-投影采用**每键水位**：`seq < (revisions.get(key) ?? baseline)` 的更新被丢弃；`Telemetry` 只保留 `title`、`modelSelection`、`contextPressure`、`tokenUsage`、`sessionStats`、`agentPreset` 六个键。baseline 之前的任何非 baseline 帧都是错误。
+**前台冲突不在授权里判**：`authorize` 只回答语义政策（要不要会话、要不要先答完、turn/loop 期间可否运行），
+前台槽位的冲突由 `ForegroundSlot.run` 在同一步里"检查 + 认领 + 拒绝"（`slash.md` §6.6）。被拒的认领写
+`lastFailure` 并带占用者 label；`/help` 这类不取槽位的视图命令在长操作期间仍可打开。
+
+**待发输入在 0.2 搬到 `inbox` 投影**：宿主删掉了 `session/control` 的 `queues`／`jobs` 两节与对应的 `queue`／`jobs` 帧（该变化在 0.1.5 与 0.1.7 之间落地），把「尚未被领取的输入」放进 agent loop 自己注册的会话投影 `key: 'inbox'`：`{ 'next-step': [UserMessage], 'next-turn': [UserMessage] }`，`next-step` 是下个步骤会领取的转向输入，`next-turn` 是唤醒新回合的排队输入；每条都是持久 `UserMessage`，`id` 就是 `session/updateQueue` 寻址的身份，`source.rpcId` 是提交它的那次 RPC。`transport/dsh-contract.ts#inboxInputs` 把这一格摊平成与 `queue` 帧同样的 `QueuedInput[]`（`next-step` → `steering`，`next-turn` → `queued`），`Telemetry` 每次该键变化就重建该会话的待发列表；旧宿主显式上报的 `queue` 节优先，`inbox` 只是回退，因为会同时上报两者的只可能是仍在发 `queue` 的旧宿主。活动任务计数在 0.2 没有任何投影承载（Web 端走独立的 `job` Remote namespace），因此本客户端的 `Jobs` 读数保持未知（`?`），不再假装知道。
+
+投影采用**每键水位**：`seq < (revisions.get(key) ?? baseline)` 的更新被丢弃；`Telemetry` 只保留 `title`、`modelSelection`、`contextPressure`、`tokenUsage`、`sessionStats`、`agentPreset`、`inbox` 七个键。baseline 之前的任何非 baseline 帧都是错误。
+
+**键名只出现在契约里**：`dsh-contract.ts#sessionMetrics()` 把前六个键解成 `SessionMetrics`（`title`／`agentPresetId`／`models`／`context`／`usage`／`turns`），`inboxInputs()` 解第七个，`Telemetry.metrics(id)` 按水位缓存并公开。**`SessionMetrics` 只装宿主投影**：运行态事实（`foreground`／`activity`（turn 与 loop 的合并）/`pending`／本地 `shell`）由 controller 与 UI 自己拥有，二者在 `ui/chat/status.tsx#activityText()` 汇合成状态投影（`slash.md` §5.7），状态栏与 `/status` 面板读同一份，不各自推导。UI 与 `state.ts` 因此只读语义字段——架构测试 `the ui contract and the ui never read raw host JSON` 守住这条边界，`session/transcript.ts` 的持久记录折叠与 `cost/records.ts` 的账本折叠是仅有的例外（它们解码的是记录形状，不是宿主接口）。
 
 `$events`：
 
@@ -589,7 +599,7 @@ class Transcript {
 #### 3.2.4 `Telemetry`（`src/session/telemetry.ts`）
 
 ```ts
-interface QueuedInput { id: string; placement: 'queued' | 'steering' | 'context'; text: string }
+interface QueuedInput { id: string; placement: 'queued' | 'steering' | 'context'; text: string; rpcId?: string }
 interface TelemetrySnapshot {
   readonly values: Readonly<Record<string, ProjectionValue>>
   readonly queued?: number
@@ -598,6 +608,7 @@ interface TelemetrySnapshot {
 interface TelemetryReader {
   readonly ready: boolean
   view(id?: string): TelemetrySnapshot
+  metrics(id?: string): SessionMetrics       // 投影值语义化（见 3.1.6）
   pending(id?: string): readonly Readonly<QueuedInput>[]
 }
 class Telemetry {
@@ -607,9 +618,15 @@ class Telemetry {
   accept(frame: ControlFrame): void                 // baseline / projection / queue / jobs
   snapshot(id: string, value: ProjectionSnapshot | undefined): void
   view(id?: string): TelemetrySnapshot
+  metrics(id?: string): SessionMetrics
   pending(id?: string): readonly Readonly<QueuedInput>[]
 }
 ```
+
+`inboxInputs()`（`transport/dsh-contract.ts`）把宿主 `inbox` 投影的一格摊平成同一套 `QueuedInput`，因此
+`pending()` 对 0.2 宿主与 0.1.5 之前的宿主返回同一种形状：旧宿主显式上报的 `queue` 节优先，
+`inbox` 是缺省来源；两者都没有时会话的 `queued` 保持 `undefined`（状态栏显示 `Queued ?`），
+而不是断言"没有待发输入"。
 
 `queries.telemetry` 仅公开冻结的 `reader`，不提供写入方法。投影在接收时复制并递归冻结，
 队列和条目同样复制并冻结；view 按会话缓存并随更新失效，保留的旧快照不随新帧变化。
@@ -885,7 +902,7 @@ C4Dynamic
   Rel(cli, client, "3. connect() 打开 /api/remote.mux 并等待 open")
   Rel(controller, host, "4. subscribe($events)，等待 ready 帧取得 clientId")
   Rel(controller, host, "5. subscribe(session/control)，取得 baseline")
-  Rel(telemetry, controller, "6. 替换 projections、queues、jobs 并标记 ready")
+  Rel(telemetry, controller, "6. 替换 projections（含 inbox）与兼容的 queues/jobs 并标记 ready")
   Rel(controller, host, "7. workspace/follow 与 session/list 刷新列表")
   Rel(controller, host, "8. session/modelCatalog 取得默认模型与路由")
   Rel(controller, app, "9. update online:true 触发选择器与状态栏渲染")
@@ -975,13 +992,15 @@ C4Dynamic
   Rel(host, client, "4. 成功 result 或 RemoteError")
   Rel(host, client, "5. $events waterfall：approval/request 或 user-questions/request")
   Rel(client, controller, "6. 按 eventId 存入 interactions，待答列表由当前会话推导")
-  Rel(telemetry, app, "7. session/control 的 queue 帧更新待处理预览")
+  Rel(telemetry, app, "7. session/control 的 inbox 投影更新待处理预览")
   Rel(app, controller, "8. 审批选择器、/allow、/deny 或结构化 answers")
   Rel(controller, client, "9. $events/result，outcome 为 next、result 或 rejected")
   Rel(client, host, "10. POST /api/$events/result")
 ```
 
-投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。已投递消息的排队项全部来自 `session/control`；`/queue` 的删除动作调用 `session/updateQueue`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。客户端另由 `useDeferredLines` 保留用户已提交、策略要求等回合或 Loop 结束的命令；这些命令尚未投递，断线期间继续等待，连接与会话快照恢复后才重新授权并逐条执行。
+投递语义：运行时提交即 `steer`（等待当前步骤及其工具结束），空闲时提交即 `queue`（新回合）。已投递消息的排队项来自宿主发布的 `inbox` 投影（0.1.7 之前是 `session/control` 的 `queue` 节）；`/queue` 的删除动作调用 `session/updateQueue`，条目身份就是 `inbox` 行的 `message.id`，已被领取的项会收到宿主的 not-found 错误而不是被重新投递。`placement: 'context'` 的注入项不提供删除入口。客户端另由 `useDeferredLines` 保留用户已提交、策略要求等回合或 Loop 结束的命令；这些命令尚未投递，断线期间继续等待，连接与会话快照恢复后才重新授权并逐条执行。
+
+**已提交但宿主尚未记录的行由客户端自己记住**：宿主把转向消息写入会话是在**下一个 step 开始时**（当前 step 的工具可能跑很久），所以只靠宿主上报的待发列表显示内容，在还没上报（或根本不上报队列）的宿主上会让刚敲的回车彻底不可见。`SessionController` 因此为每次算子提交生成 `requestId`，在发请求前就把它连同文本放进 `outbox`；`Transcript` 从 `user/message` 记录的 `source.rpcId` 记住已落地的身份，`inbox` 投影的行与（旧宿主的）`queue` 帧项同样带 `rpcId`。`retireOutbox()` 在每帧 follow（持久回显）与每帧 control（宿主待发列表）之后按这个身份退休条目，因此本地行与宿主记录在同一帧内交接——不重复、不留空。失败即移除；`promptInternal`（循环 Brief、handoff 等客户端自己组装的提示词）不进入 `outbox`；切换会话与重连代际都清空它。UI 只读 `queries.pendingPrompts`，在输入框上方渲染 `SubmittedPreview`。
 
 交互优先级：存在待答问题或审批时，普通提示词提交被拒绝；问题回答以 `{ id, selected, custom? }` 结构化标签在一次请求中整体提交。审批既可用 `/allow`（`allowed-once`）与 `/deny`（`rejected`）回答，也可以在选择器中作答：列出 `1. Allow once`、`2. Deny`、`3. Stop turn`，输入框为空时按数字键 1–3 直接作答，或用 ↑/↓ 移动选择后按 Enter 确认；选择 `Stop turn` 调用 `session/cancel` 而不是提交回答。列表初始不选中，从未选中状态按方向键落在第一项（不会直接落在 `Stop turn`），Esc 清除高亮；选择以 `eventId` 为键，并在请求消失或连接世代变化时清除，因此重连后重放的请求重新回到未选中。显式作答（数字键或选中后的 Enter）才提交，未作答的按键不会产生 `$events/result`。提问同样如此：单选题的数字键就是答案本身，立刻结算该题，不再要求第二次回车；多选题的数字键仍是勾选／取消勾选，Enter 才确认整组。只有固定选项带编号，`Other answer` 是输入行，因此不编号，用方向键选中后回车进入。所有列表菜单（选择器、记录列表、`@` 补全、提问选项环、参数表单）的方向键首尾相接：首行向上回到末行，末行向下回到首行。
 
@@ -1271,9 +1290,9 @@ C4Component
 
 阶段的来源有两个：助手仍在流式输出时取流式阶段；流已结束（工具正在执行）时取**当前打开回合中未被回答的 tool-call 块**，其时长为该助手消息的 `time`（保留事件也保存这个时间）。阶段是**当前事件**的名字与年龄，只在下一段工作开始或回合关闭时改变：工具回答之后、下一次增量到达之前它仍显示上一个工具，因此命令行之后的静默期仍被算作这个回合的工作时间，而 `● Ready` 不显示阶段——只有宿主知道回合已经结束。
 
-暂停（`⏸ copy`／`dialog`／`history`）时阶段**仍然显示**，只是时钟冻结——原因已说明时钟为何不动。两者都不从静默推断停滞——状态栏其余部分是 `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00(13.00)` · 回合 · token · 缓存命中率（`hit 92%`）。
+暂停（只有 `⏸ copy`）时阶段**仍然显示**，只是读数停在冻结那一刻——原因已说明它为何不动。两者都不从静默推断停滞——状态栏其余部分是 `^C` │ 模型 · effort · `ctx: ███░░░░░░░ ~30%` · `¥: 3.00(13.00)` · 回合 · token · 缓存命中率（`hit 92%`）。
 
-命中率是缓存读取占三个互斥提示侧桶（未命中输入、缓存读取、缓存写入）之和的比例；部分命中不得四舍五入成 `100%`，先增加小数位，仍显示不出就报 `<100%`。ctx 与费用各带两种读法：ctx 只在整行仍放得下时画条状，否则退回 `ctx 30%`；费用是**一个分组里的两个作用域**——`¥: 3.00(13.00)` 的 `3.00` 是本会话，括号内的 `13.00` 是今日合计；账本还没扫到本会话时第一个数如实写 `?`。两者互不替代：用一个槽位让当日总额顶替本会话费用，会让新开的会话报出当天别处的花费。宽度不足时按命中率、token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。暂停的时钟会写明原因（`⏸ copy`／`dialog`／`history`），`app.tsx` 把暂停原因并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
+命中率是缓存读取占三个互斥提示侧桶（未命中输入、缓存读取、缓存写入）之和的比例；部分命中不得四舍五入成 `100%`，先增加小数位，仍显示不出就报 `<100%`。ctx 与费用各带两种读法：ctx 只在整行仍放得下时画条状，否则退回 `ctx 30%`；费用是**一个分组里的两个作用域**——`¥: 3.00(13.00)` 的 `3.00` 是本会话，括号内的 `13.00` 是今日合计；账本还没扫到本会话时第一个数如实写 `?`。两者互不替代：用一个槽位让当日总额顶替本会话费用，会让新开的会话报出当天别处的花费。宽度不足时按命中率、token、回合、effort、模型、ctx 的顺序先丢价值最低者，费用只挪到第二行而不丢弃，状态簇在约二十列以下才让出阶段与停止提示。冻结的读数会写明原因（`⏸ copy`，唯一会停表的模式），`app.tsx` 把它并入冻结标识，状态栏同时上报自身行数以便 `/status` 的每页预算相应收缩。
 
 展开的 `/status` 面板把相关值合并成行并采用短标签（连接／活动、会话与模式、工作区、三行指标、费用与回合、排队与任务各一行），计数采用与单行状态栏相同的紧凑单位（`400.6K/1M`、`229.7M tok`），因此 46 列下常见 11 行、24 行终端一屏可显示；错误各自占行。换行与滚动仍作为小终端的兜底。
 
@@ -1288,7 +1307,8 @@ C4Component
 | 会话事件窗口（语义消息、未完成助手流） | `Transcript` | `messagesForWidth`、`thoughts`、`searchHistory`、`liveParts` | `accept`、`addPage` | `trimHistory` 按软预算回收；`dispose` 整体释放 |
 | 行缓存、偏移索引与实时尾部换行状态 | `LayoutIndex`（`WeakMap<Transcript, …>`） | `historyLayout().viewport` | 同上 | `releaseHistoryLayout` 与 `dispose`；每会话上限 2,048 行 |
 | 投影值、每键水位 | `Telemetry.entries` | `view()` | `accept`、`snapshot` | 每个连接世代重建 `Telemetry` |
-| 排队输入与活动任务计数 | `Telemetry.queues` / `Telemetry.jobs` | `pending()`、`view().jobs` | `accept` 的 `queue`/`jobs` 帧 | 新基线整体替换 |
+| 待发输入 | `Telemetry.inbox`（由 `inbox` 投影摊平）/ `Telemetry.queues`（旧宿主的 `queue` 节） | `pending()`、`view().queued` | `accept` 的 `projection`（`key: 'inbox'`）、`snapshot` 的投影基线、`queue` 帧 | 新基线整体替换；投影缺失时保持未知 |
+| 活动任务计数 | `Telemetry.jobs` | `view().jobs` | `accept` 的 `jobs` 帧 | 新基线整体替换；0.2 起宿主不再提供，读数为未知 |
 | 运行状态与观察起点 | `ConnectionController` 的 `runningUpdates`、`observedRunningAt` | `SessionController.running`、`workingSince` | `api-session/status` emit | 世代开始时清空 |
 | 待答交互 | `interactions` | `state.pending`（每次 `update` 由映射推导） | `$events` 的 `waterfall` / `cancel` | 显式应答、宿主取消或连接结束 |
 | 工作区、会话列表与归档集 | `State.workspaces/sessions`、`Client.archivedSessionIds` | `visibleSessions`、选择器 | `showPicker`、`listWorkspaces`、`listSessions` | 每次打开选择器或重连刷新 |
@@ -1315,7 +1335,7 @@ C4Component
 | 会话归档状态 | `workspace/archiveSession` 返回新的 `archivedSessionIds` |
 | 设置与凭据 | 仅消费 `settings/document-updated`、`credentials/reference-updated` 通知来刷新模型目录 |
 | 命令、计划、目标、权限 | `commands/execute` 直接调用宿主命令注册表 |
-| 排队输入与活动任务 | `session/control` 基线，`session/updateQueue` 删除 |
+| 待发输入 | `inbox` 会话投影（0.1.7 之前为 `session/control` 的 `queue` 节），`session/updateQueue` 删除 |
 | 待答问题与审批 | `$events` 的 `waterfall`，以 `$events/result` 应答 |
 
 ### 5.5 数据、功能与访问事件流对照
@@ -1609,7 +1629,7 @@ export interface SessionInfo {
 
 `README.md` 与 `README.zh.md` 是逐行对齐的双语对：每个标题、段落、列表项、表格行与代码块在两侧占同一物理行；`README.i18n.yaml` 记录评审过的 git blob 哈希。修订任一侧都必须在同一位置改另一侧，并重新记录哈希。表格行之间不得有空行，否则 GitHub 与 npm 不再渲染为表格。
 
-内容分工：`README.md`／`README.zh.md` 面向使用者与贡献者的操作说明；本文件是**维护者**的架构与接口基线，`README` 中的同批事实若与本文件冲突，以本文件为准。`tui-refactor-plan.md` 是已实施的分层重构方案记录（状态见其文件头），`cost.md` 是计费方案的评审稿，两者的架构结论都以本文件为准。`tui/` 没有独立的 `CONTRIBUTING.md`：贡献与验证流程的事实源是本文件的 7.4（提交、版本与发布）、7.5（测试与验证）与 7.7（变更检查清单）。`loop.md` 是 `/loop <name>`（含 `design-review` 与 `designdoc-review` 两条记录）这条验证路径的设计记录：该路径的机制、verdict 文件契约与失败语义以它为准，本文 3.2／3.4 只记它与门面、UI 相接的接口面；`tui/` 架构分层、贡献与发布流程、计费与宿主协议字段仍以本文及各自文档为准。
+内容分工：`README.md`／`README.zh.md` 面向使用者与贡献者的操作说明；本文件是**维护者**的架构与接口基线，`README` 中的同批事实若与本文件冲突，以本文件为准。`tui-refactor-plan.md` 是已实施的分层重构方案记录（状态见其文件头），`dsh-adapter-plan.md` 是把宿主接口收进 `transport/` 的**待实施方案**（proposed，含宿主升级 SOP；与本文件 3.1 的协议字段冲突时以本文件记录的现行行为为准），`cost.md` 是计费方案的评审稿，三者的架构结论都以本文件为准。`tui/` 没有独立的 `CONTRIBUTING.md`：贡献与验证流程的事实源是本文件的 7.4（提交、版本与发布）、7.5（测试与验证）与 7.7（变更检查清单）。`loop.md` 是 `/loop <name>`（含 `design-review` 与 `designdoc-review` 两条记录）这条验证路径的设计记录：该路径的机制、verdict 文件契约与失败语义以它为准，本文 3.2／3.4 只记它与门面、UI 相接的接口面；`tui/` 架构分层、贡献与发布流程、计费与宿主协议字段仍以本文及各自文档为准。
 
 本文件（`tui/tui-design.md`）位于 `tui` 仓库根目录，与源码同仓，但不在父仓库文档门禁（翻译配对、`verify-mermaid`、`verify-md-links`、`verify-md-wrap`）的扫描范围内，也不进入 `tui` 包的发布集合（`package.json` 的 `files`）。它是单语技术文档，因此不参与 README 的双语配对。
 
@@ -1779,7 +1799,9 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `transport/auth.ts` | `AuthenticationRequired`、`CookieStore`、`login` |
 | `transport/client.ts` | `HttpError`、`RemoteError`、`Subscription`、`Client` |
 | `transport/endpoint.ts` | `Endpoint`、`endpoint` |
-| `transport/events.ts` | `QuestionOption`、`QuestionItem`、`HostEvent`、`QueuedInput`、`ProjectionValue`、`ProjectionSnapshot`、`ControlFrame`、`projectionSnapshot`、`controlFrame`、`hostEvent` |
+| `transport/events.ts` | `QuestionOption`、`QuestionItem`、`HostEvent`、`QueuedInput`、`ProjectionValue`、`ProjectionSnapshot`、`ControlFrame`、`projectionSnapshot`、`controlFrame`、`hostEvent`、`readyClientId` |
+| `transport/dsh-contract.ts` | 宿主接口契约：`sessionRow(s)`、`workspaceBaseline/Row`、`pageResult`、`searchResult`、`modelCatalog`、`presetRows`、`commandExecution`、`fileReferenceCandidates`、`followFrame`、`inboxInputs`、`sessionMetrics` 及各请求/结果类型 |
+| `transport/dsh.ts` | 宿主调用门面：`createSession`、`renameSession`、`searchSessions`、`page`、`prompt`、`cancel`、`updateQueue`、`readModelCatalog`、`selectModel`、`presets`、`fileReferences`、`executeCommand`、`createWorkspace`、`deleteWorkspace`、`archiveSession`、`follow`、`stream`、`eventResult` |
 | `transport/host.ts` | `HostAccess` |
 | `transport/wire.ts` | `array`、`object`、`string`、`errorText`、`safeText` |
 
@@ -1801,7 +1823,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `session/references.ts` | `fileReferences` |
 | `session/runtime.ts` | `SessionRuntime` |
 | `session/telemetry.ts` | `Telemetry` |
-| `session/transcript.ts` | `contentText`、`eventPrompt`、`recordPrompts`、`MessagePart`、`LivePhase`、`Message`、`ThoughtEntry`、`Transcript` |
+| `session/transcript.ts` | `contentText`、`eventPrompt`、`recordPrompts`、`MessagePart`、`LivePhase`、`Message`、`ThoughtEntry`、`Transcript`（含 `hasPromptRpc`） |
 | `session/types.ts` | `RemovalTarget`、`HistorySearch`、`AnswerValue`、`PendingInteraction` |
 
 **cost**
@@ -1878,7 +1900,7 @@ CI 工作流 `.github/workflows/publish.yml`：
 | `ui/chat/viewport.tsx` | `ChatViewport` |
 | `ui/copy-mode.ts` | `CopyMode`、`useCopyMode` |
 | `ui/dialogs/cost.tsx` | `CostLine`、`CostSource`、`CostPanel` |
-| `ui/dialogs/index.tsx` | `QueueDialog`、`PromptsDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`OfflinePanel`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview` |
+| `ui/dialogs/index.tsx` | `QueueDialog`、`PromptsDialog`、`RemovalDialog`、`ModelDialog`、`SearchResultsDialog`、`PickerScreen`、`OfflinePanel`、`ThoughtsDialog`、`HistoryDialog`、`HelpPanel`、`QueuedPreview`、`SubmittedPreview` |
 | `ui/dialogs/picker.tsx` | `ChoiceCell`、`Choice`、`cycle`、`Picker` |
 | `ui/frozen.tsx` | `Frozen` |
 | `ui/input/input.tsx` | `EditState`、`editInput`、`TextInput` |

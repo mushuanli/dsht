@@ -3,7 +3,7 @@ import { SessionInfo } from './session/info.ts';
 import type { HistorySearch, RemovalTarget } from './session/types.ts';
 import type { SessionState } from './session/state.ts';
 import type { ShellSnapshot } from './shell/index.ts';
-import type { ObjectValue } from './transport/wire.ts';
+import type { ModelSelection, PresetRow, SessionRow, WorkspaceRow } from './transport/dsh.ts';
 
 /** State shared by the picker and conversation view. */
 export interface State extends SessionState {
@@ -18,8 +18,8 @@ export interface State extends SessionState {
   controlError?: string;
   modelError?: string;
   presetError?: string;
-  presets?: ObjectValue[];
-  defaultModel?: ObjectValue;
+  presets?: PresetRow[];
+  defaultModel?: ModelSelection;
   /** Local `!` runs, published so the UI never reads the shell service object. */
   shell: ShellSnapshot;
 }

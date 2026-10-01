@@ -1,7 +1,8 @@
 /** Event/control subscriptions and their startup deadlines belong to one connection generation. */
-import { Client, RemoteError, type Subscription } from '../transport/client.ts';
-import { controlFrame, hostEvent, type HostEvent } from '../transport/events.ts';
+import { Client, RemoteError, type Listener, type Subscription } from '../transport/client.ts';
+import { controlFrame, hostEvent, readyClientId, type HostEvent } from '../transport/events.ts';
 import { errorText, object, string, type Json } from '../transport/wire.ts';
+import { eventResult, subscribeControl, subscribeEvents } from '../transport/dsh.ts';
 
 export interface StreamHost {
   identified(clientId: string): void;
@@ -24,22 +25,22 @@ export class ConnectionStreams {
 
   async start(): Promise<void> {
     let clientId = '';
-    await this.follow('$events', 'Host ready timed out', value => {
-      const frame = object(value);
-      if (frame.type === 'ready') {
-        clientId = string(frame.clientId);
+    await this.follow(listener => subscribeEvents(this.client, listener), 'Host ready', value => {
+      const ready = readyClientId(value);
+      if (ready !== undefined) {
+        clientId = ready;
         this.host.identified(clientId);
         return true;
       }
-      const event = hostEvent(frame);
+      const event = hostEvent(value);
       if (event && !this.host.event(event) && 'eventId' in event) {
         // Unknown waterfalls still need a result so the host's event chain can continue.
-        void this.client.call('$events/result', { clientId, eventId: event.eventId, outcome: { kind: 'next' } })
+        void eventResult(this.client, clientId, event.eventId, { kind: 'next' })
           .catch(error => this.host.fail(new Error(errorText(error))));
       }
       return false;
     });
-    await this.follow('session/control', 'Session control baseline timed out', value => {
+    await this.follow(listener => subscribeControl(this.client, listener), 'Session control baseline', value => {
       try {
         this.host.event({ kind: 'control', frame: controlFrame(value) });
         this.host.changed();
@@ -69,8 +70,13 @@ export class ConnectionStreams {
     this.subscriptions.clear();
   }
 
-  /** Resolve the first usable frame while retaining the stream until this generation ends. */
-  private follow(endpoint: string, timeout: string, item: (value: Json | undefined) => boolean,
+  /** Resolve the first usable frame while retaining the stream until this generation ends.
+   *
+   * The starter is a facade function rather than an endpoint name, so this file cannot open a
+   * capability that has no row in `transport/endpoints.ts`; the timeout label is the only name it
+   * still carries, and it is used for messages rather than for routing.
+   */
+  private follow(start: (listener: Listener) => Subscription, label: string, item: (value: Json | undefined) => boolean,
     unavailable?: (error: Error | undefined) => boolean): Promise<void> {
     this.signal.throwIfAborted();
     return new Promise((resolve, reject) => {
@@ -83,10 +89,10 @@ export class ConnectionStreams {
         if (error === undefined) resolve(); else reject(error);
       };
       const cancelled = () => finish(this.signal.reason);
-      const timer = setTimeout(() => finish(new Error(timeout)), this.client.timeoutMs);
+      const timer = setTimeout(() => finish(new Error(`${label} timed out`)), this.client.timeoutMs);
       this.signal.addEventListener('abort', cancelled, { once: true });
       try {
-        const subscription = this.client.subscribe(endpoint, {}, {
+        const subscription = start({
           item: value => {
             if (this.signal.aborted) return;
             if (item(value)) finish();
@@ -94,7 +100,7 @@ export class ConnectionStreams {
           end: error => {
             if (this.signal.aborted) return;
             if (unavailable?.(error)) { finish(); return; }
-            const reason = error ?? new Error(`${endpoint} stream ended`);
+            const reason = error ?? new Error(`${label} stream ended`);
             finish(reason); this.host.fail(reason);
           },
         });

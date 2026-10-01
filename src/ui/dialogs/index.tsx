@@ -1,8 +1,7 @@
 /** Modal panels and list screens rendered inside the shared composer frame. */
 import { Box, Text } from 'ink';
-import { array, object, string, type ObjectValue } from '../../json.ts';
 import { safeText } from '../../text.ts';
-import { type Message, type SavedPrompt } from '../../contracts.ts';
+import { type CatalogModel, type Message, type SavedPrompt, type SearchItem } from '../../contracts.ts';
 import { toolLine } from '../../text.ts';
 import type { HistorySearch, RemovalTarget } from '../../contracts.ts';
 import type { QueuedInput } from '../../contracts.ts';
@@ -91,26 +90,26 @@ export type { ModelState };
 export function ModelDialog({ models, rows, width, enabled, canSelect, onChoose, onOpen, onBack, onClose }: {
   models: ModelState; rows: number; width: number; enabled: boolean; canSelect(): boolean;
   onChoose(provider: string, model: string, effort?: string): void;
-  onOpen(provider: string, model: ObjectValue): void;
+  onOpen(provider: string, model: CatalogModel): void;
   onBack(): void; onClose(): void;
 }) {
   const theme = useTheme();
   return <Box flexDirection="column" marginY={1}>
     <Text bold>{models.model ? 'Choose reasoning effort' : 'Choose model'}</Text>
     <Text dimColor>Applies to subsequent requests; host also saves the default.</Text>
-    {array(models.catalog.failures).map(object).map(failure => <Text key={string(failure.id)} color={theme.colors.error}>{safeText(`${failure.name}: ${failure.message}`)}</Text>)}
+    {models.catalog.failures.map(failure => <Text key={failure.id} color={theme.colors.error}>{safeText(`${failure.name}: ${failure.message}`)}</Text>)}
     <Picker key={models.model ? `${models.provider}:${models.model.id}` : 'models'} pageSize={Math.max(1, Math.min(8, rows - 15))}
       choices={models.model ? [
-        { key: 'default', label: `Default effort${object(models.model.reasoning).defaultEffort ? ` · ${string(object(models.model.reasoning).defaultEffort)}` : ''}`,
-          action: () => onChoose(models.provider!, string(models.model!.id)) },
-        ...array(object(models.model.reasoning).efforts).map(object).map(effort => ({ key: string(effort.id), label: toolLine(`${effort.name} (${effort.id})${effort.description ? ` · ${effort.description}` : ''}`, width - 2),
-          action: () => onChoose(models.provider!, string(models.model!.id), string(effort.id)) })),
+        { key: 'default', label: `Default effort${models.model.defaultEffort ? ` · ${models.model.defaultEffort}` : ''}`,
+          action: () => onChoose(models.provider!, models.model!.id) },
+        ...models.model.reasoningEfforts.map(effort => ({ key: effort.id, label: toolLine(`${effort.name} (${effort.id})${effort.description ? ` · ${effort.description}` : ''}`, width - 2),
+          action: () => onChoose(models.provider!, models.model!.id, effort.id) })),
         { key: 'back', label: '← Models', action: onBack },
       ] : [
-        ...array(models.catalog.groups).map(object).flatMap(group => array(group.models).map(object).map(model => ({
+        ...models.catalog.groups.flatMap(group => group.models.map(model => ({
           key: `${group.id}:${model.id}`, label: toolLine(`${group.name} · ${model.name} (${model.id})`, width - 2),
-          action: () => { if (array(object(model.reasoning ?? { efforts: [] }).efforts).length) onOpen(string(group.id), model);
-            else onChoose(string(group.id), string(model.id)); },
+          action: () => { if (model.reasoningEfforts.length) onOpen(group.id, model);
+            else onChoose(group.id, model.id); },
         }))),
         { key: 'close', label: '← Back to conversation', action: onClose },
       ]} enabled={enabled} canSelect={canSelect} />
@@ -122,7 +121,7 @@ export function ModelDialog({ models, rows, width, enabled, canSelect, onChoose,
  * @returns The session-search picker.
  */
 export function SearchResultsDialog({ query, items, hasMore, width, enabled, canSelect, onOpen, onClose }: {
-  query: string; items: readonly ObjectValue[]; hasMore: boolean; width: number;
+  query: string; items: readonly SearchItem[]; hasMore: boolean; width: number;
   enabled: boolean; canSelect(): boolean; onOpen(sessionId: string): void; onClose(): void;
 }) {
   const theme = useTheme();
@@ -130,9 +129,9 @@ export function SearchResultsDialog({ query, items, hasMore, width, enabled, can
     <Text bold>Session search · {safeText(query)}</Text>
     {hasMore && <Text color={theme.colors.context}>Host returned only the first 20 global matches; workspace results may be incomplete. Refine your query.</Text>}
     {!items.length && <Text>No sessions in the returned results</Text>}
-    <Picker choices={[...items.map(item => ({ key: string(item.sessionId),
+    <Picker choices={[...items.map(item => ({ key: item.sessionId,
       label: toolLine(`${item.sessionId} · ${item.snippet}`, width - 2),
-      action: () => onOpen(string(item.sessionId)) })), { key: 'close', label: '← Back', action: onClose }]}
+      action: () => onOpen(item.sessionId) })), { key: 'close', label: '← Back', action: onClose }]}
       enabled={enabled} canSelect={canSelect} />
   </Box>;
 }
@@ -238,5 +237,21 @@ export function QueuedPreview({ queued, width }: { queued: readonly QueuedInput[
   return <Box flexDirection="column" flexShrink={0}>
     <Text dimColor>Waiting: {queued.length} · /queue to remove</Text>
     {queued.slice(0, 2).map(item => <Text key={item.id} dimColor wrap="truncate-end">{item.placement === 'steering' ? '↳ ' : '· '}{safeText(toolLine(item.text, width - 6))}</Text>)}
+  </Box>;
+}
+
+/** Prompts this client sent that the host has not written into the selected session yet.
+ *
+ * A steering message is appended to the session only at the next step boundary, so between Enter
+ * and that boundary the operator's own line would otherwise be nowhere on screen. Each row leaves
+ * the moment the durable echo — or a host that reports its queue — names the same submission, so
+ * this never duplicates the conversation.
+ * @param props - Pending submissions and available columns.
+ * @returns Up to two rows naming what is still in flight.
+ */
+export function SubmittedPreview({ items, width }: { items: readonly { requestId: string; text: string }[]; width: number }) {
+  return <Box flexDirection="column" flexShrink={0}>
+    <Text dimColor>Sent · waiting for the host to record it</Text>
+    {items.slice(0, 2).map(item => <Text key={item.requestId} dimColor wrap="truncate-end">↳ {safeText(toolLine(item.text, width - 6))}</Text>)}
   </Box>;
 }

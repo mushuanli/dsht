@@ -3,7 +3,6 @@ import { costText } from '../../src/ui/status/model.ts';
 import type { CostTotal } from '../../src/contracts.ts';
 import type { Controller } from '../../src/controller/controller.ts';
 import type { StatusSource } from '../../src/ui/chat/status.tsx';
-import { string } from '../../src/json.ts';
 
 /** Build a `StatusSource` from a controller, exactly as `ui/app.tsx` does. */
 export function statusSource(controller: Controller): StatusSource {
@@ -19,11 +18,13 @@ export function statusSource(controller: Controller): StatusSource {
     running: controller.queries.running,
     ...(activity === undefined ? {} : { activity }),
     sessionId: state.sessionId, sessionMode: controller.queries.sessionMode,
-    workspaceLabel: workspace ? `${string(workspace.title)} · ${string(workspace.path)}` : 'none selected',
+    workspaceLabel: workspace ? `${workspace.title} · ${workspace.path}` : 'none selected',
     activeTurnStartedAt: state.session.record.activeTurnStartedAt,
     pendingCount: state.pending.length,
     ...(state.session.record.livePhase === undefined ? {} : { livePhase: state.session.record.livePhase }),
-    values: view.values, queued: view.queued, jobs: view.jobs,
+    metrics: controller.queries.telemetry.metrics(state.sessionId), queued: view.queued, jobs: view.jobs,
+    ...(controller.queries.foreground === undefined ? {} : { foreground: { label: controller.queries.foreground.label } }),
+    shell: { running: state.shell.running },
     ...(state.defaultModel === undefined ? {} : { defaultModel: state.defaultModel }),
     ...(ledger === undefined ? {} : { cost: {
       sessionText: session === undefined ? '?' : costText(session),

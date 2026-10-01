@@ -2,7 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCommand, loopNameQuery, validLoopOption } from '../../src/slash/parse.ts';
-import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, argumentHint, commandMatches, resolveCommand, suggestedCommands } from '../../src/slash/registry.ts';
+import { readFileSync } from 'node:fs';
+import { COMMAND_HINTS, COMMAND_POLICY, COMMANDS, argumentHint, commandMatches, policyFor, resolveCommand, suggestedCommands } from '../../src/slash/registry.ts';
 import { interpret, normalize, authorize, type LineCommand, type UiAction } from '../../src/slash/pipeline.ts';
 
 /** Front-end and application facts a test may vary; the defaults describe a live chat screen. */
@@ -11,11 +12,10 @@ interface Facts {
   screen?: 'workspaces' | 'sessions' | 'chat' | 'path';
   question?: boolean; pending?: boolean; sessionSelected?: boolean;
   during?: 'idle' | 'turn' | 'loop';
-  foreground?: boolean;
 }
 const chat: Required<Omit<Facts, 'screen'>> & { screen: 'workspaces' | 'sessions' | 'chat' | 'path' } = {
   referenceOpen: false, copyMode: false, screen: 'chat', question: false, pending: false, sessionSelected: true,
-  during: 'idle', foreground: false,
+  during: 'idle',
 };
 /** The three stages in order: a line's mode, or the command (or refusal) it becomes. */
 function stages(line: string, extra: Facts = {}) {
@@ -24,7 +24,7 @@ function stages(line: string, extra: Facts = {}) {
   if (submission.kind === 'mode') return { submission };
   const command = normalize(submission, { sessionSelected: facts.sessionSelected, question: facts.question, pending: facts.pending });
   const verdict = authorize(command, { sessionSelected: facts.sessionSelected, pending: facts.pending,
-    during: facts.during, foreground: facts.foreground });
+    during: facts.during });
   return { submission, command, verdict };
 }
 /** The command a line executes, or the error a refused line produces. */
@@ -101,27 +101,53 @@ test('a running turn or loop queues the operator\'s own writes and refuses the r
     { kind: 'error', message: 'Answer the pending question or approval first' });
 });
 
-test('the foreground slot is authorize\'s business, with a reason and one control exception', () => {
-  // A second line while something owns the slot is refused with a reason instead of being dropped in
-  // silence by whichever front end noticed first.
-  assert.deepEqual(route('/compact', { foreground: true }),
-    { kind: 'error', message: 'Wait for the running operation to finish' });
-  assert.deepEqual(route('/help', { foreground: true }),
-    { kind: 'error', message: 'Wait for the running operation to finish' });
-  assert.deepEqual(route('hello', { foreground: true }),
-    { kind: 'error', message: 'Wait for the running operation to finish' });
-  // The commands that answer the operator or the host are admitted through: they exist to interrupt
-  // or settle what owns the slot, and waiting for an export before stopping the agent would be absurd.
-  assert.deepEqual(route('/loop stop', { foreground: true }), { kind: 'loopStop' });
-  assert.deepEqual(route('/cancel', { foreground: true }), { kind: 'cancel' });
-  assert.deepEqual(route('/allow', { foreground: true }), { kind: 'approval', allowed: true });
-  // A line the policy queues behind a turn is decided by that fact: the slot being busy right now says
-  // nothing about whether it should run, and the held line waits for both.
-  assert.equal(defer('/compact', { during: 'turn', foreground: true }), 'turn');
-  // A fact the policy refuses is refused whoever else is busy; the message names what to stop.
-  assert.deepEqual(route('/loop', { during: 'loop', foreground: true }),
-    { kind: 'error', message: 'Stop the running loop first' });
-  assert.deepEqual(route('/loop stop', { during: 'loop', foreground: true }), { kind: 'loopStop' });
+test('authorize never reads the foreground slot, because the slot is claimed at execution time', () => {
+  // The old pipeline refused every kind but a short list while the slot was busy. That made `authorize`
+  // predict an execution path it cannot see, and the check raced the acquisition it duplicated. The
+  // slot now decides in `ForegroundSlot.run` (the claim and the check are one step), and a refused
+  // claim reports why through the application's failure channel.
+  assert.equal('foreground' in (chat as object), false);
+  // What authorize still decides: the semantic facts a command declared.
+  assert.deepEqual(route('/loop', { during: 'turn' }), { kind: 'error', message: 'Wait for the running turn to finish' });
+  assert.deepEqual(route('/compact', { during: 'turn' }), { kind: 'compact' });
+  assert.equal(defer('/compact', { during: 'turn' }), 'turn');
+  // What it no longer decides: nothing about the client's own display slot. Every line whose policy
+  // allows it passes here; whether it can be *shown* now is answered when it claims the slot.
+  for (const line of ['/compact', '/help', 'hello', '/loop stop', '/cancel', '/allow']) {
+    assert.notDeepEqual(route(line, { during: 'idle' }), { kind: 'error', message: 'Wait for the running operation to finish' });
+  }
+  assert.deepEqual(route('/cancel'), { kind: 'cancel' });
+  assert.deepEqual(route('/allow'), { kind: 'approval', allowed: true });
+});
+
+test('a catalog kind without a declared policy is fail-closed, not unconstrained', () => {
+  // A new command that forgot its policy must not quietly run inside another writer's turn. The two
+  // operator channels and the syntax-error line are the only kinds with no catalog entry.
+  // A kind nothing declared is refused while the conversation is busy, rather than running inside
+  // another writer's turn.
+  assert.deepEqual(policyFor('notACommand'), { duringTurn: 'deny', duringLoop: 'deny' });
+  assert.deepEqual(policyFor('prompt'), {});
+  assert.deepEqual(policyFor('answer'), {});
+  assert.deepEqual(policyFor('path'), {});
+  assert.deepEqual(policyFor('error'), {});
+  // The completeness rule the table relies on: every catalog kind declares its policy explicitly, so
+  // "what may this do while busy" is always an answer someone wrote down. Reading the union's source
+  // keeps the check honest without a runtime enum.
+  const kinds = new Set([...readFileSync(new URL('../../src/slash/types.ts', import.meta.url), 'utf8')
+    .matchAll(/kind: '([A-Za-z][A-Za-z]*)'/g)].map(match => match[1]!));
+  assert.ok(kinds.size > 20, `expected the command union, found ${kinds.size} kinds`);
+  const uncatalogued = new Set(['ignore', 'prompt', 'answer', 'path', 'error']);
+  for (const kind of kinds) {
+    if (uncatalogued.has(kind)) continue;
+    assert.notEqual((COMMAND_POLICY as Record<string, unknown>)[kind], undefined,
+      `${kind} is a catalog kind and must declare its policy`);
+  }
+  // The reads and answers the operator relies on while work is in flight are never refused by the
+  // busy fact: a declared entry with no `during*` field means "no constraint", and 'run' says it aloud.
+  for (const kind of ['cancel', 'approval', 'loopStop', 'loopAnswer', 'think', 'panel', 'copy', 'latest', 'older', 'history']) {
+    assert.notEqual(policyFor(kind).duringTurn, 'deny', `${kind} must stay usable while a turn runs`);
+    assert.notEqual(policyFor(kind).duringLoop, 'deny', `${kind} must stay usable while a loop runs`);
+  }
 });
 
 test('/coredump is advertised with its optional tag', () => {
@@ -161,10 +187,11 @@ test('routing constraints live on the command, so the router enumerates no kinds
   // and the host keeps deciding for its own registered commands.
   assert.deepEqual(COMMAND_POLICY.compact, { requiresSession: true, duringTurn: 'queue', duringLoop: 'queue' });
   assert.deepEqual(COMMAND_POLICY.models, { requiresSession: true });
-  assert.deepEqual(COMMAND_POLICY.cancel, { duringTurn: 'run', duringLoop: 'run', whileBusy: 'run' });
-  // A kind with no policy runs anywhere, even while an answer is pending.
-  assert.equal(COMMAND_POLICY.savePrompt, undefined);
-  assert.equal(COMMAND_POLICY.coredump, undefined);
+  assert.deepEqual(COMMAND_POLICY.cancel, { duringTurn: 'run', duringLoop: 'run' });
+  // Local writes and view changes declare themselves as such instead of relying on an absent entry,
+  // because an absent entry is now fail-closed.
+  assert.deepEqual(COMMAND_POLICY.savePrompt, { duringTurn: 'run', duringLoop: 'run' });
+  assert.deepEqual(COMMAND_POLICY.coredump, { duringTurn: 'run', duringLoop: 'run' });
 });
 
 test('/handoff takes no arguments and waits for a pending answer', () => {
@@ -235,7 +262,7 @@ test('/loop takes a record name, an optional positional score and tries, and the
   assert.deepEqual(parseCommand('/loop stop 9'), { kind: 'error', message: 'Use /loop stop (no arguments)' });
   assert.deepEqual(parseCommand('/loop stop --to 3'), { kind: 'error', message: 'Use /loop stop (no arguments)' });
   assert.deepEqual(COMMAND_POLICY.loopStop, { requiresSession: true, control: true,
-    whileBusy: 'run', duringTurn: 'run', duringLoop: 'run' });
+    duringTurn: 'run', duringLoop: 'run' });
   // The control lane is what lets `/loop stop` reach the application while the run owns the composer.
   // The control lane is data on the command: `authorize` is what reads it (see the busy case below).
   assert.equal(COMMAND_POLICY.loopStop?.control, true);
