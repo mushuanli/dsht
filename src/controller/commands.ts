@@ -312,6 +312,7 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
       // decision is made; only a bare known record leaves every default open for the form.
       const decided = command.options.from !== undefined || command.options.to !== undefined
         || command.options.score !== undefined || command.options.tries !== undefined
+        || command.options.autoCompactK !== undefined
         || Object.keys(vars).length > 0;
       if (port.interactive === true && !decided) {
         controller.traceNote('loop', { phase: 'form', name: command.name });
@@ -335,10 +336,13 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
       // A record that starts by verifying (`starts: verify`) already created that session inside
       // `startLoop`, so the bar takes the newest one now and later checks re-point it through `link`.
       const checking = controller.queries.sources.find(source => source.createdBy === 'verifier' && source.state === 'running');
-      controller.shell.note(`/loop ${command.name} ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries`,
+      // Auto-compaction is part of what this run will do to the session, so the line that announces it
+      // says so; a run that never compacts (the default) says nothing extra.
+      const auto = limits.autoCompactK === 0 ? '' : ` · auto compact ${limits.autoCompactK}K tokens`;
+      controller.shell.note(`/loop ${command.name} ${limits.from}–${limits.to} · pass ${limits.score}/10 · ≤${limits.tries} tries${auto}`,
         checking?.id);
       return ok([{ kind: 'closePanels' }, { kind: 'live' }, { kind: 'scroll', position: 0 },
-        { kind: 'notice', text: `${protocol.title} started · steps ${limits.from}–${limits.to} · pass ${limits.score} · ≤${limits.tries} tries` }]);
+        { kind: 'notice', text: `${protocol.title} started · steps ${limits.from}–${limits.to} · pass ${limits.score}/10 · ≤${limits.tries} tries${auto}` }]);
     }
     default: return undefined;
   }

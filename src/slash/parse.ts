@@ -9,20 +9,26 @@ import { commandMatches, resolveCommand } from './registry.ts';
 import type { Command, LoopOptions } from './types.ts';
 export type { Command, LoopOptions } from './types.ts';
 
-/** The numeric options a flag can carry; `vars` is not one, so it stays out of the flag table. */
-type LoopNumberOption = 'from' | 'to' | 'score' | 'tries';
+/** The numeric options a run takes; `vars` is not one, so it stays out of the flag table. */
+type LoopNumberOption = 'from' | 'to' | 'score' | 'tries' | 'autoCompactK';
 
-/** How each loop flag names an option and validates its value. */
-const LOOP_FLAGS: Readonly<Record<string, { key: LoopNumberOption; valid: (value: number) => boolean }>> = {
-  '--from': { key: 'from', valid: value => Number.isSafeInteger(value) && value >= 1 },
-  '--to': { key: 'to', valid: value => Number.isSafeInteger(value) && value >= 1 },
-  '--score': { key: 'score', valid: value => Number.isFinite(value) && value >= 0 && value <= 10 },
-  '--tries': { key: 'tries', valid: value => Number.isSafeInteger(value) && value >= 1 },
+/** How each loop number is validated, wherever it is entered.
+ *
+ * One table serves the command line and the interactive form, so a value the form accepts is exactly
+ * one the syntax would have accepted if it had a flag — and `autoCompactK` has none: only the form
+ * confirms it, which is why it is validated here rather than parsed below.
+ */
+const LOOP_VALIDATORS: Readonly<Record<LoopNumberOption, (value: number) => boolean>> = {
+  from: value => Number.isSafeInteger(value) && value >= 1,
+  to: value => Number.isSafeInteger(value) && value >= 1,
+  score: value => Number.isFinite(value) && value >= 0 && value <= 10,
+  tries: value => Number.isSafeInteger(value) && value >= 1,
+  autoCompactK: value => Number.isSafeInteger(value) && value >= 0,
 };
 
-/** The flag that carries one option, so a form keyed by option validates with the same rule. */
-const LOOP_OPTION_FLAGS: Readonly<Record<LoopNumberOption, string>> = {
-  from: '--from', to: '--to', score: '--score', tries: '--tries',
+/** The flags the command line offers, and the option each one sets. */
+const LOOP_FLAGS: Readonly<Record<string, LoopNumberOption>> = {
+  '--from': 'from', '--to': 'to', '--score': 'score', '--tries': 'tries',
 };
 
 /** Whether one numeric value is acceptable for one loop option.
@@ -34,7 +40,7 @@ const LOOP_OPTION_FLAGS: Readonly<Record<LoopNumberOption, string>> = {
  * @returns True when the option may carry that value.
  */
 export function validLoopOption(key: LoopNumberOption, value: number): boolean {
-  return LOOP_FLAGS[LOOP_OPTION_FLAGS[key]]!.valid(value);
+  return LOOP_VALIDATORS[key](value);
 }
 
 /** The record name the composer is currently typing after `/loop`, if any.
@@ -96,21 +102,21 @@ function loopCommand(value: string): Command {
   for (let index = 1; index < words.length; index += 1) {
     const word = words[index]!;
     if (word.startsWith('--')) {
-      const spec = LOOP_FLAGS[word];
+      const key = LOOP_FLAGS[word];
       const raw = words[index + 1];
-      if (spec === undefined || raw === undefined) return { kind: 'error', message: LOOP_USAGE };
+      if (key === undefined || raw === undefined) return { kind: 'error', message: LOOP_USAGE };
       const number = Number(raw);
-      if (!spec.valid(number)) return { kind: 'error', message: LOOP_USAGE };
-      options[spec.key] = number;
+      if (!validLoopOption(key, number)) return { kind: 'error', message: LOOP_USAGE };
+      options[key] = number;
       index += 1;
       continue;
     }
     // Two optional positionals: the passing score, then the attempt budget.
     const number = Number(word);
     if (positionals > 1) return { kind: 'error', message: LOOP_USAGE };
-    const spec = positionals === 0 ? LOOP_FLAGS['--score']! : LOOP_FLAGS['--tries']!;
-    if (!spec.valid(number)) return { kind: 'error', message: LOOP_USAGE };
-    options[spec.key] = number;
+    const key: LoopNumberOption = positionals === 0 ? 'score' : 'tries';
+    if (!validLoopOption(key, number)) return { kind: 'error', message: LOOP_USAGE };
+    options[key] = number;
     positionals += 1;
   }
   return { kind: 'loop', name, options };

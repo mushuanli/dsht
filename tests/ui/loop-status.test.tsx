@@ -9,7 +9,7 @@ import type { LoopProgress } from '../../src/contracts.ts';
 
 const PROGRESS: LoopProgress = {
   runId: 'run-1', title: 'Design review', startedAt: Date.now(), active: true,
-  from: 1, to: 10, total: 10, scope: 'rounds 1–10/10', score: 8, tries: 10,
+  from: 1, to: 10, total: 10, scope: 'rounds 1–10/10', score: 8, tries: 10, autoCompactK: 0,
   step: 3, attempt: 2, best: 7.5, phase: 'running',
 };
 
@@ -56,6 +56,12 @@ test('another protocol renders through the same line', () => {
 test('a live sub-state without a host turn of its own is named', () => {
   const ui = render(<LoopStatus progress={{ ...PROGRESS, activity: 'verify' }} />);
   try { assert.equal(ui.lastFrame(), 'Design review · step 3/10 · attempt 2/10 · best 7.5/8 · verify'); }
+  finally { ui.unmount(); ui.cleanup(); }
+});
+
+test('a run that will compact its own history says at what size', () => {
+  const ui = render(<LoopStatus progress={{ ...PROGRESS, autoCompactK: 150 }} />);
+  try { assert.equal(ui.lastFrame(), 'Design review · step 3/10 · attempt 2/10 · best 7.5/8 · auto 150K tok'); }
   finally { ui.unmount(); ui.cleanup(); }
 });
 

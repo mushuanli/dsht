@@ -179,8 +179,9 @@ export function runtimeActivity(source: StatusSource): RuntimeActivity {
 }
 
 /** One word for what a running loop is waiting on. */
-function loopActivityText(activity: 'turn' | 'verify' | 'settle'): string {
-  return activity === 'verify' ? 'Verifying' : activity === 'settle' ? 'Settling' : 'Agent';
+function loopActivityText(activity: 'turn' | 'verify' | 'settle' | 'compact'): string {
+  return activity === 'verify' ? 'Verifying' : activity === 'settle' ? 'Settling'
+    : activity === 'compact' ? 'Compacting' : 'Agent';
 }
 
 /** Cache-hit share of billed prompt input, without reporting a partial hit as a full one.

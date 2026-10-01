@@ -45,7 +45,7 @@ test('the loop sends the brief, advances on a passing score and stops on a faili
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  assert.equal(await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 }), true);
+  assert.equal(await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 }), true);
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The opening send is the scoped brief, not a follow-up.
   assert.match(lastPrompt(fixture), /只执行第 1 轮的第 1 次尝试/);
@@ -55,7 +55,7 @@ test('the loop sends the brief, advances on a passing score and stops on a faili
   assert.ok(startedAt > 0);
   assert.ok(runId.length > 0);
   assert.deepEqual(progress, {
-    title: 'Design review', from: 1, to: 2, score: 8, tries: 2, total: 10, scope: 'rounds 1–2/10 · selected range',
+    title: 'Design review', from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0, total: 10, scope: 'rounds 1–2/10 · selected range',
     step: 1, attempt: 1, best: 0, phase: 'running', active: true, activity: 'turn', stepLabel: '职责与归属' });
 
   // A passing score advances to step 2 with a short follow-up.
@@ -90,7 +90,7 @@ test('a loop prompt waits for the foreground slot instead of failing the run', a
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  assert.equal(await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 }), true);
+  assert.equal(await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 }), true);
   await until(() => fixture.calls.filter(call => call.method === 'session/prompt').length === 1);
   // A foreground operation owns the execution slot while the round's verdict is consumed.
   let finish!: (value: ObjectValue) => void;
@@ -121,20 +121,20 @@ test('typed text, an explicit stop and a session switch all end the loop', async
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.equal(controller.queries.loop?.phase, 'running');
   // A human turn takes the conversation back, so the loop stops instead of racing it.
   await controller.actions.prompt('never mind');
   assert.equal(controller.queries.loop?.phase, 'cancelled');
 
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   assert.equal(controller.queries.loop?.phase, 'running');
   controller.actions.stopLoop();
   assert.equal(controller.queries.loop?.phase, 'cancelled');
 
   // A loop belongs to its session, so opening another one drops it entirely.
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   assert.equal(controller.queries.loop?.step, 1);
   await controller.actions.selectSession('s2');
   await until(() => controller.state.sessionId === 's2');
@@ -150,7 +150,7 @@ test('loop prompts stay out of composer recall while typed prompts remain', asyn
 
   // The opened snapshot already contributes one prompt (the fixture's `你好`).
   const before = controller.queries.recallLength;
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The host echoes a prompt back as a durable user message; a loop prompt must not become recall.
   const brief = lastPrompt(fixture);
@@ -177,7 +177,7 @@ test('a blocked verdict stops the loop without spending the remaining budget', a
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   const before = fixture.calls.filter(call => call.method === 'session/prompt').length;
   // The verifier proved the task impossible; the run ends here rather than trying nine more times.
@@ -196,7 +196,7 @@ test('a result block committed just after the idle event is still read', async t
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The host reports the turn idle a moment before the final message reaches the follow stream, so
   // the first parse finds no block. That is not a failed attempt: the loop keeps looking for it.
@@ -223,7 +223,7 @@ test('a control frame this client cannot decode never strands a running loop', a
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
 
   // A jobs frame with no rows once failed the whole generation, which left the loop settling
@@ -258,7 +258,7 @@ test('a reconnect re-attaches the loop when the picker replaced the selection', 
   await controller.actions.selectSession('s1');
   await until(() => controller.state.sessionId === 's1' && controller.queries.record.ready, 15_000);
 
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
 
   fixture.disconnect();
@@ -279,7 +279,7 @@ test('a reconnect keeps the loop while a switch to another session ends it', asy
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(protocol('design-review'), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.equal(controller.queries.loop?.phase, 'running');
 
@@ -308,7 +308,7 @@ test('a passing reply block cannot pass a round whose section is missing from th
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(loopProtocolFor('design-review')!, { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(loopProtocolFor('design-review')!, { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   reply(fixture, 20, 'looks great\n' + block(1, 1, 9));
   await until(() => controller.queries.record.messages.some(message => message.text.includes('dsht-loop')));
@@ -329,11 +329,32 @@ test('a no-verifier workspace this client cannot read keeps its reply score', as
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(loopProtocolFor('design-review')!, { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(loopProtocolFor('design-review')!, { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   reply(fixture, 21, 'looks great\n' + block(1, 1, 9));
   await until(() => controller.queries.record.messages.some(message => message.text.includes('dsht-loop')));
   idle(fixture);
   await until(() => controller.queries.loop?.step === 2);
   assert.match(controller.queries.loop?.note ?? '', /artifact check unavailable/);
+});
+
+test('a run past its auto-compact threshold compacts the session before its first prompt', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  // The host projects a history already over the threshold this run is started with.
+  fixture.controlBaseline = { projections: { s1: { asOfSeq: 5,
+    values: { contextPressure: { projectedTokens: 150_000, contextWindow: 200_000 } } } } };
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  t.after(async () => { await controller.stop(); });
+  controller.start();
+  await until(() => controller.state.online && controller.queries.record.ready);
+
+  await controller.actions.startLoop(loopProtocolFor('design-review')!, { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 100 });
+  // The compaction is the host's own command, and it came first: the opening brief is sent into the
+  // history it produced rather than into the history the run refused to work with.
+  const compacted = fixture.calls.findIndex(call => call.method === 'commands/execute');
+  const sent = fixture.calls.findIndex(call => call.method === 'session/prompt');
+  assert.ok(compacted !== -1, 'the run asked the host to compact');
+  assert.equal(object(object(object(fixture.calls[compacted]!).payload).args).line, '/compact');
+  assert.ok(sent > compacted, 'the prompt went out after the compaction');
+  assert.match(controller.queries.loop?.note ?? '', /auto compact · 150K tokens · Compacted 8 history items/);
 });

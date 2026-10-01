@@ -92,7 +92,7 @@ export interface LoopRecord {
   fromFile?: true;
 }
 
-/** The four numbers one loop run uses.
+/** Every number one loop run uses.
  *
  * The parameter form edits them and `resolveLoop` settles them from the record's defaults, so both
  * sides of `/loop` speak one shape. Declared here because a UI leaf may read the contract but not the
@@ -103,6 +103,10 @@ export interface LoopLimits {
   to: number;
   score: number;
   tries: number;
+  /** Context size, in thousands of tokens, past which the run compacts the session before its next
+   * prompt; 0 — the default — never compacts, so a run that did not ask for it is untouched.
+   */
+  autoCompactK: number;
 }
 
 /** Which kind of thing a read-only view can show. */
@@ -184,10 +188,11 @@ export interface ForegroundSnapshot {
 /** What one still-running loop is waiting on.
  *
  * The controller decides this; a view only renders it. `turn` and `verify` are the two ways a round
- * is judged (the reviewed session's own turn, or a forked verifier), and `settle` is the gap between
- * a finished turn and the attempt being consumed, when the result block may still be arriving.
+ * is judged (the reviewed session's own turn, or a forked verifier), `settle` is the gap between
+ * a finished turn and the attempt being consumed, when the result block may still be arriving, and
+ * `compact` is the run's own auto-compaction holding the next round back.
  */
-export type LoopActivity = 'turn' | 'verify' | 'settle';
+export type LoopActivity = 'turn' | 'verify' | 'settle' | 'compact';
 
 /** What the client is working on right now.
  *
@@ -241,6 +246,10 @@ export interface LoopProgress {
   /** Passing score per step and the attempt budget per step. */
   score: number;
   tries: number;
+  /** Context size, in thousands of tokens, past which the run compacts the session before its next
+   * prompt; 0 — the default — means this run never compacts.
+   */
+  autoCompactK: number;
   /** Step and attempt in flight, both 1-based. */
   step: number;
   attempt: number;

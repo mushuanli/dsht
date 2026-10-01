@@ -54,6 +54,13 @@ export interface LoopOptions {
   score?: number;
   /** Attempts allowed per step; default the record's, else 10. */
   tries?: number;
+  /** Context size, in thousands of tokens, past which the run compacts before its next prompt; the
+   * default of 0 never compacts.
+   *
+   * The interactive form fills this in, like `vars`; the command line has no flag for it, because a
+   * threshold is a per-run choice about this session's history that nobody types by accident.
+   */
+  autoCompactK?: number;
   /** Values that replace the record's own `vars` for this run, such as the document under review.
    *
    * The interactive form fills this in; the command line has no syntax for it, because the record —

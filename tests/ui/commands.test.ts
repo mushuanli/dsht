@@ -304,6 +304,11 @@ test('the form validates a value with the same rule the command line uses', () =
   assert.equal(validLoopOption('score', 11), false);
   assert.equal(validLoopOption('tries', 0), false);
   assert.equal(validLoopOption('tries', 2), true);
+  // Auto-compaction is a size, and zero is the off state rather than a size that is too small.
+  assert.equal(validLoopOption('autoCompactK', 0), true);
+  assert.equal(validLoopOption('autoCompactK', 100), true);
+  assert.equal(validLoopOption('autoCompactK', -1), false);
+  assert.equal(validLoopOption('autoCompactK', 1.5), false);
 });
 
 test('once arguments begin, the composer can name what the command takes', () => {

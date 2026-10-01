@@ -9,7 +9,7 @@ import { useTheme } from '../theme/index.ts';
 import { cycle } from './picker.tsx';
 
 /** The numeric fields the form edits, in the order a run reads them. */
-export type LoopField = 'from' | 'to' | 'score' | 'tries';
+export type LoopField = 'from' | 'to' | 'score' | 'tries' | 'autoCompactK';
 
 /** How one field presents itself and what it means when a value is rejected. */
 interface LoopFieldSpec {
@@ -18,13 +18,25 @@ interface LoopFieldSpec {
   label: string;
   /** What the value must be, shown beside an invalid one. */
   hint: string;
+  /** How a committed value reads: every row names what its number counts, so no value is a bare
+   * number whose meaning the operator has to remember — and `off` is spelled rather than shown as 0.
+   */
+  format(value: number): string;
 }
 
 const FIELDS: readonly LoopFieldSpec[] = [
-  { field: 'from', label: 'From', hint: 'first round, 1 or more' },
-  { field: 'to', label: 'To', hint: 'last round, at least From' },
-  { field: 'score', label: 'Pass', hint: 'passing score, 0–10' },
-  { field: 'tries', label: 'Tries', hint: 'attempts per round, 1 or more' },
+  { field: 'from', label: 'From', hint: 'first round, 1 or more',
+    format: value => `${value} round${value === 1 ? '' : 's'}` },
+  { field: 'to', label: 'To', hint: 'last round, at least From',
+    format: value => `${value} round${value === 1 ? '' : 's'}` },
+  { field: 'score', label: 'Pass', hint: 'passing score, 0–10',
+    format: value => `${value} / 10` },
+  { field: 'tries', label: 'Tries', hint: 'attempts per round, 1 or more',
+    format: value => `${value} per round` },
+  // The threshold is the one row whose zero is a state instead of a size, so it says `off` and keeps
+  // the unit beside it, which is what tells the number apart from a byte count.
+  { field: 'autoCompactK', label: 'Auto compact', hint: 'compaction threshold in K tokens, 0 = off',
+    format: value => value === 0 ? 'off · K tokens' : `${value}K tokens` },
 ];
 
 /** One row of the form: an action, an editable number, a record variable, or the way back. */
@@ -34,7 +46,7 @@ type LoopRow =
   | { kind: 'var'; name: string }
   | { kind: 'back' };
 
-/** What the form hands to the runner: the four numbers and the record's variables as confirmed. */
+/** What the form hands to the runner: the run's numbers and the record's variables as confirmed. */
 export interface LoopRun {
   limits: LoopLimits;
   vars: Readonly<Record<string, string>>;
@@ -42,10 +54,11 @@ export interface LoopRun {
 
 /** The values a run from one record would start with, which the form shows before anything is typed.
  * @param record - Chosen record.
- * @returns Its first round, last round and declared score and attempt budgets.
+ * @returns Its first round, last round and declared score and attempt budgets, and no auto-compaction
+ *   (the one limit a record does not declare, so it is opt-in per run).
  */
 export function loopRecordDefaults(record: LoopRecord): LoopLimits {
-  return { from: 1, to: record.steps, score: record.defaultScore, tries: record.defaultTries };
+  return { from: 1, to: record.steps, score: record.defaultScore, tries: record.defaultTries, autoCompactK: 0 };
 }
 
 /** The form's rows for one record: its own variables first, then the shared run limits.
@@ -113,7 +126,7 @@ export function LoopMenu({ records, index, source }: {
       const artifact = record.artifact === undefined ? '' : ` · ${record.artifact}`;
       const mine = record.fromFile === true ? ' · yours' : '';
       return <Text key={record.name} color={current ? theme.accent : undefined} wrap="truncate-end">
-        {current ? '❯ ' : '  '}{record.name} · {record.title} · {record.steps} rounds · pass {record.defaultScore} · ≤{record.defaultTries} tries{target}{artifact}{mine}
+        {current ? '❯ ' : '  '}{record.name} · {record.title} · {record.steps} rounds · pass {record.defaultScore}/10 · ≤{record.defaultTries} tries{target}{artifact}{mine}
       </Text>;
     })}
   </Box>;
@@ -228,11 +241,13 @@ export function LoopDialog({ record, enabled, onStart, onBack, onClose }: {
           {value === record.vars[item.name] ? null : <Text dimColor> · default {record.vars[item.name]}</Text>}
         </Text>;
       }
-      const { field, label } = item.spec;
-      const shown = selected && edit !== undefined ? edit : String(values[field]);
+      const { field, label, format } = item.spec;
+      const value = values[field];
+      const shown = selected && edit !== undefined ? edit : format(value);
+      const fallback = format(defaults[field]);
       return <Text key={`field:${field}`} color={selected ? theme.accent : undefined}>
         {cursor}{label.padEnd(width)}{selected && edit !== undefined ? <Text inverse>{shown || ' '}</Text> : shown}
-        {values[field] === defaults[field] ? null : <Text dimColor> · default {defaults[field]}</Text>}
+        {value === defaults[field] ? null : <Text dimColor> · default {fallback}</Text>}
       </Text>;
     })}
     {error !== undefined && <Text color={theme.colors.error}>{safeText(error)}</Text>}

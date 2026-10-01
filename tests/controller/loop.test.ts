@@ -9,10 +9,10 @@ const PROTOCOL: LoopProtocol = {
   followUp: (_limits, step, attempt) => `follow ${step}/${attempt}`,
 };
 test('the defaults come from the protocol and a reversed range is refused', () => {
-  assert.deepEqual(resolveLoop(PROTOCOL, {}), { from: 1, to: 10, score: 8, tries: 10 });
-  assert.deepEqual(resolveLoop(PROTOCOL, { from: 3, to: 5, score: 8.5, tries: 4 }), { from: 3, to: 5, score: 8.5, tries: 4 });
+  assert.deepEqual(resolveLoop(PROTOCOL, {}), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
+  assert.deepEqual(resolveLoop(PROTOCOL, { from: 3, to: 5, score: 8.5, tries: 4, autoCompactK: 0 }), { from: 3, to: 5, score: 8.5, tries: 4, autoCompactK: 0 });
   // A protocol may choose its own defaults for the two values that are not its step count.
-  assert.deepEqual(resolveLoop({ ...PROTOCOL, defaultScore: 9, defaultTries: 3 }, {}), { from: 1, to: 10, score: 9, tries: 3 });
+  assert.deepEqual(resolveLoop({ ...PROTOCOL, defaultScore: 9, defaultTries: 3 }, {}), { from: 1, to: 10, score: 9, tries: 3, autoCompactK: 0 });
   assert.equal(resolveLoop(PROTOCOL, { from: 5, to: 1 }), undefined);
 });
 test('the result is read only from the last block of the declared marker and kind', () => {
@@ -49,13 +49,13 @@ test('the turn text is gathered from the last user boundary to the end', () => {
   assert.equal(latestAssistantText([{ seq: 0, role: 'You', text: 'hi', parts: [] }]), '');
 });
 test('a step retries below the score, advances at it, and stops when the budget runs out', () => {
-  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 2, score: 8, tries: 2 });
+  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   // The start time is a wall clock and the identity is per run, so the snapshot compares without
   // them and only checks they are set.
   const { startedAt, runId, ...progress } = loop.progress;
   assert.ok(startedAt > 0);
   assert.equal(runId, 'run-1');
-  assert.deepEqual(progress, { title: 'Demo', from: 1, to: 2, score: 8, tries: 2, total: 10, scope: 'rounds 1–2/10 · selected range', step: 1, attempt: 1, best: 0, phase: 'running', active: true });
+  assert.deepEqual(progress, { title: 'Demo', from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0, total: 10, scope: 'rounds 1–2/10 · selected range', step: 1, attempt: 1, best: 0, phase: 'running', active: true });
   assert.equal(loop.start(), 'brief 1/1 of 1-2 pass 8 tries 2');
   loop.sent();
   assert.equal(loop.settled, true);
@@ -70,7 +70,7 @@ test('a step retries below the score, advances at it, and stops when the budget 
   assert.equal(loop.active, false);
 });
 test('reaching the score advances one step and the last step finishes the run', () => {
-  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 2, score: 8, tries: 3 });
+  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 2, score: 8, tries: 3, autoCompactK: 0 });
   assert.equal(loop.settle({ score: 8 }).kind, 'continue');
   assert.equal(loop.progress.step, 2);
   assert.equal(loop.progress.attempt, 1);
@@ -79,26 +79,26 @@ test('reaching the score advances one step and the last step finishes the run', 
   assert.equal(loop.progress.phase, 'passed');
 });
 test('cancelling ends the loop and it never continues', () => {
-  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 10, score: 8, tries: 10 });
+  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   loop.cancel();
   assert.equal(loop.active, false);
   assert.equal(loop.settled, false);
   assert.equal(loop.progress.phase, 'cancelled');
 });
 test('a blocked verdict ends the run instead of spending the remaining budget', () => {
-  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 10, score: 8, tries: 10 });
+  const loop = new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   assert.equal(loop.settle({ status: 'blocked' }).kind, 'blocked');
   assert.equal(loop.progress.phase, 'blocked');
   assert.equal(loop.active, false);
 });
 test('a protocol that names its steps shows that name in the progress snapshot', () => {
   const labelled = { ...PROTOCOL, stepLabel: (step: number) => `phase ${step}` };
-  const loop = new ScoredLoop('run-1', 's1', labelled, { from: 2, to: 3, score: 8, tries: 2 });
+  const loop = new ScoredLoop('run-1', 's1', labelled, { from: 2, to: 3, score: 8, tries: 2, autoCompactK: 0 });
   assert.equal(loop.progress.stepLabel, 'phase 2');
   assert.equal(loop.settle({ score: 9 }).kind, 'continue');
   assert.equal(loop.progress.stepLabel, 'phase 3');
   // A protocol without labels keeps the field absent, so the UI shows no separator.
-  assert.equal(new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 1, score: 8, tries: 1 }).progress.stepLabel, undefined);
+  assert.equal(new ScoredLoop('run-1', 's1', PROTOCOL, { from: 1, to: 1, score: 8, tries: 1, autoCompactK: 0 }).progress.stepLabel, undefined);
 });
 test('a verdict keeps the findings and evidence a retry needs, bounded', () => {
   assert.deepEqual(readResultFields({ score: '4.5', status: 'retry', evidence: 'ran the checks',
@@ -111,7 +111,7 @@ test('a verdict keeps the findings and evidence a retry needs, bounded', () => {
 });
 test('a plateau is tolerated once, and a second one stalls the run', () => {
   const protocol = { marker: 'm', kind: 'k', title: 'T', steps: 2, brief: () => 'brief', followUp: () => 'again' };
-  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 8 });
+  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 8, autoCompactK: 0 });
   loop.start(); loop.sent();
   // The first attempt may score anything, including an unusable verdict, without stalling.
   assert.equal(loop.settle({}).kind, 'continue');
@@ -126,7 +126,7 @@ test('a plateau is tolerated once, and a second one stalls the run', () => {
 
 test('the whole-run deadline is a budget stop, not a verdict', () => {
   const protocol = { marker: 'm', kind: 'k', title: 'T', steps: 2, brief: () => 'brief', followUp: () => 'again' };
-  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 3 });
+  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 3, autoCompactK: 0 });
   loop.start(); loop.sent();
   loop.deadline();
   assert.equal(loop.progress.phase, 'deadline');
@@ -147,7 +147,7 @@ test('a run only covers the whole record when it really runs all of it', () => {
 
 test('a step that keeps improving is allowed to spend its whole budget', () => {
   const protocol = { marker: 'm', kind: 'k', title: 'T', steps: 2, brief: () => 'brief', followUp: () => 'again' };
-  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 3 });
+  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 3, autoCompactK: 0 });
   loop.start(); loop.sent();
   assert.equal(loop.settle({ score: 1 }).kind, 'continue');
   loop.sent(); assert.equal(loop.settle({ score: 2 }).kind, 'continue');
@@ -167,7 +167,7 @@ test('the score decides, and only a blocked verdict overrides it', () => {
     { status: 'blocked', blocked: true, exitReason: 'cannot-fix', reason: '没有取消端点' });
 
   const protocol = { marker: 'm', kind: 'k', title: 'T', steps: 2, brief: () => 'b', followUp: () => 'a' };
-  const limits = { from: 1, to: 2, score: 8, tries: 2 };
+  const limits = { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 };
   // `status: retry` with a passing score advances: the model does not get to veto its own score.
   const passing = new ScoredLoop('run-1', 's1', protocol, limits);
   passing.start(); passing.sent();
@@ -206,7 +206,7 @@ test('an early stop needs a reason, and an explanation never changes control', (
   assert.deepEqual(readResultFields({ score: 9, explanation: '无需修改' }), { score: 9, explanation: '无需修改' });
 
   const protocol = { marker: 'm', kind: 'k', title: 'T', steps: 2, brief: () => 'b', followUp: () => 'a' };
-  const limits = { from: 1, to: 2, score: 8, tries: 2 };
+  const limits = { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 };
   const passing = new ScoredLoop('run-1', 's1', protocol, limits);
   passing.start(); passing.sent();
   assert.equal(passing.settle(readResultFields({ score: 9, explanation: '无需修改' })).kind, 'continue');
@@ -240,7 +240,7 @@ test('an early stop needs a reason, and an explanation never changes control', (
 
 test('the live sub-state is explicit and disappears when the run stops', () => {
   const protocol = { marker: 'm', kind: 'k', title: 'T', steps: 2, brief: () => 'b', followUp: () => 'a' };
-  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 2 });
+  const loop = new ScoredLoop('run-1', 's1', protocol, { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   // Nothing is in flight before the first send, so there is no sub-state to report.
   assert.equal(loop.progress.activity, undefined);
   loop.sent();
@@ -261,7 +261,7 @@ test('the live sub-state is explicit and disappears when the run stops', () => {
 });
 
 test('a terminal run records why it stopped, and active is the only running predicate', () => {
-  const limits = { from: 1, to: 1, score: 8, tries: 5 };
+  const limits = { from: 1, to: 1, score: 8, tries: 5, autoCompactK: 0 };
   const make = () => new ScoredLoop('run-x', 's1', PROTOCOL, limits);
   const finish = (loop: ScoredLoop, result: Parameters<ScoredLoop['settle']>[0]): ScoredLoop => {
     loop.start(); loop.sent(); loop.settle(result); return loop;
@@ -305,7 +305,7 @@ test('a terminal run records why it stopped, and active is the only running pred
   assert.equal(abstained.progress.terminalReason, undefined);
   assert.equal(abstained.progress.active, true);
 
-  const exhausted = finish(new ScoredLoop('run-x', 's1', PROTOCOL, { from: 1, to: 1, score: 8, tries: 1 }), readResultFields({ score: 1 }));
+  const exhausted = finish(new ScoredLoop('run-x', 's1', PROTOCOL, { from: 1, to: 1, score: 8, tries: 1, autoCompactK: 0 }), readResultFields({ score: 1 }));
   assert.equal(exhausted.progress.terminalReason, 'exhausted');
 
   const stalled = make();

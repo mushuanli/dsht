@@ -136,8 +136,12 @@ export function resolveLoop(protocol: LoopProtocol, options: LoopOptions): LoopL
   const to = options.to ?? protocol.steps;
   const score = options.score ?? protocol.defaultScore ?? 8;
   const tries = options.tries ?? protocol.defaultTries ?? 10;
+  // Auto-compaction is opt-in per run, and the command line has no flag for it: only a confirmed form
+  // value reaches here. A value that is not a whole number of thousands is no threshold at all.
+  const requested = options.autoCompactK;
+  const autoCompactK = requested !== undefined && Number.isSafeInteger(requested) && requested >= 0 ? requested : 0;
   if (to < from) return undefined;
-  return { from, to, score, tries };
+  return { from, to, score, tries, autoCompactK };
 }
 
 /** Whether a run's rounds cover the whole record rather than a selected range.
@@ -300,6 +304,9 @@ export class ScoredLoop {
       ...(this.exit === undefined ? {} : { exit: this.exit }) };
   }
 
+  /** Context threshold this run compacts at, in thousands of tokens; 0 when it never does. */
+  get autoCompactK(): number { return this.limits.autoCompactK; }
+
   /** Attach one line about the attempt just decided, shown until the next verdict replaces it.
    * @param text - Note to show, or an empty string to clear it.
    */
@@ -343,6 +350,13 @@ export class ScoredLoop {
 
   /** Record that this attempt is judged by a forked verifier instead of the session's own turn. */
   verifying(): void { this.awaiting = true; this.activity = 'verify'; }
+
+  /** Record that the run is compacting the session before it sends the next round.
+   *
+   * Not an attempt: nothing is outstanding while the history is rewritten, so `settled` stays false
+   * and a replayed idle edge cannot settle a round that was never sent.
+   */
+  compacting(): void { this.activity = 'compact'; }
 
   /** Record that the turn ended and its result is being read, which is neither work nor a verdict. */
   settling(): void { this.activity = 'settle'; }

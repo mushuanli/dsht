@@ -2468,8 +2468,8 @@ test('/loop runs the highlighted record with its defaults after two Enters', asy
   await pressKey(ui, '\r');
   await until(() => controller.queries.loop !== undefined);
   assert.equal(controller.queries.loop?.title, 'Design review');
-  assert.deepEqual({ from: controller.queries.loop?.from, to: controller.queries.loop?.to, score: controller.queries.loop?.score, tries: controller.queries.loop?.tries },
-    { from: 1, to: 10, score: 8, tries: 10 });
+  assert.deepEqual({ from: controller.queries.loop?.from, to: controller.queries.loop?.to, score: controller.queries.loop?.score, tries: controller.queries.loop?.tries, autoCompactK: controller.queries.loop?.autoCompactK },
+    { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   // The trace tells the whole story of this start, so a run that never happens has a written reason.
   await controller.trace?.settle();
   const events = (await readTrace(tracePath)).filter(line => !line.startsWith('#'))
@@ -2634,7 +2634,7 @@ test('/loop lists its records, opens the chosen inputs and runs exactly those va
   // `/loop` alone stops being a syntax error and offers the records with their defaults.
   await pressKey(ui, '/loop');
   await until(() => ui.lastFrame()?.includes('Loop records') === true);
-  assert.match(ui.lastFrame()!, /❯ design-review · Design review · 10 rounds · pass 8 · ≤10 tries · DESIGN-REVIEW\.md/);
+  assert.match(ui.lastFrame()!, /❯ design-review · Design review · 10 rounds · pass 8\/10 · ≤10 tries · DESIGN-REVIEW\.md/);
   // ↑ on the first record wraps to the last, and ↓ from the last comes back to the first.
   const records = controller.queries.loopRecords;
   await pressKey(ui, '\u001b[A');
@@ -2807,7 +2807,7 @@ test('the bar /loop leaves in the transcript opens the verification session', as
   await until(() => /⎿\s+view/.test(ui.lastFrame() ?? '') === true);
   assert.equal(created, 's-new');
   const frame = ui.lastFrame()!;
-  assert.match(frame, /\/loop designdoc-review 1–10 · pass 8 · ≤10 tries/);
+  assert.match(frame, /\/loop designdoc-review 1–10 · pass 8\/10 · ≤10 tries/);
   // The row that says `view` is the row the reader clicks: it used to be the one row that did
   // nothing, which is what "I clicked where it said click" reports. SGR rows are one-based.
   const viewRow = frame.split('\n').findIndex(line => /⎿\s+view\s*$/.test(line));
@@ -2888,7 +2888,7 @@ test('a finished loop line stays readable until the next line runs, then goes', 
   t.after(async () => { release?.(); ui.unmount(); ui.cleanup(); await controller.stop(); });
   controller.start();
   await until(() => controller.queries.record.ready);
-  await controller.actions.startLoop(loopProtocolFor('design-review', true)!, { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(loopProtocolFor('design-review', true)!, { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   await until(() => ui.lastFrame()?.includes('Design review') === true);
 
   // The line that ends the run leaves the terminal result on screen — it is the answer to "how did it

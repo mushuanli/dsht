@@ -25,7 +25,10 @@ export function LoopStatus({ progress }: { progress: LoopProgress }) {
   // session working, so only the states without a host turn of their own are named here.
   const activity = running && progress.activity !== undefined && progress.activity !== 'turn'
     ? ` · ${progress.activity}` : '';
+  // A run that will compact its own history says at what size, so a long pause for compaction is
+  // never a surprise and the threshold the operator confirmed is visible for the whole run.
+  const auto = progress.autoCompactK === 0 ? '' : ` · auto ${progress.autoCompactK}K tok`;
   return <Text color={progress.active ? theme.colors.context : theme.colors.muted}>
-    {progress.title}{progress.stepLabel === undefined ? '' : ` · ${progress.stepLabel}`} · step {progress.step}/{progress.to} · attempt {progress.attempt}/{progress.tries} · best {progress.best}/{progress.score}{running ? '' : paused ? ' · needs you · /loop answer' : ` · ${progress.phase}`}{activity}{scope}{exit}{interaction}{progress.note === undefined ? '' : ` · ${progress.note}`}
+    {progress.title}{progress.stepLabel === undefined ? '' : ` · ${progress.stepLabel}`} · step {progress.step}/{progress.to} · attempt {progress.attempt}/{progress.tries} · best {progress.best}/{progress.score}{auto}{running ? '' : paused ? ' · needs you · /loop answer' : ` · ${progress.phase}`}{activity}{scope}{exit}{interaction}{progress.note === undefined ? '' : ` · ${progress.note}`}
   </Text>;
 }

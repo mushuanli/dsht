@@ -281,7 +281,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
    */
   function startLoopFromForm(name: string, run: LoopRun): void {
     controller.traceNote('loop-ui', { phase: 'start', name, from: run.limits.from, to: run.limits.to,
-      score: run.limits.score, tries: run.limits.tries, vars: Object.keys(run.vars) });
+      score: run.limits.score, tries: run.limits.tries, autoCompactK: run.limits.autoCompactK, vars: Object.keys(run.vars) });
     operate(async () => {
       const port: CommandPort = { interactive: true, run: (label, operation) => controller.actions.foreground('command', label, operation) };
       // Start is a second submission (§3.4): the form may have been open while a turn started or a

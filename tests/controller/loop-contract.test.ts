@@ -84,7 +84,7 @@ test('the verifier prompt names the file as the only channel back, and the round
 });
 
 test('a forked round tells the agent it is not the scorer, and never promises self-scoring', () => {
-  const limits = { from: 1, to: 1, score: 8, tries: 2 };
+  const limits = { from: 1, to: 1, score: 8, tries: 2, autoCompactK: 0 };
   const forked = resultContract('designdoc-review', limits, 1, 1, { artifact: 'tui-design.md' }, 'forked').join('\n');
   assert.match(forked, /独立验证进程/);
   assert.match(forked, /不要 spawn 子代理/);

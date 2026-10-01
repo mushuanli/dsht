@@ -112,6 +112,8 @@
 * 变量名归**记录**所有，语法层不认识 `loop.yaml`；为它造旗标就必须让语法层拿到记录表，破坏纯叶子；
 * form → 命令对象比"form → 文本 → 再 parse"更直接（§3.3），文本只是命令的一种**生产方式**。
 
+`autoCompactK`（auto compact 阈值，单位千 token，`0` = 关闭，默认关闭）同理没有旗标：它是本次运行对**这个 session 历史**的处置，由参数表单确认后随同一个命令对象交给应用；语法层只认识它作为一个被校验过的数字（`validLoopOption`）。
+
 ### 2.5 命令目录（全部命令）
 
 | 命令（含 `usage`） | `kind` | requiresSession | requiresNoInteraction | 效果 |

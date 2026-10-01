@@ -320,6 +320,11 @@ export class Controller implements ControllerStore, ConnectionListener {
         ready: this.state.session.record.ready, busy: this.foregroundSlot.snapshot !== undefined, pending: this.state.pending.length > 0 }),
       reply: () => latestAssistantText(this.state.session.record.messages),
       send: prompt => this.session.promptInternal(prompt),
+      historyTokens: sessionId => {
+        const context = this.telemetry.reader.metrics(sessionId).context;
+        return context?.projectedTokens ?? context?.pressureTokens;
+      },
+      compact: (sessionId, signal) => this.compactSession(sessionId, signal),
       publish: failure => this.update(failure === undefined ? {} : { lastFailure: failure }),
       trace: (event, detail) => this.traceEvent(event, detail),
     }, { directory: this.localDirectory, verifier: options.verifier, verdictRoot: options.verdictRoot,
@@ -1144,6 +1149,20 @@ export class Controller implements ControllerStore, ConnectionListener {
    * @returns The host's successful command result text.
    */
   private async command(line: string, signal: AbortSignal): Promise<string> { return this.session.command(line, signal); }
+
+  /** Compact one session because a run's auto-compact threshold was reached.
+   *
+   * A loop only ever names the session it owns, and the session layer's command entry point speaks for
+   * the selection — so the identity is checked here rather than assumed, and a run that somehow names
+   * another session fails loudly instead of compacting the wrong history.
+   * @param sessionId - Session to compact; the reviewed session of the run.
+   * @param signal - Cancels the host request when the run stops.
+   * @returns The host's result text, for the progress note.
+   */
+  private async compactSession(sessionId: string, signal: AbortSignal): Promise<string> {
+    if (sessionId !== this.state.sessionId) throw new Error('The loop session is no longer selected');
+    return await this.command('/compact', signal);
+  }
 
   /** Remove one host-owned pending input.
    * @param itemId - Queue occurrence identity from session/control.

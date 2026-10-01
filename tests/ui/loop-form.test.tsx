@@ -38,14 +38,14 @@ test('the record list names every record, its rounds and its defaults', () => {
   const ui = render(<LoopMenu records={[RECORD, SECOND]} index={1} />);
   try {
     const frame = ui.lastFrame()!;
-    assert.match(frame, /design-review · Design review · 10 rounds · pass 8 · ≤10 tries · DESIGN-REVIEW\.md/);
+    assert.match(frame, /design-review · Design review · 10 rounds · pass 8\/10 · ≤10 tries · DESIGN-REVIEW\.md/);
     // The highlighted row is the one Enter would confirm.
     assert.match(frame, /❯ designdoc-review · Designdoc review · tui-design\.md · 10 rounds/);
   } finally { ui.unmount(); ui.cleanup(); }
 });
 
 test('a record defaults a full run from its first round', () => {
-  assert.deepEqual(loopRecordDefaults(RECORD), { from: 1, to: 10, score: 8, tries: 10 });
+  assert.deepEqual(loopRecordDefaults(RECORD), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
 });
 
 test('the record list names the user file behind a record, and marks the rows it supplied', () => {
@@ -64,7 +64,7 @@ test('the record list names the user file behind a record, and marks the rows it
     // The operator's own file is named too, with the installed records it hides: a record that is not
     // in the list cannot be found any other way.
     assert.match(frame, /Local \/home\/me\/\.config\/dsht\/loop\.local\.yaml · hides: designdoc-review/);
-    assert.match(frame, /design-review · Design review · 10 rounds · pass 8 · ≤10 tries · DESIGN-REVIEW\.md · yours/);
+    assert.match(frame, /design-review · Design review · 10 rounds · pass 8\/10 · ≤10 tries · DESIGN-REVIEW\.md · yours/);
     assert.match(frame, /Your design-review in \/home\/me/);
     // A record this install did not supply is not marked as the operator's.
     assert.doesNotMatch(frame, /designdoc-review[^\n]*yours/);
@@ -97,7 +97,7 @@ test('a record variable is a row the form edits, and Start carries the new value
     await press(ui, '\u001b[A'); await press(ui, '\u001b[A'); // back to Start, past the path row
     await press(ui, '\r');
     assert.deepEqual(calls.start, [{
-      limits: { from: 1, to: 10, score: 8, tries: 10 }, vars: { path: 'docs/other.md' } }]);
+      limits: { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 }, vars: { path: 'docs/other.md' } }]);
   } finally { ui.unmount(); ui.cleanup(); }
 });
 
@@ -118,13 +118,61 @@ test('the form shows the defaults and starts with them when nothing is edited', 
     for (const text of ['Run loop record · design-review', 'Start run', '← Choose another record']) {
       assert.ok(frame().includes(text), frame());
     }
-    assert.match(frame(), /From\s+1/);
-    assert.match(frame(), /To\s+10/);
-    assert.match(frame(), /Pass\s+8/);
-    assert.match(frame(), /Tries\s+10/);
+    assert.match(frame(), /From\s+1 round/);
+    assert.match(frame(), /To\s+10 rounds/);
+    assert.match(frame(), /Pass\s+8 \/ 10/);
+    assert.match(frame(), /Tries\s+10 per round/);
+    // Auto-compaction is off until it is typed, and says so rather than showing a bare zero.
+    assert.match(frame(), /Auto compact\s+off · K tokens/);
     // The cursor starts on Start, so the fewest keystrokes are Enter, Enter.
     await press(ui, '\r');
-    assert.deepEqual(calls.start, [{ limits: { from: 1, to: 10, score: 8, tries: 10 }, vars: {} }]);
+    assert.deepEqual(calls.start, [{ limits: { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 }, vars: {} }]);
+  } finally { ui.unmount(); ui.cleanup(); }
+});
+
+test('an auto-compact threshold is typed in thousands and carried by Start', async () => {
+  const { ui, calls, frame } = mount();
+  try {
+    // Start → From → To → Pass → Tries → Auto compact.
+    for (let step = 0; step < 5; step += 1) await press(ui, '\u001b[B');
+    for (const digit of '150') await press(ui, digit);
+    await press(ui, '\r'); // commit, move to the way back
+    assert.match(frame(), /Auto compact\s+150K tokens · default off/);
+    // Six rows back up, from the way back to Start.
+    for (let step = 0; step < 6; step += 1) await press(ui, '\u001b[A');
+    await press(ui, '\r');
+    assert.deepEqual(calls.start, [{ limits: { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 150 }, vars: {} }]);
+  } finally { ui.unmount(); ui.cleanup(); }
+});
+
+test('zero is a threshold the form takes, and reads as off', async () => {
+  const { ui, calls, frame } = mount();
+  try {
+    for (let step = 0; step < 5; step += 1) await press(ui, '\u001b[B'); // Auto compact
+    await press(ui, '7');
+    await press(ui, '\r');
+    assert.match(frame(), /Auto compact\s+7K tokens/);
+    // Back to the row, erase the threshold and put the off value in its place.
+    await press(ui, '\u001b[A');
+    await press(ui, '\x7f');
+    await press(ui, '0');
+    await press(ui, '\r');
+    assert.match(frame(), /Auto compact\s+off · K tokens/);
+    for (let step = 0; step < 6; step += 1) await press(ui, '\u001b[A');
+    await press(ui, '\r');
+    assert.deepEqual(calls.start, [{ limits: { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 }, vars: {} }]);
+  } finally { ui.unmount(); ui.cleanup(); }
+});
+
+test('an auto-compact value that is not a whole number of thousands is refused', async () => {
+  const { ui, calls, frame } = mount();
+  try {
+    for (let step = 0; step < 5; step += 1) await press(ui, '\u001b[B'); // Auto compact
+    await press(ui, '1'); await press(ui, '.'); await press(ui, '5');
+    await press(ui, '\u001b[B'); // refused, so the row stays selected
+    assert.match(frame(), /Auto compact: compaction threshold in K tokens, 0 = off/);
+    assert.match(frame(), /❯ Auto compact/);
+    assert.deepEqual(calls.start, []);
   } finally { ui.unmount(); ui.cleanup(); }
 });
 
@@ -136,9 +184,9 @@ test('typing over a value replaces it and Start runs the edited values', async (
     await press(ui, '\r'); // commit, move to To
     await press(ui, '\u001b[A'); await press(ui, '\u001b[A'); // back to Start
     await press(ui, '\r');
-    assert.deepEqual(calls.start, [{ limits: { from: 2, to: 10, score: 8, tries: 10 }, vars: {} }]);
-    // An edited value still says what the record would have used.
-    assert.match(frame(), /From\s+2 · default 1/);
+    assert.deepEqual(calls.start, [{ limits: { from: 2, to: 10, score: 8, tries: 10, autoCompactK: 0 }, vars: {} }]);
+    // An edited value still says what the record would have used, unit and all.
+    assert.match(frame(), /From\s+2 rounds · default 1 round/);
   } finally { ui.unmount(); ui.cleanup(); }
 });
 
@@ -148,12 +196,12 @@ test('an arrow commits the box being left, so Start needs no Enter per value', a
     await press(ui, '\u001b[B'); // From
     await press(ui, '2');
     await press(ui, '\u001b[B'); // down to To already took From with it
-    assert.match(frame(), /From\s+2 · default 1/);
+    assert.match(frame(), /From\s+2 rounds · default 1 round/);
     await press(ui, '4'); // To
     await press(ui, '\u001b[B'); // to Pass, taking To with it
     await press(ui, '\u001b[A'); await press(ui, '\u001b[A'); await press(ui, '\u001b[A'); // back to Start
     await press(ui, '\r');
-    assert.deepEqual(calls.start, [{ limits: { from: 2, to: 4, score: 8, tries: 10 }, vars: {} }]);
+    assert.deepEqual(calls.start, [{ limits: { from: 2, to: 4, score: 8, tries: 10, autoCompactK: 0 }, vars: {} }]);
   } finally { ui.unmount(); ui.cleanup(); }
 });
 
@@ -212,8 +260,7 @@ test('Esc abandons an edit first, then leaves the form', async () => {
 test('the form offers the way back to the record list', async () => {
   const { ui, calls } = mount();
   try {
-    await press(ui, '\u001b[B'); await press(ui, '\u001b[B'); await press(ui, '\u001b[B');
-    await press(ui, '\u001b[B'); await press(ui, '\u001b[B'); // ← Choose another record
+    for (let step = 0; step < 6; step += 1) await press(ui, '\u001b[B'); // ← Choose another record
     await press(ui, '\r');
     assert.equal(calls.back, 1);
     assert.deepEqual(calls.start, []);
@@ -237,8 +284,8 @@ test('an erased value stays as it was instead of reading as zero', async () => {
     await press(ui, '\u001b[B'); // From
     await press(ui, '\x7f'); // erase the default 1
     await press(ui, '\r');
-    assert.match(frame(), /From\s+1/);
-    assert.doesNotMatch(frame(), /default 1/);
+    assert.match(frame(), /From\s+1 round/);
+    assert.doesNotMatch(frame(), /default 1 round/);
   } finally { ui.unmount(); ui.cleanup(); }
 });
 

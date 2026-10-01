@@ -276,6 +276,8 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 | `score` / `tries` | 可位置传参也可用旗标；省略时用记录的 `defaults`，记录没有才落到全局 `defaults` |
 | `--from` / `--to` | 本次运行的轮次区间覆盖，语义不变 |
 
+**`autoCompactK` 是本次运行的 auto compact 阈值（单位千 token，`0` = 关闭，默认关闭），和 `vars` 一样没有命令行语法**：它由参数表单确认后经 `LoopOptions.autoCompactK` 交回应用，`resolveLoop` 对缺失或非法值一律落回 `0`。它的比较对象是宿主投影的下一请求上下文（`historyTokens`），由 `LoopCoordinator` 在**每条 prompt 发出之前**判定：超过阈值就先调用宿主的 `compact`（即 `/compact`）再发这一轮，因此压缩不会与某一轮交错，被压缩腾出的历史正是下一轮写进去的历史；压缩失败只写进进度行的 note，不结束运行（`0` 时这条路径完全不被进入）。
+
 **记录的 `vars`（如 `designdoc-review` 的 `path`）是本次运行的输入，不是记录的常量**：它在参数表单里逐行覆盖（逐步操作见 `README.md`），命令行没有对应语法——知道有哪些变量名的是记录，不是 `parse.ts`，所以语法层不为它造旗标。表单把覆盖值经 `LoopOptions.vars` 交回应用，`runCommand` 用记录的 `vars` 校验名字（未知名字报错并列出该记录接受的变量），再交给 `loopProtocolFor(name, forked, vars)`；标题、brief、followUp 与验证者提示里所有 `{{path}}` 都换成新值，`loop.yaml` 本身不动。
 
 命令语法不变，但交互路径是"选"而不是"敲"（**已实现**）。**记录列表、参数表单与开始按钮的按键和逐步操作以 `README.md` 为准**；本节只记机制侧契约：
@@ -289,10 +291,11 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 
 | 事件 | phase | 含义 |
 |---|---|---|
-| `loop-ui` | `choose` / `open` / `start` | 记录列表选中的候选与下标、表单是否真的打开（`known`）、Start 时提交的四个值与变量名 |
+| `loop-ui` | `choose` / `open` / `start` | 记录列表选中的候选与下标、表单是否真的打开（`known`）、Start 时提交的五个值与变量名 |
 | `loop` | `command` / `form` / `rejected` | 应用收到命令、返回表单意图、因未知记录或未知变量被拒（带 `reason`） |
 | `loop` | `begin` / `verify-first` / `sent` / `work-first` | `startLoop` 拿到的 session、limits 与是否 forked；已发出 brief；已转入先行验证；或产出物缺本轮小节、改为直接发工作消息（`work-first`，带 `artifact` 与 `reason: 'section-missing'`） |
 | `loop` | `refused` / `not-started` | 没有 session（`refused`，`reason: 'no-session'`）、`startLoop` 未成功时给操作者看到的原因（`not-started`，带 `why`） |
+| `loop` | `compact` / `compact-skip` / `compact-failed` | auto compact：超阈值而压缩（`tokens`／`thresholdK`）、宿主没有上下文投影因而跳过（`no-context-metric`）、压缩失败（`reason`，只记 note） |
 | `loop` | `answered` / `end` | `/loop answer` 的恢复（`judged`：是否重新验证、`chars`）；运行收尾（`result`／`step`／`attempt`／`reason`） |
 | `verify` | `begin` / `verified` / `retry` / `unavailable` / `fallback` / `needs-human` / `cancelled` / `stale` / `abandoned` | 每轮验证任务的生命周期；`verified` 带分数，`retry`／`unavailable` 带结构化 `reason`（退出码 + `stderrClass`：`auth`/`host`/`config`/`unknown`），子进程原话只在 `--trace-verbose` 下出现且先过 `sanitizeTraceText()`——交互式客户端不显示子进程输出，所以这一行是"为什么没有 verdict"的唯一线索 |
 | `artifact` | `missing` | 验证者给了分但工作区产出物缺少本轮小节，该轮被客户端硬判不通过 |
@@ -374,7 +377,7 @@ export function runProcess(file: string, args: readonly string[], options: Shell
 | `src/controller/index.ts` | 导出 `loopProtocolFor`／`loopProtocolNames`／`roundStandard` 等 | controller |
 | `src/slash/parse.ts` | `/loop <name> [score] [tries] [flags]` 语法；`/loop` 单独出现 → `loops` 命令；`LoopOptions.vars` 承载表单确认的记录变量（命令行无语法）；导出 `loopNameQuery`（记录名菜单）与 `validLoopOption`（表单与命令行共用校验）；`designReview`/`designdocReview`/`verify` 三个命令已删除 | slash |
 | `src/slash/registry.ts` / `index.ts` | 命令表与导出各加一行；`/loop` usage 改为 `[name] [score] [tries]`，`COMMAND_POLICY.loops`；`argumentHint(line)` 给出「命令名 + 空格」后的用法提示 | slash |
-| `src/ui/dialogs/loop.tsx` | **新增**：`LoopMenu`（输入框下方的记录列表，含记录指向的 `vars`、`source` 给出的「Records from …」行与 warning、用户记录行的 `· yours`）与 `LoopDialog`（参数表单：记录变量在前、四个数字在后；**离开一行即提交**，不合法则留在该行并说明；标题标出来自用户文件；返回 `LoopRun{limits, vars}`） | ui |
+| `src/ui/dialogs/loop.tsx` | **新增**：`LoopMenu`（输入框下方的记录列表，含记录指向的 `vars`、`source` 给出的「Records from …」行与 warning、用户记录行的 `· yours`）与 `LoopDialog`（参数表单：记录变量在前、五个数字在后（最后一个是 auto compact 阈值），每一行都写出它数的单位（`1 round`、`8 / 10`、`10 per round`、`off · K tokens`）；**离开一行即提交**，不合法则留在该行并说明；标题标出来自用户文件；返回 `LoopRun{limits, vars}`） | ui |
 | `src/ui/app.tsx` | 记录菜单的键处理（↑/↓、Tab 补名、Esc 仅隐藏）、`loopForm` 面板、应用 effect `{kind:'loop'}`、通用用法提示行；`/loop` 的 UI 决策迁移事件（`loop-ui` `choose`/`open`/`start`）；Start 无结果时给出可见原因；`/loop <name>` 的"确认默认值"由应用决定而非根组件 | ui |
 | `src/session/controller.ts` | `createNamedSession()`（创建+命名，不选中） | session |
 | `src/shell/runner.ts` / `index.ts` | `runProcess()`（`runShell` 与它共用 `spawnLines`） | shell |

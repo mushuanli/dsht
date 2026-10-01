@@ -86,7 +86,7 @@ test('stopping the client aborts its in-flight verifier and a late verdict canno
   t.after(() => controller.stop());
   controller.start();
   await until(() => controller.queries.record.ready);
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   idle(fixture, 's1');
   await until(() => verifier.requests.length === 1);
   try {
@@ -107,7 +107,7 @@ test('a late verdict from a replaced run cannot unlock the current verifier', as
   t.after(() => controller.stop());
   controller.start();
   await until(() => controller.queries.record.ready);
-  const start = () => controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 2 });
+  const start = () => controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 2, autoCompactK: 0 });
   await start(); idle(fixture, 's1');
   await until(() => verifier.requests.length === 1);
   controller.actions.stopLoop();
@@ -157,7 +157,7 @@ test('shutdown drains child cleanup and confirms the verifier cancel before clos
   t.after(() => controller.stop());
   controller.start();
   await until(() => controller.queries.record.ready);
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   idle(fixture, 's1');
   await until(() => spawned);
   let release!: () => void;
@@ -183,7 +183,7 @@ test('a forked verdict decides the round, and the reviewer is told not to self-s
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   // The brief asks for the work, not for a grader: the verdict comes from another process.
   assert.match(lastPrompt(fixture), /独立验证进程/);
@@ -224,7 +224,7 @@ test('an abstained verdict pauses the run, and an answer re-judges it without sp
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
 
@@ -263,7 +263,7 @@ test('/loop abort ends a paused run, which is the only way out when nobody answe
   t.after(async () => { await controller.stop(); });
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   await until(() => controller.queries.loop?.phase === 'needs-human');
@@ -283,7 +283,7 @@ test('a verifier outage is retried and never lets the reply block pass', async t
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   const body = JSON.stringify({ kind: 'designdoc-review', step: 1, attempt: 1, score: 8.5, status: 'done' });
   fixture.follow({ type: 'event', event: { seq: 50, type: 'assistant/message', surfaceOp: 'append',
@@ -308,7 +308,7 @@ test('a failure that says it is not retryable is reported instead of retried', a
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   await until(() => controller.queries.loop?.phase === 'unavailable');
@@ -333,7 +333,7 @@ test('the whole-run deadline stops a slow verification and its late verdict', as
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 3 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 3, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   await until(() => controller.queries.loop?.phase === 'deadline');
@@ -358,7 +358,7 @@ test('a verifier blocked on a host request stops the loop without retrying', asy
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   await until(() => controller.queries.loop?.phase === 'needs-human');
@@ -379,7 +379,7 @@ test('a verdict that proves the task impossible ends the run and keeps its reaso
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 10, score: 8, tries: 10 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 10, score: 8, tries: 10, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   const prompts = fixture.calls.filter(call => call.method === 'session/prompt').length;
   idle(fixture, 's1');
@@ -404,7 +404,7 @@ test('a verdict that abstains asks for a person and pauses the run', async t => 
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   await until(() => controller.queries.loop?.phase === 'needs-human');
@@ -447,7 +447,7 @@ test('a whole-record run reports its scope, and one round never claims the whole
   await until(() => controller.state.online && controller.queries.record.ready);
 
   // The shipping record verifies the existing artifact first, so round 1 is judged before any work.
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 10, score: 8, tries: 2 });
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 10, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => verifier.requests.length > 0);
   // The snapshot says which rounds the run covers, so a pass can never be read as more than that.
   assert.equal(controller.queries.loop?.scope, 'rounds 1–10/10');
@@ -469,7 +469,7 @@ test('a verification retry is a new task with its own identity and file', async 
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 1 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 1, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   await until(() => controller.queries.loop?.phase === 'passed', 15_000);
@@ -492,7 +492,7 @@ test('a forked round with neither verdict nor block ends as verification unavail
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 1 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 1, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   // No verdict and no block is an outage, not a failing review: the attempt is not consumed.
@@ -516,7 +516,7 @@ test('cancelling the review cancels the verifier and ignores its late verdict', 
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   await until(() => settle !== undefined);
@@ -542,7 +542,7 @@ test('a host without a verifier keeps scoring from the reply block', async t => 
   await until(() => controller.state.online && controller.queries.record.ready);
   assert.equal(controller.queries.forkedVerification, false);
   // The same command asks for a grader instead, because no verifier is available.
-  await controller.actions.startLoop(workFirst('designdoc-review', controller.queries.forkedVerification), { from: 1, to: 1, score: 8, tries: 1 });
+  await controller.actions.startLoop(workFirst('designdoc-review', controller.queries.forkedVerification), { from: 1, to: 1, score: 8, tries: 1, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.match(lastPrompt(fixture), /spawn 一个全新的 verifier 子代理/);
 });
@@ -557,7 +557,7 @@ test('the retry carries the verifier findings, and a second plateau stops the ru
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 5 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 5, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
 
@@ -610,7 +610,7 @@ test('self-scoring is opt-in and always visible', async t => {
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   const body = JSON.stringify({ kind: 'designdoc-review', step: 1, attempt: 1, score: 8.5, status: 'done' });
   fixture.follow({ type: 'event', event: { seq: 70, type: 'assistant/message', surfaceOp: 'append',
@@ -636,7 +636,7 @@ test('a verify-first record verifies each round before asking for any work', asy
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 2, score: 8, tries: 2 });
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => controller.queries.loop?.phase === 'passed');
   // Both rounds were judged against the artifact as it stands: nobody was asked to work at all.
   assert.deepEqual(verifier.requests.map(request => request.step), [1, 2]);
@@ -660,7 +660,7 @@ test('a verify-first round that fails asks for work, carrying the findings', asy
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 2 });
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 2, autoCompactK: 0 });
   // Only the failed verdict produces a work turn, and it carries the verifier's own findings.
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.equal(verifier.requests.length, 1);
@@ -684,7 +684,7 @@ test('a high score cannot pass a round whose output never reached the artifact',
   await until(() => controller.state.online && controller.queries.record.ready);
 
   // Round 2 has no section yet, so the run starts by asking for work instead of spending a check.
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 2, to: 2, score: 8, tries: 3 });
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 2, to: 2, score: 8, tries: 3, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   assert.equal(verifier.requests.length, 0, 'nothing to verify while the section is absent');
 
@@ -716,7 +716,7 @@ test('the artifact check leaves a round alone when the section is there or unrea
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 2 });
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => controller.queries.loop?.phase === 'passed');
   assert.doesNotMatch(controller.queries.loop?.note ?? '', /artifact check/);
 
@@ -729,7 +729,7 @@ test('the artifact check leaves a round alone when the section is there or unrea
   t.after(async () => { await remote.stop(); });
   remote.start();
   await until(() => remote.state.online && remote.queries.record.ready);
-  await remote.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 2 });
+  await remote.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 2, autoCompactK: 0 });
   await until(() => remote.queries.loop?.phase === 'passed');
   assert.match(remote.queries.loop?.note ?? '', /artifact check unavailable/);
 });
@@ -756,7 +756,7 @@ test('a forked round traces its verifier lifecycle, so a missing verdict has a w
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 1 });
+  await controller.actions.startLoop(workFirst('designdoc-review'), { from: 1, to: 1, score: 8, tries: 1, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
   idle(fixture, 's1');
   // The sub-state is controller data, so the run says it is verifying without any note text.
@@ -791,7 +791,7 @@ test('a verify-first run sends the brief on its first work turn, not a follow-up
   t.after(async () => { await controller.stop(); });
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 3 });
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true)!, { from: 1, to: 1, score: 8, tries: 3, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
 
   // The opening prompt is the round's brief: the task, the artifact and the checklist for this round.
@@ -830,7 +830,7 @@ test('a verify-first round with no artifact at all asks for work without a verif
   controller.start();
   await until(() => controller.state.online && controller.queries.record.ready);
 
-  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true, { path: 'loop.md' })!, { from: 1, to: 1, score: 8, tries: 3 });
+  await controller.actions.startLoop(loopProtocolFor('designdoc-review', true, { path: 'loop.md' })!, { from: 1, to: 1, score: 8, tries: 3, autoCompactK: 0 });
   await until(() => fixture.calls.some(call => call.method === 'session/prompt'));
 
   // No verifier was forked, and no attempt was spent: the first work turn is attempt 1, exactly as it

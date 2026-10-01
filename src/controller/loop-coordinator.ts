@@ -18,6 +18,18 @@ export interface LoopHost {
   facts(): { sessionId?: string; online: boolean; busy: boolean; pending: boolean; ready: boolean };
   reply(): string;
   send(prompt: string): Promise<void>;
+  /** Tokens the host projects for one session's next request, or undefined when it reports none.
+   *
+   * The host owns the measurement — this is the number the status bar shows — so a run's auto-compact
+   * threshold compares against one fact rather than a client-side estimate of the transcript.
+   * @param sessionId - Session whose history is measured; the reviewed session of the run.
+   */
+  historyTokens(sessionId: string): number | undefined;
+  /** Compact one session's history now.
+   * @param signal - Cancels the compaction when the run stops or is replaced.
+   * @returns What the host reported doing.
+   */
+  compact(sessionId: string, signal: AbortSignal): Promise<string>;
   publish(failure?: string): void;
   trace(event: string, detail: ObjectValue): void;
 }
@@ -93,6 +105,14 @@ class LoopExecution {
   private settleTimer?: NodeJS.Timeout;
   /** Whether an attempt is currently being judged by an independent verifier. */
   private verifying = false;
+  /** Whether the run is compacting the session before it sends the next prompt.
+   *
+   * A compaction takes minutes, so a state update that arrives while it runs must neither start a
+   * second one nor slip a prompt past it into the history it is about to rewrite.
+   */
+  private compacting = false;
+  /** Cancels that compaction when the run is stopped, replaced or past its deadline. */
+  private compactAbort?: AbortController;
   /** A verdict is being consumed right now.
    *
    * Consuming one reads the artifact, so it is asynchronous; without this gate a replayed idle edge
@@ -167,11 +187,19 @@ class LoopExecution {
       return;
     }
     const prompt = loop.start();
-    loop.sent();
     this.armLoopDeadline();
     this.update({});
     try {
       if (!this.isCurrent(loop)) return;
+      // The opening round is sent into the same history as every later one, so it is checked the same
+      // way. This run is inside the caller's "Starting loop…" envelope, which a first compaction holds
+      // until it finishes — the price of not sending round one into a history already over the limit.
+      const due = this.compactDue(loop);
+      if (due !== undefined && !await this.compactNow(loop, due)) return;
+      // The compaction awaited, so the run may have been stopped or replaced while it worked.
+      if (!this.isCurrent(loop)) return;
+      loop.sent();
+      this.update({});
       await this.host.send(prompt);
       this.traceEvent('loop', { phase: 'sent', runId, kind: protocol.kind, step: limits.from, attempt: 1 });
     } catch (error) {
@@ -194,7 +222,7 @@ class LoopExecution {
     const text = errorText(error).slice(0, 200);
     this.forgetSettleTimer();
     this.clearLoopDeadline();
-    this.abortVerification();
+    this.abortWork();
     loop.human({ kind: 'send', text }, 'send-rejected');
     this.traceLoopEnd(loop);
     this.pendingPrompt = undefined;
@@ -311,7 +339,7 @@ class LoopExecution {
     if (this.loop === undefined || !this.loop.active) return;
     this.forgetSettleTimer();
     this.clearLoopDeadline();
-    this.abortVerification();
+    this.abortWork();
     this.endedAt = undefined;
     this.loop.cancel(reason);
     this.traceLoopEnd(this.loop);
@@ -550,24 +578,30 @@ class LoopExecution {
     if (step.kind === 'continue') void this.flushLoop();
   }
 
-  /** Stop an in-flight verification, if any; its result can no longer decide anything. */
-  private abortVerification(): void {
+  /** Stop the work this run has out in the world — a verification and an auto-compaction — so a late
+   * result can no longer decide anything and a compaction nobody is waiting for stops consuming the
+   * host.
+   */
+  private abortWork(): void {
     this.verifyAbort?.abort();
     this.verifyAbort = undefined;
     this.verifying = false;
+    this.compactAbort?.abort();
+    this.compactAbort = undefined;
+    this.compacting = false;
   }
 
   /** Stop the run because the whole-run budget expired; a budget stop, not a verdict.
    *
-   * Any verification in flight is cancelled (bounded, as everywhere else) and its late result can
-   * no longer decide anything, because the loop is no longer active.
+   * Work in flight is cancelled (bounded, as everywhere else) and its late result can no longer
+   * decide anything, because the loop is no longer active.
    */
   private expireLoopDeadline(): void {
     this.deadlineTimer = undefined;
     const loop = this.loop;
     if (loop === undefined || !loop.active) return;
     this.forgetSettleTimer();
-    this.abortVerification();
+    this.abortWork();
     this.endedAt = undefined;
     loop.note('⚠ deadline reached');
     loop.deadline();
@@ -597,18 +631,81 @@ class LoopExecution {
     // Nothing of this loop writes while an independent verifier is judging it: the round under
     // verification must be the round that was scored. A prompt that appears meanwhile is sent when
     // the verdict lands (or dropped with the run), never interleaved with the verification.
-    if (this.verifying) return;
+    if (this.verifying || this.compacting) return;
     const facts = this.host.facts();
     if (facts.sessionId !== loop.sessionId || !facts.online || !facts.ready || facts.busy || facts.pending) return;
+    // Auto-compaction happens while the prompt is still held, so the round that follows is the first
+    // thing written into the compacted history. A state update published during it re-enters here and
+    // is turned away by `compacting`.
+    const due = this.compactDue(loop);
+    if (due !== undefined && !await this.compactNow(loop, due)) return;
+    const pending = this.pendingPrompt;
+    if (pending === undefined || !this.isCurrent(loop)) return;
     // Consume before awaiting, so a re-entrant update cannot send the same prompt twice.
     this.pendingPrompt = undefined;
     loop.sent();
     this.update({});
-    try { if (this.isCurrent(loop)) await this.host.send(prompt); }
+    try { if (this.isCurrent(loop)) await this.host.send(pending); }
     catch (error) {
       // The next prompt was rejected (a waiting interaction, a lost snapshot, offline): the run ends
       // with that reason recorded instead of vanishing without a trace.
       this.rejectLoopSend(loop, error);
+    }
+  }
+
+  /** The context size that puts this send behind a compaction, or undefined when it may go out now.
+   *
+   * Synchronous on purpose: the common answer is "nothing to do", and an `await` there would yield
+   * between deciding to send and sending, which is long enough for another run to take the session.
+   * @param loop - Run about to send.
+   * @returns The measured size in tokens, or undefined when this run does not compact.
+   */
+  private compactDue(loop: ScoredLoop): number | undefined {
+    const thresholdK = loop.autoCompactK;
+    if (thresholdK <= 0) return undefined;
+    const tokens = this.host.historyTokens(loop.sessionId);
+    if (tokens === undefined) {
+      this.traceEvent('loop', { phase: 'compact-skip', runId: loop.runId, reason: 'no-context-metric' });
+      return undefined;
+    }
+    return tokens > thresholdK * 1000 ? tokens : undefined;
+  }
+
+  /** Compact the reviewed session before the next prompt, and hold the prompt until it is done.
+   *
+   * The check happens between "the client can send" and "the prompt goes out": a compaction can never
+   * interleave with a round, and the prompt it makes room for is sent into the history it produced. A
+   * compaction that fails does not stop the run — the round is still worth running, and the failure is
+   * a note rather than a verdict.
+   * @param loop - Run about to send.
+   * @param tokens - The size that made the compaction due, for the note.
+   * @returns True when the caller may go on and send; false when the run no longer owns the session.
+   */
+  private async compactNow(loop: ScoredLoop, tokens: number): Promise<boolean> {
+    this.compacting = true;
+    // A compaction is minutes of wall clock: the run says what it is waiting for, not "turn".
+    loop.compacting();
+    this.update({});
+    this.traceEvent('loop', { phase: 'compact', runId: loop.runId, tokens, thresholdK: loop.autoCompactK });
+    const abort = new AbortController();
+    this.compactAbort = abort;
+    try {
+      const text = await this.host.compact(loop.sessionId, abort.signal);
+      if (!this.isCurrent(loop)) return false;
+      loop.note(`auto compact · ${Math.round(tokens / 1000)}K tokens · ${text}`.slice(0, 200));
+      this.update({});
+      return true;
+    } catch (error) {
+      // Stopping the run aborts the compaction on purpose; that is not a failure to report.
+      if (!this.isCurrent(loop)) return false;
+      const reason = errorText(error).slice(0, 120);
+      this.traceEvent('loop', { phase: 'compact-failed', runId: loop.runId, reason });
+      loop.note(`⚠ auto compact failed · ${reason}`);
+      this.update({});
+      return true;
+    } finally {
+      if (this.compactAbort === abort) this.compactAbort = undefined;
+      this.compacting = false;
     }
   }
 

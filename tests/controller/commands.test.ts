@@ -69,7 +69,7 @@ test('/loop runs the named record, with its own defaults and vars', async t => {
   // The record's own title, path and default budget come from loop.yaml, not from the command line.
   assert.deepEqual(await run(app, '/loop designdoc-review --to 2'), done([{ kind: 'closePanels' }, { kind: 'live' },
     { kind: 'scroll', position: 0 },
-    { kind: 'notice', text: 'Designdoc review · tui-design.md started · steps 1–2 · pass 8 · ≤10 tries' }]));
+    { kind: 'notice', text: 'Designdoc review · tui-design.md started · steps 1–2 · pass 8/10 · ≤10 tries' }]));
   const call = fixture.calls.filter(entry => entry.method === 'session/prompt').at(-1)!;
   const text = String(object(array(object(object(object(call.payload).args).request).content)[0]).text);
   assert.match(text, /tui-design\.md/);
@@ -82,7 +82,7 @@ test('/loop takes an optional positional score and tries over the record default
   const { app } = await controller(t);
   assert.deepEqual(await run(app, '/loop design-review 9 3'), done([{ kind: 'closePanels' }, { kind: 'live' },
     { kind: 'scroll', position: 0 },
-    { kind: 'notice', text: 'Design review started · steps 1–10 · pass 9 · ≤3 tries' }]));
+    { kind: 'notice', text: 'Design review started · steps 1–10 · pass 9/10 · ≤3 tries' }]));
   assert.equal(app.queries.loop?.score, 9);
   assert.equal(app.queries.loop?.tries, 3);
 });
@@ -114,8 +114,20 @@ test('/loop confirms a named record in a form when the caller can show one', asy
   // A typed flag is already a decision, so the same caller runs it without another step.
   assert.deepEqual(await runCommand(app, parseCommand('/loop design-review 9'), interactive),
     done([{ kind: 'closePanels' }, { kind: 'live' }, { kind: 'scroll', position: 0 },
-      { kind: 'notice', text: 'Design review started · steps 1–10 · pass 9 · ≤10 tries' }]));
+      { kind: 'notice', text: 'Design review started · steps 1–10 · pass 9/10 · ≤10 tries' }]));
   assert.equal(app.queries.loop?.score, 9);
+});
+
+test('a threshold the form confirmed reaches the run and is announced', async t => {
+  const { app } = await controller(t);
+  const interactive: CommandPort = { interactive: true, run: async () => undefined };
+  // The form hands back every number it edited, including the auto-compact threshold the command line
+  // has no flag for; the line that announces the run says what the run will do to the session.
+  assert.deepEqual(await runCommand(app, { kind: 'loop', name: 'design-review',
+    options: { from: 1, to: 2, score: 8, tries: 2, autoCompactK: 150 } }, interactive),
+  done([{ kind: 'closePanels' }, { kind: 'live' }, { kind: 'scroll', position: 0 },
+    { kind: 'notice', text: 'Design review started · steps 1–2 · pass 8/10 · ≤2 tries · auto compact 150K tokens' }]));
+  assert.equal(app.queries.loop?.autoCompactK, 150);
 });
 
 test('a scripted caller runs a named record directly and cannot ask for a list', async t => {
@@ -123,7 +135,7 @@ test('a scripted caller runs a named record directly and cannot ask for a list',
   // The default port has no surface, so the record's own defaults are applied without a form.
   assert.deepEqual(await run(app, '/loop design-review'), done([{ kind: 'closePanels' }, { kind: 'live' },
     { kind: 'scroll', position: 0 },
-    { kind: 'notice', text: 'Design review started · steps 1–10 · pass 8 · ≤10 tries' }]));
+    { kind: 'notice', text: 'Design review started · steps 1–10 · pass 8/10 · ≤10 tries' }]));
   assert.equal(app.queries.loop?.score, 8);
   // Bare `/loop` has no operator to choose, so it is told how to name a record.
   assert.deepEqual(await run(app, '/loop'), kept('Use /loop <name> · available: design-review, designdoc-review'));
@@ -136,7 +148,7 @@ test('a record variable the form confirmed retargets the run without editing loo
     options: { from: 1, to: 2, score: 8, tries: 2, vars: { path: 'docs/other.md' } } },
     { interactive: true, run: async () => undefined }), done([{ kind: 'closePanels' }, { kind: 'live' },
     { kind: 'scroll', position: 0 },
-    { kind: 'notice', text: 'Designdoc review · docs/other.md started · steps 1–2 · pass 8 · ≤2 tries' }]));
+    { kind: 'notice', text: 'Designdoc review · docs/other.md started · steps 1–2 · pass 8/10 · ≤2 tries' }]));
   const call = fixture.calls.filter(entry => entry.method === 'session/prompt').at(-1)!;
   const text = String(object(array(object(object(object(call.payload).args).request).content)[0]).text);
   assert.match(text, /docs\/other\.md/);
