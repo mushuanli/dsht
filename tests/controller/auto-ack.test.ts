@@ -28,13 +28,14 @@ async function autoAckEvents(path: string): Promise<string[]> {
 }
 
 test('the configured option answers a waiting question and the waterfall that follows it', async t => {
-  const fixture = await host(); t.after(() => fixture.close());
+  const fixture = await host();
   fixture.replayInteractions = [question('q1', [
     { id: 'one', question: 'Choose a target', options: [{ label: 'First' }, { label: 'Second' }] },
     { id: 'many', question: 'Choose features', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
   ])];
   const app = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
-  t.after(async () => { await app.stop(); });
+  // Stop reconnects and automatic replies before closing the host they use.
+  t.after(async () => { try { await app.stop(); } finally { await fixture.close(); } });
   app.actions.setAutoAck(2);
   app.start();
   // Both sub-questions are answered with option 2 and submitted as one reply, exactly as two keypresses
@@ -47,12 +48,13 @@ test('the configured option answers a waiting question and the waterfall that fo
 });
 
 test('option 0 turns the policy off, and a later command answers the menu that was waiting', async t => {
-  const fixture = await host(); t.after(() => fixture.close());
+  const fixture = await host();
   fixture.replayInteractions = [question('q1', [
     { id: 'one', question: 'Choose a target', options: [{ label: 'First' }, { label: 'Second' }] },
   ])];
   const app = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
-  t.after(async () => { await app.stop(); });
+  // Stop reconnects and automatic replies before closing the host they use.
+  t.after(async () => { try { await app.stop(); } finally { await fixture.close(); } });
   app.actions.setAutoAck(0);
   app.start();
   await until(() => app.state.pending.length === 1);
@@ -66,14 +68,21 @@ test('option 0 turns the policy off, and a later command answers the menu that w
 });
 
 test('an option the menu does not offer is left to the operator instead of guessed at', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'dsht-auto-ack-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-auto-ack-'));
   const path = join(directory, 'trace.log');
-  const fixture = await host(); t.after(() => fixture.close());
+  const fixture = await host();
   fixture.replayInteractions = [question('q1', [
     { id: 'one', question: 'Choose a target', options: [{ label: 'First' }, { label: 'Second' }] },
   ])];
   const app = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1', tracePath: path });
-  t.after(async () => { await app.stop(); });
+  // Drain trace writes before removing their directory; a failed cleanup hook skips later hooks.
+  t.after(async () => {
+    try { await app.stop(); }
+    finally {
+      try { await fixture.close(); }
+      finally { await rm(directory, { recursive: true, force: true }); }
+    }
+  });
   app.actions.setAutoAck(5);
   app.start();
   await until(() => app.state.pending.length === 1);
@@ -88,9 +97,10 @@ test('an option the menu does not offer is left to the operator instead of guess
 });
 
 test('an approval is answered by its number, and 3 stops the turn instead of replying', async t => {
-  const fixture = await host(); t.after(() => fixture.close());
+  const fixture = await host();
   const app = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
-  t.after(async () => { await app.stop(); });
+  // Stop reconnects and automatic replies before closing the host they use.
+  t.after(async () => { try { await app.stop(); } finally { await fixture.close(); } });
   app.actions.setAutoAck(1);
   app.start();
   await until(() => app.queries.record.ready);

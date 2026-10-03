@@ -31,7 +31,7 @@
     "start:profile": "node -e \"require('node:fs').mkdirSync('.diagnostics',{recursive:true})\" && NODE_OPTIONS=\"--expose-gc --heapsnapshot-signal=SIGUSR2 --diagnostic-dir=.diagnostics\" tsx src/cli/index.ts",
     "build": "npm run build:prompts && node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
-    "test": "tsx --test tests/*/*.test.ts tests/*/*.test.tsx",
+    "test": "node --import tsx --test --test-timeout=60000 tests/*/*.test.ts tests/*/*.test.tsx",
     "test:terminal": "node scripts/test/terminal.mjs",
     "test:package": "node scripts/test/package.mjs",
     "prepack": "npm run build",

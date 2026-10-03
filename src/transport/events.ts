@@ -6,7 +6,7 @@
  * `waterfall-delegate` rather than silently dropped.
  */
 import { array, errorText, object, string, type Json, type ObjectValue } from './wire.ts';
-import { entriesOf, optionalString } from './decode.ts';
+import { entriesOf, optionalObject, optionalString } from './decode.ts';
 
 /** One selectable answer of a host question, already flattened out of the raw request. */
 export interface QuestionOption { label: string; description?: string }
@@ -191,14 +191,24 @@ function questionItem(value: Json): QuestionItem {
   };
 }
 
+/** Read the host's approval explanation, keeping unknown bodies available for inspection. */
+function approvalDescription(value: Json | undefined): string {
+  const request = optionalObject(value);
+  if (!request) return optionalString(value) ?? JSON.stringify(value ?? null, null, 2);
+  const display = optionalObject(request.displayReason);
+  const reason = [display?.zh, display?.en, request.displayReason, request.reason, request.description]
+    .map(optionalString).find(text => text?.trim());
+  if (!reason) return JSON.stringify(request, null, 2);
+  const tool = optionalString(request.toolName);
+  return tool?.trim() ? `${tool}\n${reason}` : reason;
+}
+
 /** Decode one `$events` waterfall frame. */
 function waterfallEvent(frame: ObjectValue): HostEvent {
   const eventId = string(frame.eventId);
   const sessionId = optionalString(frame.agentId) ?? '';
   if (frame.event === 'approval/request') {
-    // The approval body is host-defined and currently rendered verbatim; formatting it here keeps
-    // the terminal output byte-identical while removing the raw object from the boundary.
-    return { kind: 'approval-request', eventId, sessionId, description: JSON.stringify(frame.request ?? null, null, 2) };
+    return { kind: 'approval-request', eventId, sessionId, description: approvalDescription(frame.request) };
   }
   if (frame.event === 'user-questions/request') {
     try {

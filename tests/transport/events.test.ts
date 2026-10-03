@@ -14,8 +14,24 @@ test('an approval waterfall becomes a description, never the raw request', () =>
   const event = hostEvent({ type: 'waterfall', event: 'approval/request', eventId: 'a1', agentId: 's1',
     request: { description: 'Confirm', toolName: 'bash' } });
   assert.deepEqual(event, { kind: 'approval-request', eventId: 'a1', sessionId: 's1',
-    description: JSON.stringify({ description: 'Confirm', toolName: 'bash' }, null, 2) });
+    description: 'bash\nConfirm' });
   assert.equal(JSON.stringify(event).includes('"request"'), false);
+});
+
+test('approval explanations prefer Chinese display text and fall back without losing unknown bodies', () => {
+  const description = (request: Parameters<typeof hostEvent>[0]) => {
+    const event = hostEvent({ type: 'waterfall', event: 'approval/request', eventId: 'a1', agentId: 's1', request });
+    assert.equal(event?.kind, 'approval-request');
+    return event?.kind === 'approval-request' ? event.description : '';
+  };
+  assert.equal(description({ toolName: 'bash', callId: 'call-private', reason: 'escalate sandbox',
+    displayReason: { en: 'Allow danger-full-access: copy the binary', zh: '允许 danger-full-access：覆盖二进制\n/sync' } }),
+    'bash\n允许 danger-full-access：覆盖二进制\n/sync');
+  assert.equal(description({ displayReason: { zh: ' ', en: 'Allow this operation' }, reason: 'fallback' }), 'Allow this operation');
+  assert.equal(description({ displayReason: 'Display text', reason: 'fallback' }), 'Display text');
+  assert.equal(description({ displayReason: { zh: false }, reason: 'Reason' }), 'Reason');
+  assert.equal(description('Plain approval'), 'Plain approval');
+  assert.equal(description({ future: { command: 'inspect me' } }), JSON.stringify({ future: { command: 'inspect me' } }, null, 2));
 });
 
 test('a question waterfall flattens to named fields and omits absent ones', () => {

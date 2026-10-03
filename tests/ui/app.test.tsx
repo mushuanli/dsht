@@ -2210,8 +2210,15 @@ test('approval numbers answer at once, arrows still confirm, and command drafts 
   await pressKey(ui, 'half-written message');
   await until(() => ui.lastFrame()?.includes('half-written message') === true);
   // The number is the decision: it settles the request without a following Enter.
-  fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'numbered-one', agentId: 's1', request: { toolName: 'bash', reason: 'Confirm operation' } });
+  fixture.emit({ type: 'waterfall', event: 'approval/request', eventId: 'numbered-one', agentId: 's1', request: {
+    toolName: 'bash', callId: 'call-private', reason: 'escalate sandbox to danger-full-access',
+    displayReason: { en: 'Allow this operation with danger-full-access permissions',
+      zh: '允许本次操作使用 danger-full-access 权限：覆盖二进制\n/sync（工作区之外）。' },
+  } });
   await until(() => ui.lastFrame()?.includes('Approval required') === true);
+  assert.match(ui.lastFrame()!, /允许本次操作使用 danger-full-access 权限：覆盖二进制/);
+  assert.match(ui.lastFrame()!, /\/sync（工作区之外）。/);
+  assert.doesNotMatch(ui.lastFrame()!, /displayReason|call-private|\"toolName\"/);
   const expected = await readFile(new URL('../expected/approval-options.txt', import.meta.url), 'utf8');
   for (const line of expected.trimEnd().split('\n')) assert.ok(ui.lastFrame()!.includes(line), ui.lastFrame());
   assert.equal(ui.lastFrame()!.includes('half-written message'), false, ui.lastFrame());
