@@ -38,6 +38,7 @@ export async function host() {
   let followSnapshot: ObjectValue = snapshot;
   let onCommand: ((line: string) => Promise<ObjectValue | undefined>) | undefined;
   let queuePrompts = false;
+  let failQueueRemoval = false;
   // The durable pending-input state a 0.2 host publishes as the `inbox` session projection: input the
   // next step will claim (`next-step`) and input that wakes a new turn (`next-turn`).
   let inbox: { 'next-step': ObjectValue[]; 'next-turn': ObjectValue[] } = { 'next-step': [], 'next-turn': [] };
@@ -156,6 +157,13 @@ export async function host() {
           const change = object(args.request);
           assert.equal(change.sessionId, 's1');
           assert.deepEqual(change.action, { kind: 'remove' });
+          // A refusal that does not apply the mutation: the row stays, as a host that rejects the
+          // change leaves it. `businessError` is different — it answers after the switch has applied.
+          if (failQueueRemoval) {
+            value = undefined;
+            response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId,
+              result: { ok: false, error: { code: 'session/agent-busy', message: 'busy', details: { reason: 'test' } } } })); return;
+          }
           const held = [...inbox['next-step'], ...inbox['next-turn']].some(item => item.id === change.itemId);
           if (!held) {
             value = undefined;
@@ -228,8 +236,12 @@ export async function host() {
     set searchResult(value: ObjectValue) { searchResult = value; },
     set followSnapshot(value: ObjectValue) { followSnapshot = value; },
     set queuePrompts(value: boolean) { queuePrompts = value; },
+    /** Refuse a queue removal without applying it, so the row stays pending. */
+    set failQueueRemoval(value: boolean) { failQueueRemoval = value; },
     /** Replace the durable pending input and publish it, as one host splice does. */
     set inbox(value: { 'next-step': ObjectValue[]; 'next-turn': ObjectValue[] }) { inbox = value; publishInbox(); },
+    /** Replace it without publishing, so one client keeps reading the projection it already has. */
+    set staleInbox(value: { 'next-step': ObjectValue[]; 'next-turn': ObjectValue[] }) { inbox = value; },
     get inbox() { return inbox; },
     get exportRequests() { return exportRequests; },
     set exportDelayMs(value: number) { exportDelayMs = value; },

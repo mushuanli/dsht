@@ -224,6 +224,20 @@ async function execute(controller: Controller, command: RunnableCommand, port: C
       return await controller.actions.cancelTurn() ? ok([{ kind: 'closePanels' }]) : undefined;
     case 'approval':
       return await controller.actions.approve(command.allowed) ? ok([{ kind: 'closePanels' }]) : undefined;
+    case 'autoAck': {
+      // A client-local mode, not a session write. A bare line reads the state back, so the panel and
+      // the notice report the same fact the engine acts on.
+      if (command.option === undefined) {
+        const current = controller.state.autoAck;
+        return ok([{ kind: 'notice', text: current === undefined
+          ? 'Auto-ack off · /auto-ack N answers a numbered menu with option N'
+          : `Auto-ack option ${current}` }]);
+      }
+      controller.actions.setAutoAck(command.option);
+      return ok([{ kind: 'notice', text: command.option === 0
+        ? 'Auto-ack off'
+        : `Auto-ack option ${command.option} · numbered menus are answered automatically` }]);
+    }
     case 'hostCommand': {
       const { value: text, cancelled: aborted } = await runCancellable(port, 'Running command…', signal =>
         controller.actions.command(command.line, signal));

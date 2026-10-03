@@ -1,6 +1,6 @@
 /** Application facade: composes the connection, session, catalog and cost domains. */
 import { join } from 'node:path';
-import { Client } from '../transport/client.ts';
+import { Client, RemoteError } from '../transport/client.ts';
 import { writeHeapSnapshot } from '../storage/index.ts';
 import { errorText, string, type Json, type ObjectValue } from '../transport/wire.ts';
 import type { ModelCatalog, SearchItem, SessionRow } from '../transport/dsh.ts';
@@ -32,7 +32,7 @@ import { sessionLabel } from '../session-title.ts';
 import { clearReactMeasures, measureCount } from './perf-measures.ts';
 import { initialState, type ControllerStore, type State } from '../state.ts';
 import { ShellController, localSourceId } from '../shell/index.ts';
-import type { HistorySearch, AnswerValue, RemovalTarget } from '../session/types.ts';
+import type { HistorySearch, AnswerValue, PendingInteraction, RemovalTarget } from '../session/types.ts';
 import type { SavedPrompt } from '../contracts.ts';
 import type { FileReference } from '../session/references.ts';
 import type { InteractionState, OptionState } from '../session/info.ts';
@@ -56,6 +56,16 @@ const SOURCE_LIMIT = 50;
 
 /** The tag every verifier session title starts with, so a reader can tell it apart in a list. */
 const VERIFIER_TAG = '[dsht-verify] ';
+
+/** How long a failed move of an unclaimed steering row waits before the next publish retries it.
+ *
+ * Without this a host that refuses the mutation would be asked again on every stream frame; with it,
+ * a failure costs one request per second while the row is still this client's only copy of the text.
+ */
+const UNCLAIMED_RETRY_MS = 1000;
+
+/** Host rows remembered as already claimed, so a projection that still lists one cannot ask again. */
+const MAX_CLAIMED_ROWS = 64;
 
 /** What the read-only view calls a verifier's session: its title without the marker prefix. */
 function verifierLabel(title: string): string {
@@ -137,6 +147,8 @@ export interface Actions {
   setAnswers(answers: Record<string, AnswerValue['answers']>): void;
   setOption(option?: OptionState): void;
   setApproval(approval?: InteractionState['approval']): void;
+  /** Set the auto-answer policy: menu option 1-9, or 0/undefined to turn it off. */
+  setAutoAck(option?: number): void;
   recordRecall(value: string): void;
   resetRecall(): void;
   refillRecall(): boolean;
@@ -286,6 +298,18 @@ export class Controller implements ControllerStore, ConnectionListener {
   private initialized = false;
   /** Counter behind `commandId`, so every executed line has one identifier in begin and end. */
   private commandSeq = 0;
+  /** The auto-answer in flight, so one menu position is answered once however often state publishes. */
+  private autoAckTask: Promise<void> | undefined;
+  /** The menu position the policy could not answer, so an unrelated publish does not retry it. */
+  private autoAckBlocked = '';
+  /** A steering submission this client is moving behind the turn boundary; see `queueUnclaimed`. */
+  private unclaimed: { sessionId: string; itemId: string; text: string; removed: boolean } | undefined;
+  private unclaimedTask: Promise<void> | undefined;
+  /** Host rows that were already claimed when this client tried to move them, so a projection that
+   *  still lists one cannot ask again. Bounded: a stale row belongs to one turn, not to a session. */
+  private readonly claimedRows = new Set<string>();
+  /** Earliest time a failed move may be retried, so one failure is not retried on every publish. */
+  private unclaimedRetryAt = 0;
   /** Scheduling and cancellation are owned independently of domain operations. */
   private readonly foregroundSlot = new ForegroundSlot({
     changed: started => this.update(started ? { lastFailure: '' } : {}),
@@ -420,6 +444,13 @@ export class Controller implements ControllerStore, ConnectionListener {
     this.traceTransition(previous, next);
     for (const observer of this.observers) observer();
     this.loops.changed();
+    // Every publish is also a chance for the auto-answer policy: a menu that just arrived, a
+    // sub-question a waterfall advanced to, and the publish that reports the client free again all
+    // reach it here, so the policy needs no second way to be woken.
+    this.queueAutoAck();
+    // The same place answers the other question a publish can settle: a steering row the host never
+    // claimed is movable only once nothing runs, which the status that just published is what says.
+    this.queueUnclaimed();
   }
 
   /** Record one diagnostic event; a no-op when no trace path was configured. */
@@ -540,6 +571,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       setAnswers: answers => this.setAnswers(answers),
       setOption: option => this.setOption(option),
       setApproval: approval => this.setApproval(approval),
+      setAutoAck: option => this.setAutoAck(option),
       recordRecall: value => this.recordRecall(value),
       resetRecall: () => this.resetRecall(),
       refillRecall: () => this.refillRecall(),
@@ -771,7 +803,12 @@ export class Controller implements ControllerStore, ConnectionListener {
   event(event: HostEvent): boolean {
     switch (event.kind) {
       case 'approval-request':
-      case 'question-request': return this.session.accept(event);
+      case 'question-request': {
+        // A fresh delivery is the host saying this interaction is live, so a policy that declined an
+        // earlier answer — or lost one to a dropped connection — applies to it again.
+        this.autoAckBlocked = '';
+        return this.session.accept(event);
+      }
       case 'waterfall-delegate': return false;
       case 'cancel': this.session.cancelled(event.eventId); return true;
       case 'agent-status':
@@ -1194,10 +1231,12 @@ export class Controller implements ControllerStore, ConnectionListener {
    * Text the operator typed ends an automated review: the loop must not race a human for the turn,
    * and the reply it would parse is no longer the reply to its own prompt.
    * @param text - Composed prompt text.
+   * @param delivery - Delivery the caller states, for a line that must wake a turn rather than steer
+   *   the one this client still believes is running.
    */
-  private async prompt(text: string): Promise<void> {
+  private async prompt(text: string, delivery?: 'steer' | 'queue'): Promise<void> {
     this.loops.stop();
-    await this.session.prompt(text);
+    await this.session.prompt(text, true, delivery);
   }
 
 
@@ -1281,6 +1320,187 @@ export class Controller implements ControllerStore, ConnectionListener {
 
   /** Dismiss the whole pending question set without answering it, as the Web close button does. */
   private async dismissQuestion(): Promise<void> { await this.session.dismissQuestion(); }
+
+  /** Set the auto-answer policy and apply it to whatever is waiting right now.
+   *
+   * The policy is client-wide and lives in the published state, so `/status` reads the same fact the
+   * engine acts on and the next session inherits it rather than silently losing it.
+   * @param option - 1-based menu option to pick; 0 or undefined turns the policy off.
+   */
+  private setAutoAck(option?: number): void {
+    const next = option === undefined || option <= 0 ? undefined : option;
+    // A new policy is a new decision about the same menu, so a position declined under the old one is
+    // available again.
+    this.autoAckBlocked = '';
+    this.update({ autoAck: next });
+  }
+
+  /** Name the menu position the policy is looking at: the interaction, its sub-question and the option.
+   *
+   * One key names one decision. A policy that declined a position is not asked again on the next
+   * publish, a waterfall that advanced is a new position, and no interaction is no position at all.
+   * @returns The key, or an empty string when nothing is waiting.
+   */
+  private autoAckKey(): string {
+    const option = this.state.autoAck;
+    const pending = this.state.pending[0];
+    if (option === undefined || pending === undefined) return '';
+    if (pending.kind === 'approval') return `${pending.eventId}:approval:${option}`;
+    const answered = (this.state.session.interaction.answers[pending.eventId] ?? []).length;
+    return `${pending.eventId}:${answered}:${option}`;
+  }
+
+  /** The answer this policy gives to the interaction waiting now, when it has one.
+   *
+   * An option the menu does not offer yields undefined and the menu is left to the operator: the
+   * numbered rows are the only thing "option N" can mean, and the typing row is not an option.
+   * @param pending - Interaction the answer would settle.
+   * @param option - Configured 1-based option.
+   * @returns What to answer, or undefined when this policy cannot answer it.
+   */
+  private autoAckTarget(pending: PendingInteraction, option: number):
+  { kind: 'approval' } | { kind: 'question'; label: string } | undefined {
+    // An approval is a fixed three-row menu: allow once, deny, stop the turn.
+    if (pending.kind === 'approval') return option <= 3 ? { kind: 'approval' } : undefined;
+    const answers = this.state.session.interaction.answers[pending.eventId] ?? [];
+    const label = pending.questions[answers.length]?.options[option - 1]?.label;
+    return label === undefined ? undefined : { kind: 'question', label };
+  }
+
+  /** Arm the policy for whatever is waiting, unless it is already answering or already declined it. */
+  private queueAutoAck(): void {
+    if (this.state.autoAck === undefined || this.autoAckTask !== undefined) return;
+    const key = this.autoAckKey();
+    if (key === '' || key === this.autoAckBlocked) return;
+    // Reserve the slot before the first step runs: claiming the foreground slot publishes, and that
+    // publish re-enters here, so an unreserved start could arm a second answer to the same menu.
+    const task = Promise.resolve().then(() => this.runAutoAck());
+    this.autoAckTask = task;
+    const release = () => { if (this.autoAckTask === task) this.autoAckTask = undefined; };
+    void task.then(release, release);
+  }
+
+  /** Answer the pending menu, one sub-question at a time, until the policy has nothing left to do.
+   *
+   * The action layer owns the foreground slot and the failure channel, so this decides only *what* to
+   * answer, and stops when the client is busy, offline, or the host refused. None of those is
+   * remembered as a refusal: the publish that reports the client free again arms the policy anew,
+   * while a menu option that does not exist is declined for good until the policy or the menu changes.
+   */
+  private async runAutoAck(): Promise<void> {
+    let answered = '';
+    for (;;) {
+      const option = this.state.autoAck;
+      const pending = this.state.pending[0];
+      if (option === undefined || pending === undefined) return;
+      const key = this.autoAckKey();
+      // No progress on a key that still stands would answer the same sub-question forever; a refused
+      // action leaves the interaction pending, so this is the one place a loop could spin.
+      if (key === '' || key === answered) { this.autoAckBlocked = key; return; }
+      if (!this.state.online || this.busy()) return;
+      const target = this.autoAckTarget(pending, option);
+      if (target === undefined) { this.autoAckBlocked = key; return; }
+      answered = key;
+      const accepted = target.kind === 'approval'
+        ? (option === 3 ? await this.actions.cancelTurn() : await this.actions.approve(option === 1))
+        : await this.actions.answerQuestion({ selected: [target.label] });
+      // A refused action leaves the interaction pending: the next publish retries it, and the operator
+      // can always answer by hand in the meantime.
+      if (!accepted) return;
+      this.traceNote('auto-ack', { phase: 'answer', event: pending.eventId, kind: pending.kind, option });
+    }
+  }
+
+  /** Move a steering submission the host left unclaimed behind the turn boundary.
+   *
+   * A steer is claimed at a step boundary of a running turn; a turn that ends first — a cancellation is
+   * the case this exists for — leaves the row in the host's inbox, where nothing will ever claim it,
+   * because only a queued turn wakes the agent. The row is removed and re-sent as a queued prompt, so
+   * the message the operator already sent is delivered instead of waiting for someone to type again.
+   *
+   * This is not a second submission queue. The row is the host's own pending input, this client only
+   * moves it, and only when it can attribute the row to a submission of its own.
+   */
+  private queueUnclaimed(): void {
+    if (this.unclaimedTask !== undefined) return;
+    // `session` is checked like the pending derivation above does: an early publish happens before the
+    // domain controllers exist, and this is reached from every publish.
+    if (!this.state.online || this.state.sessionId === undefined || this.session === undefined) return;
+    // A turn that is running — or a loop driving one — claims a steering row at its next step boundary,
+    // so moving one then would race the claim it is waiting for. Waiting costs nothing: the publish
+    // that reports the client free retries this.
+    if (this.running || this.busy()) return;
+    if (Date.now() < this.unclaimedRetryAt) return;
+    if (this.unclaimed === undefined) {
+      const found = this.session.unclaimedSubmission(this.state.sessionId);
+      if (found === undefined || this.claimedRows.has(found.itemId)) return;
+      this.unclaimed = { sessionId: this.state.sessionId, itemId: found.itemId, text: found.text, removed: false };
+    }
+    // Reserve the slot before the first step runs: the step publishes, and that publish re-enters here.
+    const task = Promise.resolve().then(() => this.runUnclaimed());
+    this.unclaimedTask = task;
+    const release = () => { if (this.unclaimedTask === task) this.unclaimedTask = undefined; };
+    void task.then(release, release);
+  }
+
+  /** One attempt at the move: remove the host row once, then send it as a queued prompt until it lands. */
+  private async runUnclaimed(): Promise<void> {
+    const value = this.unclaimed;
+    if (value === undefined) return;
+    // The row belongs to the session that submitted it; being on another session only postpones this.
+    if (value.sessionId !== this.state.sessionId) return;
+    if (!this.state.online || this.running || this.busy()) return;
+    let outcome: 'requeued' | 'claimed' | 'failed' | undefined;
+    try {
+      outcome = await this.foregroundSlot.run('prompt', 'Re-queuing the message the host left parked…',
+        () => this.moveUnclaimed(value));
+    } catch (error) {
+      // The move reports its own failures; this is only the contract that no throw escapes a task.
+      this.update({ lastFailure: errorText(error) });
+      outcome = 'failed';
+    }
+    // A refused claim means another operation owns the client; its end publishes, which retries this.
+    if (outcome === undefined) return;
+    if (outcome === 'failed') { this.unclaimedRetryAt = Date.now() + UNCLAIMED_RETRY_MS; return; }
+    // Either the host recorded the message again, or it had already claimed it: both are delivery.
+    if (outcome === 'claimed') {
+      this.claimedRows.add(value.itemId);
+      while (this.claimedRows.size > MAX_CLAIMED_ROWS) {
+        const oldest = this.claimedRows.values().next().value;
+        if (oldest === undefined) break;
+        this.claimedRows.delete(oldest);
+      }
+    }
+    this.unclaimed = undefined;
+    this.unclaimedRetryAt = 0;
+    this.traceNote('unclaimed', { phase: outcome, event: value.itemId });
+  }
+
+  /** Remove the host's row once, then re-send the text as a queued prompt.
+   *
+   * Removing first is what keeps one message from being delivered twice. A host that claimed the row
+   * in this window answers `session/queue-item-not-found`, which is the one failure that means the
+   * message was delivered rather than lost; every other failure keeps the text here and retries.
+   * @param value - Row identity, text and whether the row is already gone from the host.
+   * @returns What happened, for the retry policy.
+   */
+  private async moveUnclaimed(value: { itemId: string; text: string; removed: boolean }):
+  Promise<'requeued' | 'claimed' | 'failed'> {
+    if (!value.removed) {
+      try { await this.session.removeQueued(value.itemId); value.removed = true; }
+      catch (error) {
+        if (error instanceof RemoteError && error.code === 'session/queue-item-not-found') return 'claimed';
+        this.update({ lastFailure: errorText(error) });
+        return 'failed';
+      }
+    }
+    // The row has left the host, so this record is now the only place the message exists: a failed send
+    // keeps it, and the retry sends the same text again. The delivery is stated as `queue` rather than
+    // read from the running state: a steering row is exactly the one that must wake a new turn, and
+    // this client's own shadow may still believe the turn that left the row behind is in flight.
+    try { await this.prompt(value.text, 'queue'); return 'requeued'; }
+    catch (error) { this.update({ lastFailure: errorText(error) }); return 'failed'; }
+  }
 }
 
 export type { HistorySearch, RemovalTarget, AnswerValue, PendingInteraction } from '../session/types.ts';

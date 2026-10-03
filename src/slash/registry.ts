@@ -40,6 +40,7 @@ export const COMMAND_HINTS: readonly CommandHint[] = [
   { command: '/coredump', usage: '[tag]', description: 'Write a V8 heap snapshot for memory diagnosis' },
   { command: '/allow', description: 'Approve the pending request once', exactOnly: true },
   { command: '/deny', description: 'Reject the pending request', exactOnly: true },
+  { command: '/auto-ack', usage: '[N|off]', description: 'Auto-answer a numbered menu with option N; 0 disables' },
   { command: '/status', description: 'Show full session status details' },
   { command: '/cost', description: 'Show cost estimates and refresh usage' },
   { command: '/think', usage: '[seq or live]', description: 'Inspect reasoning with user prompt summaries' },
@@ -171,6 +172,8 @@ export const COMMAND_POLICY: Readonly<Partial<Record<Command['kind'], CommandPol
   // Cancelling the turn, or settling the interaction that is holding it, must never be refused.
   cancel: { ...ANSWERS_WHILE_RUNNING },
   approval: { ...ANSWERS_WHILE_RUNNING },
+  // A policy for how the menus answer is local state; it is most useful exactly while one waits.
+  autoAck: LOCAL_OR_READ,
   compact: { requiresSession: true, ...QUEUES_WHILE_RUNNING },
   loop: { requiresSession: true, requiresNoInteraction: true, ...QUEUES_WHILE_RUNNING },
   // A record list is a surface for the draft being typed; by the time a turn ends, the operator has

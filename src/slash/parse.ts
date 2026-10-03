@@ -75,6 +75,9 @@ export const LOOP_ANSWER_USAGE = 'Use /loop answer <text>';
 /** The one message a malformed `/loop abort` line receives. */
 export const LOOP_ABORT_USAGE = 'Use /loop abort (no arguments)';
 
+/** The one message a malformed `/auto-ack` line receives. */
+export const AUTO_ACK_USAGE = 'Use /auto-ack [1-9|off]';
+
 /** Parse `/loop <name> [score] [tries] [flags]`.
  *
  * The name is a record in `loop.yaml`; the syntax layer cannot know which records exist, so it only
@@ -196,6 +199,14 @@ export function parseCommand(line: string): Command {
   if (value === '/cancel') return { kind: 'cancel' };
   if (value === '/allow') return { kind: 'approval', allowed: true };
   if (value === '/deny') return { kind: 'approval', allowed: false };
+  // A bare `/auto-ack` reports the policy; a number selects an option, and `0`/`off` turns it off.
+  if (/^\/auto-ack(?: |$)/.test(value)) {
+    const raw = value.slice('/auto-ack'.length).trim();
+    if (raw === '') return { kind: 'autoAck' };
+    const option = raw === 'off' ? 0 : Number(raw);
+    if (!Number.isSafeInteger(option) || option < 0 || option > 9) return { kind: 'error', message: AUTO_ACK_USAGE };
+    return { kind: 'autoAck', option };
+  }
   if (/^\/(?:plan|goal|permission|feedback)(?:\s|$)/.test(value)) return { kind: 'hostCommand', line: value };
   if (/^\/export(?:\s|$)/.test(value)) {
     const destination = unquote(value.slice(7).trim());

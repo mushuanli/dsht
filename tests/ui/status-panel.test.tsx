@@ -69,6 +69,7 @@ test('every detail line survives scrolling, and the footer names the visible ran
   const union = flat(frames.join('\n'));
   for (const detail of ['● Ready · Ctrl+C exit', 'http://127.0.0.1:1234', 'Session s1', 'Workspace Project α with a long workspace title',
     `Model:`, 'Context', 'In ', 'Cost ', 'Queued ',
+    'Auto-ack off · /auto-ack N answers a numbered menu automatically',
     'session/follow rejected: remote error 429 too many requests, retry after 30 seconds',
     'Preset names unavailable: preset catalog unavailable because the host returned an unexpected payload',
     'Model catalog unavailable: model catalog unavailable: connection reset by peer while listing providers']) {
@@ -78,6 +79,20 @@ test('every detail line survives scrolling, and the footer names the visible ran
   assert.equal(view(999), frames.at(-1));
   assert.deepEqual(settled.at(-1), total - shown);
   assert.equal(view(0), first);
+});
+
+test('the panel states the auto-ack policy whether it is off or answering', () => {
+  const controller = panelController();
+  const row = (autoAck: number | undefined) => {
+    controller.state = { ...controller.state, autoAck };
+    const ui = render(<Box width={80}><StatusBar source={statusSource(controller)} expanded width={80} pageSize={30} /></Box>);
+    const frame = ui.lastFrame()!;
+    ui.unmount(); ui.cleanup();
+    return frame;
+  };
+  // Off is stated rather than omitted: a mode that answers for the reader has to be readable as absent.
+  assert.match(row(undefined), /Auto-ack off · \/auto-ack N answers a numbered menu automatically/);
+  assert.match(row(3), /Auto-ack option 3 · numbered menus are answered automatically/);
 });
 
 test('arrows and PgUp/PgDn scroll the open panel through the running application', async t => {

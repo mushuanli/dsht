@@ -20,6 +20,13 @@ export interface State extends SessionState {
   presetError?: string;
   presets?: PresetRow[];
   defaultModel?: ModelSelection;
+  /** Auto-answer policy for a pending numbered menu: the 1-based option to pick; absent means off.
+   *
+   * Client-wide and process-lifetime on purpose. A command that calls `ask_user_question` blocks the
+   * turn that asked it, so an unattended run needs a way to answer one; a policy remembered across
+   * restarts would instead answer menus nobody switched it on for.
+   */
+  autoAck?: number;
   /** Local `!` runs, published so the UI never reads the shell service object. */
   shell: ShellSnapshot;
 }

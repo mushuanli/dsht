@@ -888,6 +888,7 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       ...(state.session.record.livePhase === undefined ? {} : { livePhase: state.session.record.livePhase }),
       values: view.values, queued: view.queued, jobs: view.jobs,
       ...(state.defaultModel === undefined ? {} : { defaultModel: state.defaultModel }),
+      ...(state.autoAck === undefined ? {} : { autoAck: state.autoAck }),
       ...(ledger === undefined ? {} : { cost: {
         sessionText: session === undefined ? '?' : costText(session),
         today: () => line(ledger.today()),

@@ -1,6 +1,7 @@
 # DeepSeek Harness Terminal
 
 English | [中文](README.zh.md)
+
 Run at first time(run `npx @deepseek-ai/dsh web`, then copy the output to DSH_URL):
 ```bash
 export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx @itookit/dsht
@@ -9,6 +10,12 @@ Then every time only run (make sure `npx @deepseek-ai/dsh web` has run):
 ```bash
 npx @itookit/dsht
 ```
+Enhance:
+- auto ack `/auto-ack 1`;
+- customize you favorite prompt and quick call `/prompt`;
+- add agentic loop support for your work `/loop`;
+- view realtime prize and context window size in status bar;
+...
 
 ![DeepSeek Harness Terminal (dsht)](dsht-m.png)
 
@@ -367,6 +374,7 @@ Tab completes the leading slash command, extending an ambiguous draft to the sha
 | `/ssearch <text>` | Search host results within the selected workspace |
 | `/wsearch <text>` | Search sessions across all workspaces visible to the host |
 | `/allow`, `/deny` | Answer the displayed approval; allow applies once |
+| `/auto-ack [N\|off]` | Auto-answer the next numbered question or approval with option N; `0` or `off` disables |
 | `/status` | Expand or collapse full footer details; ↑/↓ scroll it, PgUp/PgDn page |
 | `/cost` | Toggle session and today estimates and refresh usage |
 | `/think` | List reasoning with user prompt summaries; ↑/↓ and Enter jump to and expand a thought |
@@ -387,7 +395,7 @@ The runtime `loop.yaml` lives in the configuration directory (`$DSHT_CONFIG_DIR`
 
 A file reference sends only `@path` in a text block. Harness instructs the model to read the referenced file or list the directory when needed; the TUI does not read local files, upload bytes, or expand contents into the prompt. Referencing an image path does not attach image data. Local attachments, image uploads/previews, and `@` session references are not implemented.
 
-Pending ordinary messages appear inside the composer, with up to two previews. `/queue` opens the full pending-input picker; ↑/↓ selects and Enter, `d`, or the dedicated Delete key removes an item through the host. Esc closes this picker without cancelling the task. A claimed item is no longer removable; the host reports that race instead of resubmitting it. The host owns the list, including reconnect replacement and removal when input is claimed; the client does not keep a second submission queue. A host at 0.1.7 or newer publishes it as the durable `inbox` session projection — the input the next step or the next turn will claim — and `session/updateQueue` mutates it by durable message id; an older host's `session/control` queue section is still read, and a host that reports neither leaves the count unknown (`Queued ?`) instead of claiming an empty queue. Questions and approvals take precedence over queue navigation, and their answers never become steering. Slash commands keep their own execution semantics. The active-job count has no publisher on a current host, so `Jobs ?` is the honest reading there rather than zero.
+Pending ordinary messages appear inside the composer, with up to two previews. `/queue` opens the full pending-input picker; ↑/↓ selects and Enter, `d`, or the dedicated Delete key removes an item through the host. Esc closes this picker without cancelling the task. A claimed item is no longer removable; the host reports that race instead of resubmitting it. The host owns the list, including reconnect replacement and removal when input is claimed; the client does not keep a second submission queue. A host at 0.1.7 or newer publishes it as the durable `inbox` session projection — the input the next step or the next turn will claim — and `session/updateQueue` mutates it by durable message id; an older host's `session/control` queue section is still read, and a host that reports neither leaves the count unknown (`Queued ?`) instead of claiming an empty queue. One case is the exception, and it is not a queue: a steering submission of this client's own that the host left in `next-step` while nothing runs is moved by the client itself — removed by its durable id and re-sent as a queued prompt, which is what wakes a turn. That state is reachable when a turn is cancelled between the submission and the step boundary that would have claimed it; only a row the client can attribute to its own submission by the request id is moved, an answer of "no longer pending" is read as the host having claimed it (delivery, not loss), and the text is held until the re-send is recorded. Questions and approvals take precedence over queue navigation, and their answers never become steering. Slash commands keep their own execution semantics. The active-job count has no publisher on a current host, so `Jobs ?` is the honest reading there rather than zero.
 
 `/plan`, `/goal`, `/permission`, and `/feedback` invoke the host command registry directly. The loaded host plugins determine availability, accepted arguments, and busy restrictions. Results and errors are displayed locally; an error keeps the input. Feedback is excluded from local input recall. `/export` streams the authenticated session ZIP into a local file (a timestamped filename in the working directory by default); paths with spaces can be quoted. It never overwrites an existing file and removes an incomplete download on failure or cancellation.
 
@@ -395,7 +403,7 @@ Pending ordinary messages appear inside the composer, with up to two previews. `
 
 Below 62 terminal columns, active streaming reasoning defaults to one folded row. Wider terminals expand active reasoning and fold it on completion. `/think live` toggles the current reasoning; a new response restores the default.
 
-Approvals offer 1. Allow once, 2. Deny, and 3. Stop turn. With an empty composer, 1–3 answers outright, or ↑/↓ selects and Enter confirms; no action is selected initially, Escape clears the highlight, and a replayed request starts unselected again. Existing drafts keep normal typing, and `/allow`, `/deny`, and `/cancel` remain available.
+Approvals offer 1. Allow once, 2. Deny, and 3. Stop turn. With an empty composer, 1–3 answers outright, or ↑/↓ selects and Enter confirms; no action is selected initially, Escape clears the highlight, and a replayed request starts unselected again. Existing drafts keep normal typing, and `/allow`, `/deny`, and `/cancel` remain available. `/auto-ack N` stops asking and answers the next numbered question or approval with option N — on an approval `1` is Allow once, so it is a permission bypass that is only for a run nobody is watching — and `/auto-ack 0` (or `off`) turns it back off; the expanded `/status` panel states the policy in force.
 
 User questions show progress, numbered options, and descriptions. Selection lists, pending questions, approvals, and file completions share the composer border with the text input. Pending questions and approvals retain recent conversation history above the composer. The history viewport fits the remaining height, removes extra vertical margins while a dialog is open, and refreshes on explicit scrolling or viewport resizing. The visible option window adapts to terminal height and follows the highlighted choice. With an empty composer, ↑/↓ moves the highlight and Enter confirms, while 1–9 answers a single-choice question outright — the number is the choice, with no second Enter. For multi-select questions, Space or 1–9 toggles checkboxes, and Enter confirms the selection. Options beyond nine remain reachable with arrows. Only the fixed choices are numbered: Other answer is an input row, so it carries no number and is reached with the arrows and Enter. Choose Other answer to type numeric free text; ordinary text answers remain supported. Existing drafts keep normal typing, and Escape leaves the question: with the options showing it dismisses the whole set, which the host records as a cancellation, while inside Other the first Escape only returns to the options. All questions are submitted together as structured selected labels and optional custom text; a failed submission preserves the answers for retry. Recognized question and approval events are retained by event ID for the connection, including replay before session selection; only the selected session displays them. Switching pickers does not decline those requests. Unrecognized waterfalls still delegate with `next`. The live host replays pending events after client reconnection; client restart does not preserve unsubmitted answer drafts. Normal TUI shutdown cancels a running turn. A cancelled/failed tool call or a host restart cannot restore the original wait from local UI state; send a new prompt requesting the questions again. Failed submissions retain their input; an interrupted HTTP response can leave delivery uncertain, so check the transcript before manually resending. The client never retries a mutation automatically.
 

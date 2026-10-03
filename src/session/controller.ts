@@ -35,6 +35,13 @@ import { PromptBackfill } from './prompt-backfill.ts';
 /** Built-in preset identifiers and the labels the web session header shows. */
 const BUILT_IN_MODES = new Map([['standard', 'Standard mode'], ['ptc', 'PTC mode'], ['minimal', 'Minimal mode'], ['cordis', 'Creator mode']]);
 
+/** Submissions this client keeps attributable to itself, so a row the host left pending can be moved.
+ *
+ * Bounded like the other per-process records of submissions: the window this matters in is one turn,
+ * not a session's history, and a claim that no longer has a record is simply left alone.
+ */
+const MAX_SUBMITTED = 256;
+
 /** Owns the selected session: its follow stream, transcript, history window and interactions. */
 export class SessionController {
   private follow: Subscription | undefined;
@@ -63,6 +70,13 @@ export class SessionController {
    * is what retires it at the same moment the durable row appears.
    */
   private readonly outbox = new Map<string, { sessionId: string; text: string; at: number }>();
+  /** Submissions this client made, by the request id the host echoes; see `unclaimedSubmission`.
+   *
+   * `outbox` retires the moment the host reports the input, which is exactly when the input becomes
+   * visible as host-owned pending state, so it cannot answer "did this client send this row?" for a
+   * row that is still waiting. This bounded record answers that question and nothing else.
+   */
+  private readonly submitted = new Map<string, { sessionId: string; text: string }>();
   /** Sessions this client has submitted a prompt for, whose running state the host has not reported yet.
    *
    * The host's status event and the list row are the authority, but they arrive *after* the request was
@@ -551,6 +565,25 @@ export class SessionController {
     await this.mutations.admit(sessionId, 'normal', () => updateQueue(this.host.require(), sessionId, itemId, { kind: 'remove' }));
   }
 
+  /** A steering submission of this client that the host left unclaimed with nothing running.
+   *
+   * A steer is claimed at a step boundary of the running turn. A turn that ends before that boundary —
+   * a cancellation is the case that leaves one behind — never claims the row, and the host wakes only
+   * on a queued turn, so nothing else will. The row is matched back to this client's own submission by
+   * the request id the host echoed: only a message this client sent may this client move.
+   * @param sessionId - Session whose inbox is read; undefined names none.
+   * @returns The host row and the text this client submitted, or undefined when there is no such row.
+   */
+  unclaimedSubmission(sessionId: string | undefined): { itemId: string; text: string } | undefined {
+    if (sessionId === undefined) return undefined;
+    for (const item of this.runtime.telemetry.pending(sessionId)) {
+      if (item.placement !== 'steering' || item.rpcId === undefined) continue;
+      const mine = this.submitted.get(item.rpcId);
+      if (mine !== undefined && mine.sessionId === sessionId) return { itemId: item.id, text: mine.text };
+    }
+    return undefined;
+  }
+
   /** Export the selected host log to a new local ZIP file.
    * @param path - Optional local destination; existing files are never overwritten.
    * @param signal - Cancels the download and removes an incomplete file.
@@ -572,14 +605,25 @@ export class SessionController {
   /** Admit text once as steering while running, or a new turn while idle; a lost response can leave delivery uncertain.
    * @param text - Composed prompt text.
    * @param track - Whether the composer should show it until the host records it.
+   * @param delivery - Delivery the caller states, for a line whose meaning is not "what the agent is
+   *   doing now": moving a row the host left parked must queue a new turn even while this client's own
+   *   shadow still believes a turn is in flight. Omitted, the delivery follows the running state.
    */
-  async prompt(text: string, track = true): Promise<void> {
+  async prompt(text: string, track = true, delivery?: 'steer' | 'queue'): Promise<void> {
     const sessionId = this.sessionId;
     const requestId = randomUUID();
     const entry = { sessionId, text, at: Date.now() };
     // Recorded before the request so a host that echoes the message and answers in either order can
     // never leave a row behind; a rejected send takes it back.
     if (track) this.outbox.set(requestId, entry);
+    // Remembered separately from the outbox, which retires as soon as the host reports the input: a
+    // row that is still pending has to stay attributable to this client for it to be moved later.
+    this.submitted.set(requestId, { sessionId, text });
+    while (this.submitted.size > MAX_SUBMITTED) {
+      const oldest = this.submitted.keys().next().value;
+      if (oldest === undefined) break;
+      this.submitted.delete(oldest);
+    }
     try {
       // Deciding steer-versus-queue and issuing the request are one admitted step: the loop's own sends
       // and everything the reader types go through this same point, so two of them cannot be decided
@@ -592,7 +636,7 @@ export class SessionController {
         // client just accepted has started (or continued) a turn the host has not reported yet, and the
         // next line must steer that turn rather than queue behind it. Both facts are read and the
         // request issued inside the gate, so two submissions cannot decide against the same staleness.
-        const running = this.running || this.admittedTurn.has(sessionId);
+        const running = delivery === undefined ? this.running || this.admittedTurn.has(sessionId) : delivery === 'steer';
         const issued = sendPrompt(this.host.require(), { sessionId, requestId,
           delivery: running ? 'steer' : 'queue', text });
         this.admittedTurn.add(sessionId);

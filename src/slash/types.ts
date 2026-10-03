@@ -30,6 +30,8 @@ export type Command =
   | { kind: 'loopAnswer'; text: string }
   | { kind: 'cancel' }
   | { kind: 'approval'; allowed: boolean }
+  /** Auto-answer the numbered menu with option 1-9; 0 disables, absent reports the current policy. */
+  | { kind: 'autoAck'; option?: number }
   | { kind: 'hostCommand'; line: string }
   /** A local `!` command, run on this machine rather than the host. */
   | { kind: 'shell'; command: string }

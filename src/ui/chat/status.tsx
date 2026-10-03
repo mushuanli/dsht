@@ -48,6 +48,8 @@ export interface StatusSource {
   queued?: number;
   jobs?: number;
   defaultModel?: ModelSelection;
+  /** Auto-answer policy in force: the 1-based menu option `/auto-ack` picks; absent when it is off. */
+  autoAck?: number;
   /** Billing summary; absent when this run has no ledger. */
   cost?: {
     sessionText: string;
@@ -535,6 +537,11 @@ const StatusDetails = memo(function StatusDetails({ source, theme, width, now, s
     ...metricLines(metrics, source.defaultModel, running).map((line, index) => ({ key: `metric-${index}`, text: safeText(line), dim: true })),
     ...costs ? [{ key: 'cost', text: `Cost ${sessionCost} session · ${todayCost} today · ${turns} turns`, dim: true }] : [],
     { key: 'queued', text: `Queued ${count(view.queued)} · Jobs ${count(view.jobs)}${costs ? '' : ` · ${turns} turns`}`, dim: true },
+    // A mode that answers a menu on the reader's behalf is stated even when it is off: silence would
+    // read as "nothing is deciding for me", which is exactly the fact this row settles.
+    { key: 'auto-ack', dim: source.autoAck === undefined, text: source.autoAck === undefined
+      ? 'Auto-ack off · /auto-ack N answers a numbered menu automatically'
+      : `Auto-ack option ${source.autoAck} · numbered menus are answered automatically` },
     ...costs && coverage === 'partial'
       ? [{ key: 'coverage', color: theme.colors.context, text: `Cost coverage incomplete: ${costs.error ? safeText(costs.error) : 'no complete scan yet'}` }] : [],
     ...source.controlError ? [{ key: 'control-error', color: theme.colors.context, text: safeText(source.controlError) }] : [],

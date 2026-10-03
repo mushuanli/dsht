@@ -26,6 +26,7 @@ export function statusSource(controller: Controller): StatusSource {
     ...(controller.queries.foreground === undefined ? {} : { foreground: { label: controller.queries.foreground.label } }),
     shell: { running: state.shell.running },
     ...(state.defaultModel === undefined ? {} : { defaultModel: state.defaultModel }),
+    ...(state.autoAck === undefined ? {} : { autoAck: state.autoAck }),
     ...(ledger === undefined ? {} : { cost: {
       sessionText: session === undefined ? '?' : costText(session),
       today: () => line(ledger.today()),

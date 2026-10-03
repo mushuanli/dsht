@@ -214,8 +214,34 @@ test('an ambiguous prefix names its candidates instead of running one', () => {
 test('commands that must be typed in full refuse a prefix', () => {
   assert.deepEqual(parseCommand('/quit'), { kind: 'quit' });
   assert.deepEqual(parseCommand('/qui'), { kind: 'error', message: 'Type the full command: /quit' });
-  assert.deepEqual(parseCommand('/a'), { kind: 'error', message: 'Type the full command: /allow' });
+  assert.deepEqual(parseCommand('/all'), { kind: 'error', message: 'Type the full command: /allow' });
   assert.deepEqual(parseCommand('/den'), { kind: 'error', message: 'Type the full command: /deny' });
+  // `/a` names two commands now, so it is ambiguous rather than an exact-only refusal.
+  assert.deepEqual(parseCommand('/a'), { kind: 'error', message: 'Ambiguous command. Matches: /allow /auto-ack' });
+});
+
+test('/auto-ack selects the option a numbered menu is answered with', () => {
+  // A bare line reads the policy back; a number selects a row, and 0 or `off` turns it off.
+  assert.deepEqual(parseCommand('/auto-ack'), { kind: 'autoAck' });
+  assert.deepEqual(parseCommand('/auto-ack 1'), { kind: 'autoAck', option: 1 });
+  assert.deepEqual(parseCommand('/auto-ack 9'), { kind: 'autoAck', option: 9 });
+  assert.deepEqual(parseCommand('/auto-ack 0'), { kind: 'autoAck', option: 0 });
+  assert.deepEqual(parseCommand('/auto-ack off'), { kind: 'autoAck', option: 0 });
+  // A unique prefix runs the command; a token that names nothing else stays a syntax error.
+  assert.deepEqual(parseCommand('/auto 2'), { kind: 'autoAck', option: 2 });
+  assert.deepEqual(parseCommand('/auto-ackx'), { kind: 'error', message: 'Unknown command. Use /help.' });
+  for (const line of ['/auto-ack 10', '/auto-ack -1', '/auto-ack 1.5', '/auto-ack two', '/auto-ack 1 2']) {
+    assert.deepEqual(parseCommand(line), { kind: 'error', message: 'Use /auto-ack [1-9|off]' }, line);
+  }
+  // It is local state, not a session write: it may be set from any screen, offline, and while the very
+  // menu it describes is waiting — that is when it is worth typing.
+  assert.deepEqual(route('/auto-ack 2', { sessionSelected: false }), { kind: 'autoAck', option: 2 });
+  assert.deepEqual(route('/auto-ack 2', { pending: true }), { kind: 'autoAck', option: 2 });
+  assert.deepEqual(route('/auto-ack 0', { during: 'loop' }), { kind: 'autoAck', option: 0 });
+  assert.deepEqual(COMMAND_POLICY.autoAck, { duringTurn: 'run', duringLoop: 'run' });
+  const hint = COMMAND_HINTS.find(item => item.command === '/auto-ack');
+  assert.equal(hint?.usage, '[N|off]');
+  assert.ok(hint && hint.description.length > 0);
 });
 
 test('the resolver reports one match, none, or the exact-only refusal', () => {
@@ -224,6 +250,9 @@ test('the resolver reports one match, none, or the exact-only refusal', () => {
   assert.equal(resolveCommand('/co'), undefined);
   assert.equal(resolveCommand('/qui'), undefined);
   assert.equal(resolveCommand('/nope'), undefined);
+  // A unique prefix of the new command runs it; the token that names two names neither.
+  assert.equal(resolveCommand('/auto'), '/auto-ack');
+  assert.deepEqual(commandMatches('/a'), ['/allow', '/auto-ack']);
   assert.deepEqual(commandMatches('/ex'), ['/export', '/export-html']);
   assert.deepEqual(commandMatches('/nope'), []);
 });

@@ -324,6 +324,20 @@ test('a refused line reports its reason once, not again in the action envelope',
   assert.equal(app.state.lastFailure, '');
 });
 
+test('/auto-ack sets the policy, reports it, and reads it back', async t => {
+  const { app } = await controller(t);
+  assert.deepEqual(await run(app, '/auto-ack 2'), done([
+    { kind: 'notice', text: 'Auto-ack option 2 · numbered menus are answered automatically' }]));
+  assert.equal(app.state.autoAck, 2);
+  // A bare line is the read: it reports the state the engine acts on, without changing it.
+  assert.deepEqual(await run(app, '/auto-ack'), done([{ kind: 'notice', text: 'Auto-ack option 2' }]));
+  assert.deepEqual(await run(app, '/auto-ack off'), done([{ kind: 'notice', text: 'Auto-ack off' }]));
+  assert.equal(app.state.autoAck, undefined);
+  assert.deepEqual(await run(app, '/auto-ack'), done([
+    { kind: 'notice', text: 'Auto-ack off · /auto-ack N answers a numbered menu with option N' }]));
+  assert.deepEqual(await run(app, '/auto-ack 12'), kept('Use /auto-ack [1-9|off]'));
+});
+
 test('the next line clears a finished run, and never an active one', async t => {
   const { app } = await controller(t);
   await run(app, '/loop design-review 9');
