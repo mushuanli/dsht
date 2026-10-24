@@ -2,9 +2,9 @@
 
 English | [中文](README.zh.md)
 
-Run at first time(run `npx @deepseek-ai/dsh web`, then copy the output to DSH_URL):
+First run: start `npx @deepseek-ai/dsh web`, then launch dsht and paste the printed login URL into its dialog:
 ```bash
-export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx @itookit/dsht
+npx @itookit/dsht
 ```
 Then every time only run (make sure `npx @deepseek-ai/dsh web` has run):
 ```bash
@@ -161,7 +161,9 @@ Use Node.js 22.19 or newer and an existing `dsh web` server; the server is a sep
 npx @itookit/dsht
 ```
 
-A token is needed only on the first run and after the saved cookie expires. Export it on its own, or export the complete URL printed by `dsh web` and let the client split off its `?token=` parameter:
+On the first run and after the saved cookie expires, a login dialog opens automatically. Paste the complete URL printed by `dsh web` (including `?token=…`) and press Enter. Whitespace is removed automatically; no environment variables or restart are needed. The URL must match the current host. Only the resulting cookie is saved.
+
+Scripts and startup configuration can still use environment variables:
 
 ```sh
 export DSH_TOKEN=<token> && npx @itookit/dsht

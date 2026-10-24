@@ -6,6 +6,7 @@ import { useMouseWheel } from './input/mouse.ts';
 import { useTerminalFocus } from './input/focus.ts';
 import { useAttentionNotify } from './use-attention-notify.ts';
 import { TextInput } from './input/input.tsx';
+import { LoginDialog } from './dialogs/login.tsx';
 import { useComposer, type DraftReceipt } from './input/use-composer.ts';
 import { useDeferredLines } from './input/use-deferred-lines.ts';
 import { useHistoryRecall } from './input/use-history-recall.ts';
@@ -303,6 +304,10 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   }
   useInput((_value, key) => {
     if (key.eventType === 'release') return;
+    if (state.status === 'Login required') {
+      if (key.ctrl && _value === 'c') exit();
+      return;
+    }
     if (copyMode) {
       if (key.escape || key.ctrl && (_value === 's' || _value === 'c')) setCopyMode(false);
       return;
@@ -920,6 +925,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       missing: ledger.missing(),
     };
   })();
+
+  if (state.status === 'Login required') return <ThemeContext.Provider value={theme}>
+    <Box paddingX={1} flexDirection="column"><LoginDialog base={controller.base} width={width}
+      onLogin={url => controller.actions.login(url)} /></Box>
+  </ThemeContext.Provider>;
 
   return <ThemeContext.Provider value={theme}><CopyMode.Provider value={copyMode}><Frozen frozen={copyMode} identity={`${width}:${stdout.rows}`}><Box flexDirection="column" paddingX={1} height={Math.max(1, (stdout.rows ?? 30) - 1)} overflowY="hidden">
     {copyMode && <Text color={theme.accent}>Copy mode · drag to select · Esc / Ctrl+S resumes</Text>}

@@ -9,6 +9,7 @@ import { ConnectionStreams } from './connection-streams.ts';
 import { nextReconnectAttempt, reconnectDelayMs } from './reconnect.ts';
 import type { HostAccess } from '../transport/host.ts';
 import type { ConnectionView } from '../session/connection-view.ts';
+import { endpoint } from '../transport/endpoint.ts';
 
 /** Connection publication cannot replace session, navigation, catalog or shell state. */
 export interface ConnectionStore {
@@ -24,7 +25,7 @@ export interface ConnectionOptions {
   /** Factory for one generation's client; replaced in tests. */
   makeClient: () => Client;
   /** Authentication used by every generation, including reconnects. */
-  authenticate: (client: Client) => Promise<void>;
+  authenticate: (client: Client, token?: string) => Promise<void>;
 }
 
 /** Reactions the controller facade owes to connection lifecycle and host events. */
@@ -51,6 +52,8 @@ export class ConnectionController implements HostAccess, ConnectionView {
   private readonly abort = new AbortController();
   private runTask: Promise<void> | undefined;
   private generationFailed: ((error: Error) => void) | undefined;
+  private retryLogin: (() => void) | undefined;
+  private loginToken: string | undefined;
   constructor(private readonly store: ConnectionStore, private readonly options: ConnectionOptions, private readonly listener: ConnectionListener) {}
 
   /** Start one retry loop, with a fresh snapshot generation after every disconnect. */
@@ -59,6 +62,7 @@ export class ConnectionController implements HostAccess, ConnectionView {
   /** Cancel retries and HTTP, close the socket, and wait for the loop to settle. */
   async stop(): Promise<void> {
     this.abort.abort();
+    this.retryLogin?.();
     this.generationFailed?.(new Error('Client stopped'));
     await this.current?.close();
     await this.runTask;
@@ -66,6 +70,24 @@ export class ConnectionController implements HostAccess, ConnectionView {
 
   /** @returns The connected client, or undefined while offline. */
   client(): Client | undefined { return this.current; }
+
+  /** Accept the host's printed login URL and resume the authentication loop. */
+  login(url: string): void {
+    if (!this.retryLogin || this.abort.signal.aborted) return;
+    let parsed: URL;
+    try { parsed = new URL(url.replace(/\s/gu, '')); }
+    catch { throw new Error('Enter the complete login URL printed by dsh web.'); }
+    if (parsed.origin !== new URL(this.options.base).origin) {
+      throw new Error('The login URL must match the current host.');
+    }
+    const { token } = endpoint(parsed.href, undefined);
+    if (!token) throw new Error('The login URL must include ?token=…');
+    this.loginToken = token;
+    const retry = this.retryLogin;
+    this.retryLogin = undefined;
+    this.store.update({ status: 'Connecting…', lastFailure: '' });
+    retry();
+  }
 
   /** @returns The connected client, or throws while offline. */
   require(): Client {
@@ -118,9 +140,10 @@ export class ConnectionController implements HostAccess, ConnectionView {
         identified: id => { this.clientId = id; }, event: event => this.listener.event(event),
         changed: () => this.store.update({}), degraded: controlError => this.store.update({ controlError }), fail,
       }, signal);
+      let authenticationRetry: Promise<void> | undefined;
       try {
         signal.throwIfAborted();
-        await this.options.authenticate(client);
+        await this.options.authenticate(client, this.loginToken ?? this.options.token);
         signal.throwIfAborted();
         await client.connect();
         signal.throwIfAborted();
@@ -136,10 +159,11 @@ export class ConnectionController implements HostAccess, ConnectionView {
         if (this.abort.signal.aborted) break;
         const reason = generation.signal.aborted ? generation.signal.reason : error;
         if (reason instanceof AuthenticationRequired || reason instanceof HttpError && [401, 403].includes(reason.status)) {
-          this.store.update({ lastFailure: `${errorText(reason)}. Set DSH_TOKEN and restart to log in.`, status: 'Login required' });
-          return;
+          authenticationRetry = new Promise(resolve => { this.retryLogin = resolve; });
+          this.store.update({ lastFailure: 'Authentication required. Paste a fresh login URL below.', status: 'Login required' });
+        } else {
+          this.store.update({ lastFailure: errorText(reason), status: 'Reconnecting…' });
         }
-        this.store.update({ lastFailure: errorText(reason), status: 'Reconnecting…' });
       } finally {
         this.generationFailed = undefined;
         generation.abort();
@@ -149,6 +173,12 @@ export class ConnectionController implements HostAccess, ConnectionView {
         await client.close();
         if (this.current === client) this.current = undefined;
         await this.listener.ended();
+      }
+      if (authenticationRetry) {
+        await authenticationRetry;
+        this.retryLogin = undefined;
+        attempt = 0;
+        continue;
       }
       if (!this.abort.signal.aborted) {
         // The delay is computed from the *current* count, and the count only resets after a stable

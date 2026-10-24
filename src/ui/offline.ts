@@ -46,9 +46,9 @@ export function offlineGuidance(source: { status: string; base: string; lastFail
   if (status === 'Login required') {
     return { title: `Login required · ${base}`, lines: [
       'No token was given, or the saved cookie no longer works.',
-      'Start the host and export the URL it prints, then run dsht again:',
-      `  ${url}`,
-      'Or export DSH_TOKEN. Tokens are never saved.',
+      'Paste the complete URL printed by dsh web into the login dialog.',
+      'Whitespace is removed automatically. Press Enter to log in.',
+      'Tokens are never saved.',
     ], ...(detail === undefined ? {} : { detail }) };
   }
   if (status === 'Connecting…') {

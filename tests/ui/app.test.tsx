@@ -10,6 +10,7 @@ import { render } from 'ink-testing-library';
 import { App } from '../../src/ui/app.tsx';
 import { COMMAND_HINTS, commonPrefix } from '../../src/slash/registry.ts';
 import { Controller } from '../../src/controller/controller.ts';
+import { CookieStore, login } from '../../src/transport/auth.ts';
 import { loopProtocolFor } from '../../src/controller/loop-protocols.ts';
 import type { VerifierPort } from '../../src/controller/verifier.ts';
 import { CostLedger } from '../../src/cost/ledger.ts';
@@ -31,6 +32,33 @@ function assertInsideComposer(frame: string, label: string) {
   assert.ok(top < input && input < bottom, frame);
   assert.equal(lines.filter(line => line.includes('╭')).length, 1, frame);
 }
+
+test('login dialog accepts a whitespace-padded URL, retries bad tokens and saves the cookie', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const directory = await mkdtemp(join(tmpdir(), 'dsht-dialog-auth-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cookies = new CookieStore(directory);
+  const controller = new Controller({ base: fixture.url,
+    authenticate: (client, token) => login(client, token, cookies) });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => ui.lastFrame()?.includes('Paste the complete URL') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /export |DSH_TOKEN/);
+  await pressKey(ui, 'not-a-url');
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Enter the complete login URL') === true);
+  assert.equal(controller.state.status, 'Login required');
+  await pressKey(ui, '\u0015');
+  await pressKey(ui, `${fixture.url}/?token=wrong`);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('Paste the complete URL') === true);
+  await pressKey(ui, `  ${fixture.url} / ?token= fixture- token \n`);
+  await pressKey(ui, '\r');
+  await until(() => controller.state.online && ui.lastFrame()?.includes('Choose workspace') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /fixture-token|Paste the complete URL/);
+  assert.ok(await cookies.load(new URL(fixture.url).origin));
+});
 
 test('startup status refreshes after connection and reconnect while copy mode retains its frame', async t => {
   const fixture = await host(); t.after(() => fixture.close());

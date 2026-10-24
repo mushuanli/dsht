@@ -75,6 +75,8 @@ function verifierLabel(title: string): string {
 
 /** Mutating operations: foreground work, local edits, and control cancellation with its own admission. */
 export interface Actions {
+  /** Submit the host's printed login URL without restarting the client. */
+  login(url: string): void;
   /** Claim the single foreground slot for work the front end orchestrates itself (paging, loading).
    *
    * The controller owns the slot, the abort controller and the identity; the front end only supplies
@@ -221,7 +223,7 @@ export interface ControllerOptions {
   /** Builds one connection client; defaults to a plain `Client` for `base`. */
   makeClient?: () => Client;
   /** Authenticates one connection client; defaults to the supplied token. */
-  authenticate?: (client: Client) => Promise<void>;
+  authenticate?: (client: Client, token?: string) => Promise<void>;
   /** Billing ledger; absent disables every cost feature. */
   costs?: CostLedger;
   /** History retention budgets. */
@@ -333,7 +335,7 @@ export class Controller implements ControllerStore, ConnectionListener {
   constructor(options: ControllerOptions) {
     const { base, token, initialSession, costs } = options;
     const makeClient = options.makeClient ?? (() => new Client(base));
-    const authenticate = options.authenticate ?? (client => client.authenticate(token ?? ''));
+    const authenticate = options.authenticate ?? ((client, credential) => client.authenticate(credential ?? ''));
     const historyLimits = options.historyLimits ?? DEFAULT_HISTORY_LIMITS;
     const shellEnabled = options.shellEnabled ?? true;
     this.base = base; this.costs = costs; this.historyLimits = historyLimits;
@@ -563,6 +565,7 @@ export class Controller implements ControllerStore, ConnectionListener {
       refreshCosts: signal => this.runAction('cost', 'Refreshing costs…', operation => this.refreshCosts(signal === undefined ? operation : AbortSignal.any([signal, operation]))),
       loadPresetNames: () => this.loadPresetNames(),
       clearFailure: () => this.clearFailure(),
+      login: url => this.connection.login(url),
       enterPath: () => this.enterPath(),
       pickWorkspace: id => this.pickWorkspace(id),
       showChat: () => this.showChat(),

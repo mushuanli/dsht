@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-第一次运行时，需要使用 DSH_URL 传入 `npx @deepseek-ai/dsh web` 启动时打印的 url:
+第一次运行时，先启动 `npx @deepseek-ai/dsh web`，再运行 dsht，将打印的完整登录链接粘贴到弹出的登录框中：
 ```bash
-export DSH_URL='http://127.0.0.1:3080/?token=<token>' && npx @itookit/dsht
+npx @itookit/dsht
 ```
 以后运行只需要执行(当然必须确认`npx @deepseek-ai/dsh web` 已经启动):
 ```bash
@@ -161,7 +161,9 @@ DeepSeek Harness 往往运行在性能更强、环境更完整的开发工作站
 npx @itookit/dsht
 ```
 
-仅在首次运行以及已保存的 cookie 过期后需要 token。可以单独导出它，也可以直接导出 `dsh web` 打印的完整地址，由客户端拆出其中的 `?token=` 参数：
+首次运行以及已保存的 cookie 过期后会自动弹出登录框。直接粘贴 `dsh web` 打印的完整地址（含 `?token=…`），按 Enter 即可登录；输入中的空白会自动去掉，无需设置环境变量或重启。登录链接须对应当前服务端，只保存兑换得到的 cookie。
+
+脚本或启动参数也可以继续使用环境变量：
 
 ```sh
 export DSH_TOKEN=<token> && npx @itookit/dsht

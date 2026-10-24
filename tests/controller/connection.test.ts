@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '../../src/transport/client.ts';
 import { ConnectionController } from '../../src/controller/connection.ts';
+import { AuthenticationRequired } from '../../src/transport/auth.ts';
 import { initialState, type ControllerStore } from '../../src/state.ts';
 import { until } from '../support/host.ts';
 
@@ -10,6 +11,20 @@ function store(): ControllerStore {
   return { state: initialState(), update(patch) { Object.assign(this.state, patch); },
     selection: () => 0, bumpSelection() {}, busy: () => false };
 }
+
+test('stop releases the connection loop waiting for an interactive login', async () => {
+  const state = store();
+  const connection = new ConnectionController(state, {
+    base: 'http://localhost', token: undefined, initialSession: undefined,
+    makeClient: () => new Client('http://localhost'),
+    authenticate: async () => { throw new AuthenticationRequired('Need token'); },
+  }, { begin() {}, ready: async () => {}, ended: async () => {}, event: () => true });
+  connection.start();
+  await until(() => state.state.status === 'Login required');
+  assert.throws(() => connection.login('http://other-host/?token=secret'), /match the current host/);
+  assert.throws(() => connection.login('http://localhost/'), /include \?token/);
+  await connection.stop();
+});
 
 test('stop during authentication never starts the next connection phase', async () => {
   const client = new Client('http://localhost');

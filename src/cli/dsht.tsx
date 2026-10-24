@@ -54,7 +54,8 @@ With no command, choose a workspace and session interactively.
   --help               Show this help
 
 The default host is http://127.0.0.1:3080.
-First login: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web.
+First login: run dsht and paste the URL printed by dsh web into the login dialog.
+Scripted runs and list commands can export DSH_TOKEN, or DSH_URL as that same URL.
 Cookies are saved per server origin and reused on later starts. Tokens are never saved.
 /cost shows the session, day, week and month CNY estimates.
 /prompt lists saved shortcut prompts; /prompt TEXT saves one in the config directory's
@@ -195,7 +196,7 @@ async function main(): Promise<void> {
   });
   const controller = new Controller({
     base: url, token, initialSession: values.session === 'new' ? undefined : values.session,
-    authenticate: client => login(client, token, store),
+    authenticate: (client, credential) => login(client, credential, store),
     localDirectory, verifier,
     // Verdicts belong to this client rather than to the reviewed tree, and the client's own
     // directory is the one place it is always allowed to write; DSHT_VERDICT_ROOT points them

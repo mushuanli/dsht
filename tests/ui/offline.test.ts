@@ -22,10 +22,11 @@ test('the first attempt is named as connecting, never as offline', () => {
   assert.ok(guidance.lines.some(line => line.trim() === HOST_COMMAND));
 });
 
-test('a refused credential asks for the printed URL or DSH_TOKEN', () => {
+test('a refused credential asks for the printed URL in the login dialog', () => {
   const guidance = offlineGuidance({ status: 'Login required', base: 'http://host:3080/', lastFailure: '401 unauthorized' });
   assert.equal(guidance.title, 'Login required · http://host:3080/');
-  assert.ok(guidance.lines.some(line => line.includes('DSH_TOKEN')));
+  assert.ok(guidance.lines.some(line => line.includes('login dialog')));
+  assert.ok(guidance.lines.every(line => !line.includes('export ')));
   assert.equal(guidance.detail, '401 unauthorized');
 });
 

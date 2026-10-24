@@ -47,7 +47,7 @@ export async function login(client: Client, token: string | undefined, store: Co
     try { await client.call('session/list', { _request: {} }); return; }
     catch (error) { if (!(error instanceof HttpError) || error.status !== 401) throw error; }
   }
-  if (!token) throw new AuthenticationRequired('Login required: export DSH_TOKEN, or export DSH_URL as the URL printed by dsh web');
+  if (!token) throw new AuthenticationRequired('Login required: paste the URL printed by dsh web into the login dialog, or export DSH_TOKEN for scripted runs');
   await client.authenticate(token);
   const session = client.persistentCookie;
   if (session) await store.save(client.base.origin, session.cookie, session.expiresAt);
