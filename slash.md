@@ -511,7 +511,7 @@ headless 没有；而 authorize 处理的是业务前置条件，两个前端**�
 
 | # | 条件 | 行为 | 为什么在这个位置 |
 |---|---|---|---|
-| 1 | copy mode | 退出复制模式 | 复制模式拥有最高键盘优先 |
+| 1 | copy mode | 退出复制模式 | 复制模式拥有最高键盘优先；Esc 只退出模式，其他按键退出并把字符交给输入框 |
 | 2 | `composerIntent` | 放弃编辑、清空草稿 | 借用输入框的编辑是"最当前"的交互 |
 | 3 | 可取消操作进行中 | abort（必要时顺带关列表） | 取消正在跑的比关闭静态面板更紧迫 |
 | 4 | 待答审批/提问 | 关闭整批 / 从自由输入退回 | 待答独占键盘 |
@@ -1186,7 +1186,7 @@ type LoopTerminalReason =
 | 本地源不需要流：`lines` 直接可读，打开它不发 host 请求 | `tests/controller/sources.test.ts` | §7.5 |
 | 整屏视图：`Ctrl+O` 打开最新源、箭头/PgUp/PgDn/滚轮滚动、`Esc` 关闭并交回 composer | `tests/ui/app.test.tsx` | §7.5/§5.4 |
 | 本地块渲染与源映射：`!` 栏指向自身、`note` 指向被 `link` 的会话；`!` 只有标题栏可点、`note` 整块可点 | `tests/ui/shell-blocks.test.ts` | §7.5 |
-| 点击打开该源（含点 `/loop` 的 `view` 行打开 verifier 会话），点普通行仍进入复制模式 | `tests/ui/app.test.tsx` | §7.5 |
+| 点击打开该源（含点 `/loop` 的 `view` 行打开 verifier 会话），普通行单击不冻结，拖过至少 5 个非空白字符才进入复制模式 | `tests/ui/app.test.tsx` | §7.5 |
 | 记录滚动（`visibleStart > 0`）时点击仍命中正确的行，而不只是整份记录都在屏上时 | `tests/ui/app.test.tsx` | §7.5 |
 | SGR 左键解码：只有 `\x1b[<0;C;RM` 是点击，其余按键/释放/拖动都不是 | `tests/session/history.test.ts` | §7.5 |
 

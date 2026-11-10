@@ -1,9 +1,9 @@
 /** Ink terminal interface: startup pickers, transcript, and slash-command composer. */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { mocha, ThemeContext, type Theme } from './theme/index.ts';
-import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from 'ink';
-import { useMouseWheel } from './input/mouse.ts';
-import { useTerminalFocus } from './input/focus.ts';
+import { Box, Text, measureElement, useApp, useInput, useStdin, useStdout, type DOMElement } from 'ink';
+import { draggedCharacters, isMouseReport, useMouseWheel } from './input/mouse.ts';
+import { isFocusReport, useTerminalFocus } from './input/focus.ts';
 import { useAttentionNotify } from './use-attention-notify.ts';
 import { TextInput } from './input/input.tsx';
 import { LoginDialog } from './dialogs/login.tsx';
@@ -54,6 +54,9 @@ const PEEK_PAGE = 10;
 /** How long a Ctrl+C that could not exit stays armed to exit on the next press. */
 const FORCE_EXIT_MS = 5000;
 
+/** Nonblank characters a drag must cross before the display freezes for native selection. */
+const DRAG_SELECT_CHARS = 5;
+
 /** The caller owns starting and stopping the controller around the Ink render lifetime.
  * @param props - Controller, panel lifetime and semantic theme.
  * @returns The rendered terminal interface.
@@ -65,6 +68,15 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [copyMode, setCopyMode] = useState(false);
+  // The bytes behind the decoded event Ink hands to `useInput`: a mouse or focus report arrives as
+  // text, and only the raw sequence tells it apart from a keystroke.
+  const { internal_eventEmitter } = useStdin();
+  const rawInput = useRef('');
+  useEffect(() => {
+    const remember = (raw: string) => { rawInput.current = raw; };
+    internal_eventEmitter.prependListener('input', remember);
+    return () => { internal_eventEmitter.removeListener('input', remember); };
+  }, [internal_eventEmitter]);
   const historyWindow = state.session.window;
   /** The operation the controller owns right now; the front end only renders it. */
   const foreground = controller.queries.foreground;
@@ -304,13 +316,23 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
   }
   useInput((_value, key) => {
     if (key.eventType === 'release') return;
+    // A report is not a keystroke. The terminal's focus reports and the mouse reporting that
+    // scrolling and row clicks rely on both decode as text, and in copy mode the release that
+    // follows the very press that froze the screen is already in flight: reading it as input would
+    // end the mode at the moment it began.
+    if (isMouseReport(rawInput.current) || isFocusReport(rawInput.current)) return;
     if (state.status === 'Login required') {
       if (key.ctrl && _value === 'c') exit();
       return;
     }
     if (copyMode) {
-      if (key.escape || key.ctrl && (_value === 's' || _value === 'c')) setCopyMode(false);
-      return;
+      // The mode's own keys resume the live display and nothing more. Any other stroke means the
+      // operator is writing, not selecting: the composer keeps focus while the display is frozen,
+      // so the character has already landed in the draft and only the freeze has to get out of its
+      // way. A click that froze the screen by accident therefore costs one keystroke, not a mode
+      // the keyboard cannot leave.
+      if (key.escape || key.ctrl && (_value === 's' || _value === 'c')) { setCopyMode(false); return; }
+      setCopyMode(false);
     }
     // The loop form owns every key but Ctrl+C: it reads them itself, and leaving them to this handler
     // would let a digit meant for a value start a composer draft or a recall step.
@@ -746,10 +768,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
       action: () => { setScroll(0); operate(() => controller.actions.selectSession(session.sessionId)); } })),
     { key: '@back', label: '← Workspaces', action: () => operate(() => controller.actions.showPicker('workspaces')) },
   ];
-  const showHistoryHint = dialogOpen || displayTranscript.hasMore || !!historyWindow;
   const historyView = useHistoryView({
     sessionId: state.sessionId, source: state.session.record, display: displayTranscript, detached: !!historyWindow,
-    width, rows: conversationRows, showHint: showHistoryHint,
+    // Everything that needs a hint line even when the reader is at the bottom. A scrolled-away
+    // position adds its own row inside the hook, which is the only place it is known.
+    width, rows: conversationRows, showHint: dialogOpen || displayTranscript.hasMore || !!historyWindow,
     protect: thoughtList || historyQuery !== undefined && !contentSearch,
     enabled: !copyMode && state.screen === 'chat', online: state.online, busy: foreground !== undefined,
     revision: state.version, blocks: state.shell.blocks,
@@ -761,8 +784,23 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     pin: value => controller.actions.pinHistory(value),
     closePanels: () => { setHistoryPanel(undefined); openThoughts(false); }, notify: setNotice,
   });
-  const { layout, merged, totalRows, pageSize, position, reasoningOverrides, liveReasoning,
+  const { layout, merged, totalRows, pageSize, position, hintRow, reasoningOverrides, liveReasoning,
     setScroll, setReasoningOverrides, setLiveReasoning, scrollHistory, jumpHistory, historyOperation } = historyView;
+  // The line under the transcript, written here because the root is the only place that knows both
+  // the reading position and which surface is open. `back` makes the row a control: a press on it
+  // leaves the reading position instead of starting a selection, which is what a reader who
+  // scrolled up needs most and used to have to reach by scrolling all the way down.
+  const historyHint: { text: string; back: boolean } | undefined = !hintRow ? undefined
+    : dialogOpen ? { text: 'Wheel/PgUp/PgDn · Scroll history', back: false }
+    : historyWindow !== undefined ? { text: 'Earlier history · /latest or a click returns to live conversation', back: true }
+    : position > 0 ? { text: `↓ ${position} ${position === 1 ? 'row' : 'rows'} below · click to jump to bottom`, back: true }
+    : displayTranscript.hasMore ? { text: 'Scroll up or /older to load earlier history', back: false }
+    : undefined;
+  /** Leave the reading position: the live bottom, or the live conversation behind a history page. */
+  function returnToBottom(): void {
+    setScroll(0);
+    if (historyWindow !== undefined) controller.actions.showLatest();
+  }
   const { length } = layout;
   // The read-only view lays out its own transcript, so its fold mode never leaks into the
   // conversation's, and a local source needs no layout at all: it already holds plain lines.
@@ -824,17 +862,22 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     if (statusExpanded && statusOverflow) setStatusScroll(value => Math.max(0, value - direction * 3));
     else scrollHistory(direction * 3);
   }, !copyMode && state.screen === 'chat', cell => {
-    // A bar stands for one readable source, and only its own row is the bar: its output rows below
-    // are content, and a press on them still starts a selection. Everything else is copy mode.
+    // Controls react to a click. Text only arms a drag; a press alone never freezes the screen.
     if (dialogOpen) return;
     const index = cell.row - 1 - transcriptTop;
-    if (index < 0 || index >= visible.length) { setCopyMode(true); return; }
+    // The hint line is the one control inside the viewport: it is pinned to the bottom edge and
+    // names what a press does, so it acts as a bar and never starts a selection.
+    if (historyHint?.back === true && index === Math.max(visible.length, conversationRows - 1)) { returnToBottom(); return; }
+    if (index < 0 || index >= visible.length) return;
     // Screen line -> merged row: the viewport starts at `visibleStart`, so a short record's first row
     // and a scrolled one's are both placed correctly. Reading the index directly only worked when the
     // whole transcript fit on screen, which is exactly what a real session is not.
     const source = merged.sources.get(visibleStart + index);
     if (source !== undefined) { controller.actions.openPeek(source); return; }
-    setCopyMode(true);
+    return true;
+  }, (start, end) => {
+    if (dialogOpen) return;
+    if (draggedCharacters(visible.map(row => row.text), transcriptTop, start, end) >= DRAG_SELECT_CHARS) setCopyMode(true);
   });
   // Clamp the stored offset once the source's length is known, so scrolling back down starts moving
   // immediately instead of burning the overshoot first.
@@ -940,8 +983,8 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
     <Frozen frozen={statusPaused} identity={state.sessionId ?? ""}>{statusNotice && offline === undefined && <Text dimColor wrap="truncate-end">{safeText(state.status)}</Text>}</Frozen>
     {state.lastFailure && offline === undefined && <Text color={theme.colors.error}>{state.lastFailure}</Text>}
     </Box>
-      {state.screen === 'chat' && (peek === undefined ? <ChatViewport rows={visible} showHistoryHint={showHistoryHint} dialogOpen={dialogOpen}
-        historyWindow={!!historyWindow} frozen={displayPaused}
+      {state.screen === 'chat' && (peek === undefined ? <ChatViewport rows={visible} hint={historyHint?.text} dialogOpen={dialogOpen}
+        frozen={displayPaused}
         identity={`${width}:${state.sessionId}:${position}:${pageSize}`} boxRef={conversationBox} />
         : <PeekPanel source={peek.source} {...(peek.error === undefined ? {} : { error: peek.error })} rows={peekVisible}
           position={peekPosition} total={peekTotal} width={width} now={Date.now()} boxRef={peekBox} />)}
@@ -1048,7 +1091,11 @@ export function App({ controller, panelLifetimeMs = PANEL_LIFETIME_MS, theme = m
         <TextInput value={input} onChange={setInput} onCursorChange={setCursor} onSubmit={() => { void submit(input); }}
           reservedKeys={approvalKeysActive ? ['1','2','3'] : questionKeysActive ? ['1','2','3','4','5','6','7','8','9', ...(question?.multiSelect === true ? [' '] : [])] : !removal && !models && !searchResults && (state.screen === 'workspaces' || state.screen === 'sessions') ? ['d'] : surfaceReservedKeys.length ? surfaceReservedKeys : undefined}
           width={draftWidth} maxRows={composerRows} promptColor={answerPending || panelParksComposer ? theme.colors.muted : theme.accent}
-          focus={!copyMode && !answerPending && !loopForm && !panelParksComposer} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
+          // The composer keeps focus in copy mode: a keystroke is the operator's way out of the
+          // freeze, and every mode key but the three exits is a character that must land in the
+          // draft rather than in a focused nothing. The frame is frozen, so the draft it belongs
+          // to comes back into view at the same moment the mode ends.
+          focus={!answerPending && !loopForm && !panelParksComposer} placeholder={state.screen === 'path' ? 'Absolute directory path on host' : 'Message, @host-file, or /help'} />
       {referenceOpen && <ReferenceMenu matches={matches} index={referenceIndex} />}
       {loopMenuOpen && <LoopMenu records={loopCandidates} index={loopMenuCursor} source={controller.queries.loopSource} />}
       </Box>}

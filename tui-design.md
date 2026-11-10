@@ -280,7 +280,7 @@ PromptRecord 属于 `session/transcript.ts` 的投影输出，提示词索引消
 
 **扩展是数据而非新分支**：命令的效果与文案由 `controller/commands.ts` 的 `runCommand` 决定，它返回 `CommandResult`（`disposition` + `outcome` + `ViewEffect[]`，数组顺序即执行顺序），`ui/app.tsx` 只按顺序应用这些表现动词，**不认识任何命令**；架构测试据此断言组合根只判定 `ignore`/`reference` 两种 UI 模式，且不得出现 `switch (executable.kind)`。**管线、并发、事件流的单一事实源是 `slash.md`**，本节只保留分层边界的概述。`usePanels` 的 `surfaces` 表描述每个面板的 `open`、是否占用方向键与数字键、是否寄存输入框（`parksComposer`）及保留键，关闭操作由同一 hook 处理，`dialogOpen`／`panelBlocksKeys`／`parksComposer`／`recallBlocked`／`reservedKeys`／`closePanels` 全部由它派生，加一个面板只写一行加自己的渲染；`ComposerIntent`（`hint`＋`emptyNotice`＋`commit`）让任意命令借用输入框编辑条目（Enter 提交、Esc 放弃）；`COMMAND_POLICY`（`slash/registry.ts`）承载路由约束，见 3.4。
 
-阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话，而 `dialogOpen = modalOpen || referenceOpen` 只回答"是否要让出一行布局"；`modalOpen`（面板、待答交互、非 chat 屏）才是"停下来读的一屏"，它决定让出布局，但**不再决定是否停表**。输入框里的 `@` 补全列表是正在写的一行而不是读的一屏，把它也算作暂停面会让状态栏报出并不存在的暂留，并遮住唯一能解释按键归属的界面。**画面冻结与运行态冻结是两件事**：`displayPaused` 冻结背后的对话内容（页眉与 transcript 保持打开时的画面），而状态投影只由 `copyMode` 冻结（`statusPause = copyMode ? 'copy' : undefined`）——面板与历史回看不再暂停计时，因为它们是同一份运行态的另一种宽度，冻住会印出一个已经不再成立的读数；`/status` 面板打开期间随新投影即时更新。工作区选择、会话选择与主机路径输入界面的连接提示和状态栏一直保持实时。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话框外无修饰左键）额外关闭鼠标上报，恢复终端原生选区；后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
+阅读时冻结的机制：`Frozen` 是一个按 `frozen && identity` 比较的 `memo` 包装。`displayPaused = copyMode || dialogOpen` 冻结标题与对话，而 `dialogOpen = modalOpen || referenceOpen` 只回答"是否要让出一行布局"；`modalOpen`（面板、待答交互、非 chat 屏）才是"停下来读的一屏"，它决定让出布局，但**不再决定是否停表**。输入框里的 `@` 补全列表是正在写的一行而不是读的一屏，把它也算作暂停面会让状态栏报出并不存在的暂留，并遮住唯一能解释按键归属的界面。**画面冻结与运行态冻结是两件事**：`displayPaused` 冻结背后的对话内容（页眉与 transcript 保持打开时的画面），而状态投影只由 `copyMode` 冻结（`statusPause = copyMode ? 'copy' : undefined`）——面板与历史回看不再暂停计时，因为它们是同一份运行态的另一种宽度，冻住会印出一个已经不再成立的读数；`/status` 面板打开期间随新投影即时更新。工作区选择、会话选择与主机路径输入界面的连接提示和状态栏一直保持实时。启动选择器若沿用对话的冻结条件，会话标识不变会让连接前的 `Offline`／`Connecting…` 画面一直保留。复制模式（`/copy`、Ctrl+S 或对话正文中无修饰左键拖过至少 5 个非空白字符）额外关闭鼠标上报，恢复终端原生选区；页眉、输入框与简短对话下方的空白不是选择起点，按在那里不冻结画面，避免一次误点把键盘夺走。冻结期间输入框保持焦点：Esc／Ctrl+S／Ctrl+C 只退出模式，其他按键同样退出并把字符留在草稿里，所以复制模式是可读的停顿而不是一个键盘出不去的地方（鼠标或焦点上报按原始字节识别，不算按键）。后台接收与内存回收继续进行，仅窗口尺寸变化是明确的重绘例外。
 
 ### 2.6 关键架构决策
 
@@ -1132,7 +1132,7 @@ C4Dynamic
 | 已连接（对话） | `selectSession` 收到 snapshot | 断线、切换会话或退出 |
 | 忙碌 | `perform()` 开始 | 操作成功或失败 |
 | 待答 | 收到识别的 waterfall 且目标会话被选中 | 显式回答、`/cancel` 或连接结束 |
-| 复制冻结 | `/copy`、Ctrl+S 或无修饰左键 | Esc、Ctrl+S、Ctrl+C |
+| 复制冻结 | `/copy`、Ctrl+S 或左键拖过至少 5 个非空白字符 | Esc、Ctrl+S、Ctrl+C |
 
 必须保持的不变量：
 
@@ -1271,7 +1271,7 @@ C4Component
 
 #### 5.2.5 终端状态
 
-鼠标上报在 `useMouseWheel` 挂载且 `screen === 'chat'` 时写入 `\x1b[?1006h\x1b[?1000h`（SGR 扩展 + 按键跟踪），在禁用或卸载时写入 `\x1b[?1000l\x1b[?1006l` 恢复。进入复制模式会禁用上报并释放捕获，以便终端原生选择；对话框期间仍保持上报，使滚轮与 PgUp/PgDn 可以滚动背景对话，但左键不进入复制模式，需要原生选择时按 Ctrl+S 冻结整个显示。该状态不落盘，进程异常终止时由终端自身的会话结束或下一次启动重新协商。
+鼠标上报在 `useMouseWheel` 挂载且 `screen === 'chat'` 时写入 `\x1b[?1006h\x1b[?1000h\x1b[?1002h`（SGR 扩展 + 按键与按住拖动跟踪），在禁用或卸载时写入 `\x1b[?1002l\x1b[?1000l\x1b[?1006l` 恢复。进入复制模式会禁用上报并释放捕获，以便终端原生选择；对话框期间仍保持上报，使滚轮与 PgUp/PgDn 可以滚动背景对话，但左键不进入复制模式，需要原生选择时按 Ctrl+S 冻结整个显示。该状态不落盘，进程异常终止时由终端自身的会话结束或下一次启动重新协商。滚离底部时，视口底部固定的一行是第二个点击目标：它不进入复制模式，而是回到实时底部（历史页里则回到实时对话）。这一行的高度由 `useHistoryView` 在 `scroll > 0` 时预留——只有它知道读者离开了底部——因此提示不会在满屏时被 `overflowY: hidden` 裁掉，会占用一行正文空间；`ChatViewport` 只接收文案，位置与去向由组合根决定。
 
 草稿与视口位置：输入从空变为非空、且首字符不是 `/` 时，视口回到实时末端（等价于 `setScroll(0)`），因此开始写消息不必先滚到底；以 `/` 开头的命令不改变视口，草稿已存在时继续编辑或在其中向上滚动同样保留读者当前位置。
 

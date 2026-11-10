@@ -613,7 +613,7 @@ test('mouse scrolling loads history and slash search selects a matching record',
   assert.equal(fixture.calls.filter(call => call.method === 'session/page').length, folded + 1);
   const page = fixture.calls.filter(call => call.method === 'session/page').at(-1)!;
   assert.equal(object(object(object(page.payload).args).request).beforeSeq, 20);
-  await press('\x1b[<0;3;4M');
+  await press('\x13');
   assert.match(ui.lastFrame()!, /Copy mode/);
   await press('\x13');
   await press('/search history-record-5'); await press('\r');
@@ -1247,6 +1247,67 @@ test('long conversations keep the header visible and show keyboard help only whe
   await pressKey(ui, '/help'); await pressKey(ui, '\r');
   await until(() => ui.lastFrame()?.includes('Enter send · Tab complete') === true);
   assert.equal(ui.lastFrame()!.split('\n')[0], header);
+});
+
+test('a scrolled conversation offers a clickable line back to the bottom', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.record.ready);
+  fixture.follow({ type: 'event', event: { seq: 10, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: Array.from({ length: 100 }, (_, i) => `Response line ${i}`).join('\n') }] } } } });
+  await until(() => ui.lastFrame()?.includes('Response line 99') === true);
+
+  // Scrolling away from the bottom reserves a line that names the way back: the reader is farthest
+  // away from the control they need most, so it does not wait until they scroll down again.
+  await pressKey(ui, '\x1b[5~');
+  await until(() => /click to jump to bottom/.test(ui.lastFrame() ?? '') === true);
+  assert.match(ui.lastFrame()!, /↓ \d+ rows? below · click to jump to bottom/);
+
+  // The count is the distance to the bottom, so output that arrives while reading grows it instead
+  // of pulling the reader along: the line stays a measurement, not a decoration.
+  const below = () => Number(/↓ (\d+) rows? below/.exec(ui.lastFrame() ?? '')?.[1] ?? 0);
+  const before = below();
+  assert.ok(before > 0, ui.lastFrame()!);
+  fixture.follow({ type: 'event', event: { seq: 11, type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: 'Arrived while reading\nSecond line' }] } } } });
+  await until(() => below() > before);
+
+  const hintRow = ui.lastFrame()!.split('\n').findIndex(line => line.includes('click to jump to bottom'));
+  assert.ok(hintRow >= 0, ui.lastFrame()!);
+  await pressKey(ui, `\u001b[<0;5;${hintRow + 1}M`);
+  await until(() => ui.lastFrame()?.includes('Response line 99') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /click to jump to bottom/);
+  // A press on the control is not a press on the transcript: it must not freeze the display.
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+});
+
+test('a click on the history hint returns to the live conversation', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  fixture.followSnapshot = { type: 'snapshot', cursor: 50, hasMore: true, assistantStream: { revision: 0 }, records: [
+    { type: 'event', event: { seq: 50, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'Recent prompt' }] } } },
+  ] };
+  fixture.onPage = async (): Promise<ObjectValue> => ({ records: [
+    { type: 'event', event: { seq: 0, type: 'user/message', surfaceOp: 'append', data: { content: [{ type: 'text', text: 'needle from an older page' }] } } },
+  ], hasMore: false });
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start(); await until(() => controller.queries.record.ready);
+  const live = controller.queries.record;
+  await pressKey(ui, '/search needle'); await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('#0 You · needle from an older page') === true);
+  await pressKey(ui, '\r');
+  await until(() => ui.lastFrame()?.includes('or a click returns to live conversation') === true);
+
+  // The hint names /latest, and the press it advertises does the same thing: a page of old history
+  // should not need a typed command to leave.
+  const hintRow = ui.lastFrame()!.split('\n').findIndex(line => line.includes('or a click returns to live conversation'));
+  assert.ok(hintRow >= 0, ui.lastFrame()!);
+  await pressKey(ui, `\u001b[<0;5;${hintRow + 1}M`);
+  await until(() => ui.lastFrame()?.includes('Recent prompt') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /or a click returns/);
+  assert.equal(controller.queries.record, live);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
 });
 
 test('search opens an isolated old page and /latest returns to new live messages', async t => {
@@ -1993,7 +2054,7 @@ test('restored session prompts are available before any new submission', async t
 });
 
 
-test('left click freezes the display for native selection until explicit resume', async t => {
+test('dragging five characters freezes the display for native selection until resume', async t => {
   const fixture = await host(); t.after(() => fixture.close());
   const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
   const ui = render(<App controller={controller} />);
@@ -2004,11 +2065,23 @@ test('left click freezes the display for native selection until explicit resume'
   for (const report of ['\x1b[<2;3;4M', '\x1b[<0;3;4m', '\x1b[<32;3;4M']) {
     await pressKey(ui, report); assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
   }
-  await pressKey(ui, '\x1b[<0;3;4M');
+  fixture.follow({ type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: 'Selectable message for dragging' }] } } });
+  await until(() => ui.lastFrame()?.includes('Selectable message for dragging') === true);
+  const row = ui.lastFrame()!.split('\n').findIndex(line => line.includes('Selectable message')) + 1;
+  await pressKey(ui, `\x1b[<0;2;${row}M`);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  await pressKey(ui, `\x1b[<32;6;${row}M`); // Four characters do not enter copy mode.
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  await pressKey(ui, `\x1b[<0;6;${row}m`); // Release cancels the pending gesture.
+  await pressKey(ui, `\x1b[<32;20;${row}M`);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  await pressKey(ui, `\x1b[<0;2;${row}M`);
+  await pressKey(ui, `\x1b[<32;7;${row}M`);
   assert.match(ui.lastFrame()!, /Copy mode/);
   await until(() => ui.lastFrame()?.includes('⏸ copy') === true);
   const frozen = ui.lastFrame();
-  fixture.follow({ type: 'event', event: { seq: 1, type: 'user/message', surfaceOp: 'append',
+  fixture.follow({ type: 'event', event: { seq: 2, type: 'user/message', surfaceOp: 'append',
     data: { content: [{ type: 'text', text: 'Received while selecting' }] } } });
   await until(() => controller.queries.record.messages.some(message => message.text.includes('Received while selecting')));
   await pressKey(ui, '\x1b[<0;3;4m');
@@ -2805,13 +2878,60 @@ test('clicking a local command bar opens that run read-only, other rows still co
   assert.match(ui.lastFrame()!, /shell:1 · local process · ended/);
   await pressKey(ui, '\u001b');
 
-  // A press on an ordinary conversation row is not a click target: it still enters copy mode.
+  // Ordinary conversation rows ignore clicks; explicit copy mode is still available.
   await until(() => ui.lastFrame()?.includes('Message, @host-file, or /help') === true);
   const messageRow = ui.lastFrame()!.split('\n').findIndex(line => line.includes('你好'));
   assert.ok(messageRow >= 0, ui.lastFrame()!);
   await pressKey(ui, `\u001b[<0;5;${messageRow + 1}M`);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  await pressKey(ui, '\x13');
   await until(() => ui.lastFrame()?.includes('Copy mode') === true);
   assert.doesNotMatch(ui.lastFrame()!, /Esc closes/);
+});
+
+test('a click outside the transcript leaves the display live and the keyboard in the draft', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await until(() => ui.lastFrame()?.includes('Message, @host-file, or /help') === true);
+
+  // Reaching for the composer is the common stray click: it used to freeze the display and take
+  // the keyboard, which reads as a hang. Only a transcript row is a place a selection starts.
+  const composerRow = ui.lastFrame()!.split('\n').findIndex(line => line.includes('Message, @host-file, or /help'));
+  assert.ok(composerRow >= 0, ui.lastFrame()!);
+  await pressKey(ui, `\u001b[<0;5;${composerRow + 1}M`);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  await pressKey(ui, 'still typing');
+  assert.match(ui.lastFrame()!, /❯ still typing/);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+});
+
+test('a keystroke in copy mode resumes the display and keeps the character', async t => {
+  const fixture = await host(); t.after(() => fixture.close());
+  const controller = new Controller({ base: fixture.url, token: 'fixture-token', initialSession: 's1' });
+  const ui = render(<App controller={controller} />);
+  t.after(async () => { ui.unmount(); ui.cleanup(); await controller.stop(); });
+  controller.start();
+  await until(() => controller.queries.record.ready);
+  await pressKey(ui, '\u0013');
+  await until(() => ui.lastFrame()?.includes('Copy mode') === true);
+
+  // Output that arrives while the screen is frozen proves the freeze is real, so the resume below
+  // is visible as a change of frame rather than as the absence of a banner.
+  fixture.follow({ type: 'event', event: { seq: 3, type: 'user/message', surfaceOp: 'append',
+    data: { content: [{ type: 'text', text: 'Arrived while reading' }] } } });
+  await until(() => controller.queries.record.messages.some(message => message.text.includes('Arrived while reading')));
+  assert.doesNotMatch(ui.lastFrame()!, /Arrived while reading/);
+
+  // Typing is the way out: the mode's keys resume it, and any other stroke is a character the
+  // reader meant to write, so it survives into the draft instead of being swallowed by the mode.
+  await pressKey(ui, 'draft after the click');
+  await until(() => ui.lastFrame()?.includes('draft after the click') === true);
+  assert.doesNotMatch(ui.lastFrame()!, /Copy mode/);
+  assert.match(ui.lastFrame()!, /Arrived while reading/);
 });
 
 test('the bar /loop leaves in the transcript opens the verification session', async t => {

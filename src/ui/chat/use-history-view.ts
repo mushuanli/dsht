@@ -19,6 +19,7 @@ interface HistoryViewOptions<S extends HistorySource> {
   detached: boolean;
   width: number;
   rows: number;
+  /** A hint line to show even at the bottom; the reader's own scroll adds one from inside. */
   showHint: boolean;
   protect: boolean;
   enabled: boolean;
@@ -76,7 +77,12 @@ export function useHistoryView<S extends HistorySource>(options: HistoryViewOpti
     [display, display.version, width, folds, liveReasoning]);
   const merged = useMemo(() => mergeShellRuns(layout, options.blocks, width),
     [layout, options.blocks, options.revision, width]);
-  const pageSize = Math.max(1, options.rows - (options.showHint ? 1 : 0));
+  // The hint line is a control as much as it is text, so it keeps its row while the reader is
+  // scrolled away from the bottom: getting back must not depend on scrolling down first, and a
+  // line drawn under a full viewport would otherwise be clipped. Only this hook sees that the
+  // reader left the bottom, so the caller's own reasons are combined with its scroll here.
+  const hintRow = options.showHint || scroll > 0;
+  const pageSize = Math.max(1, options.rows - (hintRow ? 1 : 0));
   const totalRows = merged.total;
   const maxScroll = Math.max(0, totalRows - pageSize);
   const previousView = useRef({ source, display, count: totalRows, first: layout.first, folds, liveReasoning });
@@ -133,6 +139,6 @@ export function useHistoryView<S extends HistorySource>(options: HistoryViewOpti
       }, 'Jumping to a message…');
     } finally { if (jumpAbort.current === abort) jumpAbort.current = undefined; }
   }
-  return { layout, merged, totalRows, pageSize, position, reasoningOverrides: folds, liveReasoning,
+  return { layout, merged, totalRows, pageSize, position, hintRow, reasoningOverrides: folds, liveReasoning,
     setScroll: scrollTo, setReasoningOverrides, setLiveReasoning, scrollHistory, jumpHistory, historyOperation };
 }

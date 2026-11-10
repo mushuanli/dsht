@@ -4,7 +4,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { historyLayout } from '../../src/session/history.ts';
-import { isMouseReport, mousePress, wheelDirection } from '../../src/ui/input/mouse.ts';
+import { draggedCharacters, isMouseReport, mousePress, wheelDirection } from '../../src/ui/input/mouse.ts';
 import { Transcript } from '../../src/session/transcript.ts';
 import { Controller } from '../../src/controller/controller.ts';
 import { host, snapshot, until } from '../support/host.ts';
@@ -14,6 +14,21 @@ test('history offsets refer to visible messages', () => {
   const layout = historyLayout(transcript, 30);
   assert.equal(layout.offsets.get(0), 0);
   assert.deepEqual(layout.lines, ['❯ User', '你好', '']);
+});
+
+test('drag threshold counts text rather than cells, whitespace or half a wide character', () => {
+  const count = (rows: string[], a: number, b: number) => draggedCharacters(rows, 2,
+    { row: 3, column: a }, { row: 3, column: b });
+  assert.equal(count(['abcdef'], 2, 2), 0);
+  assert.equal(count(['abcdef'], 2, 6), 4);
+  assert.equal(count(['abcdef'], 2, 7), 5);
+  assert.equal(count(['abcdef'], 7, 2), 5);
+  assert.equal(count(['你好世界呀'], 2, 11), 4);
+  assert.equal(count(['你好世界呀'], 2, 12), 5);
+  assert.equal(count(['e\u0301👩‍💻abc'], 2, 8), 5);
+  assert.equal(count(['ab        '], 2, 50), 2);
+  assert.equal(draggedCharacters(['ab', '', 'cde'], 2,
+    { row: 3, column: 2 }, { row: 5, column: 5 }), 5);
 });
 
 test('mouse decoding ignores buttons, motion, releases and horizontal wheels', () => {
