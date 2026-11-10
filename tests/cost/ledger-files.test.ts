@@ -145,12 +145,12 @@ test('a stale scan keeps its own slice and cannot rewrite a newer persisted cut'
   // clock the events were written against rather than by whenever the suite happens to run.
   const clock = () => at('2026-09-10T12:00:00');
   const stale = new CostLedger(DEFAULT_PRICES, directory); await stale.load(clock());
-  await stale.replace('s1', 5, one);
+  await stale.replace('s1', 5, one, clock());
   const newer = new CostLedger(DEFAULT_PRICES, directory); await newer.load(clock());
-  await newer.replace('s1', 9, two);
+  await newer.replace('s1', 9, two, clock());
   assert.equal(newer.total('s1').records, 2);
 
-  await stale.replace('s1', 5, one);
+  await stale.replace('s1', 5, one, clock());
   assert.deepEqual(await readdir(directory), [name('s1')]);
   assert.equal(await cutOf(join(directory, name('s1'))), 9);
   const restarted = new CostLedger(DEFAULT_PRICES, directory); await restarted.load(clock());

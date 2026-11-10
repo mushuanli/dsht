@@ -272,12 +272,16 @@ test('a corrected table re-prices the history a scan folds, including a renamed 
     peak: { input: 3, cacheRead: 0.1, cacheWrite: 3, output: 9 },
     offPeak: { input: 1.5, cacheRead: 0.05, cacheWrite: 1.5, output: 4.5 } };
   const events = costRecords([record(0, at('2026-09-10T10:00:00'))]);
-  const before = new CostLedger(pricesFrom([legacy]), directory); await before.load();
-  await before.replace('s1', 0, events);
+  // The retention window is measured from the clock a slice is written and read against, not from
+  // whenever the suite runs: a fixed fixture day must pin both, or the slice ages out of the window
+  // and the read-back is a deleted file rather than a re-priced total (COST_WINDOW_DAYS = 60).
+  const clock = at('2026-09-10T12:00:00');
+  const before = new CostLedger(pricesFrom([legacy]), directory); await before.load(clock);
+  await before.replace('s1', 0, events, clock);
   assert.equal(summary(before.total('s1')).amount, 12.1);
-  const after = new CostLedger(DEFAULT_PRICES, directory); await after.load();
+  const after = new CostLedger(DEFAULT_PRICES, directory); await after.load(clock);
   assert.equal(summary(after.total('s1')).amount, 12.1);
-  await after.replace('s1', 1, events);
+  await after.replace('s1', 1, events, clock);
   // The shipped entry declares the superseded name as an alias, so it now bills it at 2/0.04/8.
   assert.equal(summary(after.total('s1')).amount, 10.04);
 });
